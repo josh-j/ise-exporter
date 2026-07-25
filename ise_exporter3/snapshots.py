@@ -25,20 +25,8 @@ from .labels import MAX_LABEL_BYTES
 snapshot_lock = RLock()
 
 # One dataset must never turn a bounded query into row-like Prometheus state.
-#
-# The real invariant is *what a series may be keyed on*, not a round number:
-# NAD-keyed is legitimate (~5,000 at the declared scale, and dead-switch
-# detection needs one series per switch), endpoint-keyed is not (~100,000, which
-# is row storage by another name). So the ceiling is sized to "a fleet dimension
-# times a small constant" with headroom, and the guard that actually matters is
-# the test asserting no dataset keys on an endpoint identity.
-#
-# 20,000 was a round number, and at the declared scale nad_health landed on
-# 20,002 -- a hard failure at exactly the size this exporter is built for.
-MAX_SNAPSHOT_SAMPLES = 50_000
-# Crossing this is not an error, but it is worth knowing about before the hard
-# ceiling arrives: it means a dataset is growing with something it should not be.
-SOFT_SAMPLE_WARNING = 20_000
+# The ceiling and its soft warning are declared in ``config.limits`` -- see
+# limits.py for why they are sized the way they are and what refuses to move.
 
 
 class SnapshotError(ValueError):
@@ -67,12 +55,12 @@ def count_samples(families):
                for family in families)
 
 
-def _validate_sample_count(families):
+def _validate_sample_count(families, ceiling):
     total = count_samples(families)
-    if total > MAX_SNAPSHOT_SAMPLES:
+    if total > ceiling:
         raise SnapshotError(
             f"snapshot of {total} samples exceeds the hard "
-            f"{MAX_SNAPSHOT_SAMPLES}-sample limit")
+            f"{ceiling}-sample limit")
     return total
 
 
@@ -130,9 +118,10 @@ class Publication:
     snapshot, instead of leaving a partial one that reads as authoritative.
     """
 
-    def __init__(self, families, *, provider=""):
+    def __init__(self, families, *, limits, provider=""):
         self.families = tuple(dict.fromkeys(families))
         self.provider = provider
+        self.limits = limits
         self.samples = 0
         self._writers = []
 
@@ -180,7 +169,8 @@ class Publication:
                     writer()
                 for writer in extra_writers:
                     writer()
-                self.samples = _validate_sample_count(self.families)
+                self.samples = _validate_sample_count(
+                    self.families, self.limits.snapshot_samples)
                 _validate_finite(everything)
             except Exception:
                 _restore(saved)

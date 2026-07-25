@@ -4,8 +4,9 @@ A Prometheus exporter for Cisco ISE that treats **source selection and load
 budgeting as the same decision**. Each dataset declares which sources can supply
 it, in preference order, and what one collection costs the ISE persona it talks
 to. Pacing, cooldowns, row ceilings and query timeouts are derived from a
-declared budget plus those costs — they are not tuning knobs — and what the
-exporter actually spent is exported beside what it planned to spend.
+declared budget and scale plus those costs rather than chosen, the budget is
+**enforced** rather than merely checked, and what the exporter actually spent is
+exported beside what it planned to spend.
 
 This is the v3 build, split out of the v2 repository. v2 remains deployed and is
 maintained separately; nothing here is a drop-in replacement for it yet (see
@@ -18,16 +19,18 @@ credentials, `run` collects and serves, sources fail over visibly, the operator
 API answers from live state, and dashboards are generated and contract-tested.
 
 `ROADMAP.md` carries the work this build needs before it can replace v2, with
-the measurements behind each item.
+the measurements behind each item. Every item in it is closed.
 
-Two things are deliberately not done:
+It has run against a live appliance — `laba-ise-001`, ISE 3.3 Patch 11 — with
+all 18 datasets collecting, no `schema_incompatible`, and every view and column
+the generated SQL names present on the real catalogue. Two things remain
+deliberately not done:
 
-- **It has not run against a live appliance.** The Data Connect SQL is written
-  against the ISE 3.3 Patch 11 view contracts and unit-tested against stub
-  transports. Every statement is bounded and every breakdown carries a
-  truncation signal, so a wrong column fails that dataset with
-  `schema_incompatible` rather than damaging anything — but expect to fix column
-  names on first contact with a real MnT.
+- **Aggregate values are unverified.** A statement that runs and returns
+  plausible numbers can still measure the wrong thing, and neither the lab nor
+  the simulator settles that: the lab has almost no RADIUS or TACACS event
+  volume, and the simulator's appliance is synthetic. Behaviour at 5,000 NADs
+  rests on the simulator alone.
 - **pxGrid is not ported.** 18 of 19 datasets collect; `endpoint_attributes`
   (model, OS, MDM) is pxGrid-only by design and is unavailable until the v1
   streaming client is ported. Datasets that can fall back do so visibly, and
@@ -52,7 +55,7 @@ usable as a pre-deploy gate. Passwords are never written to the config file.
 
 ## Configuration
 
-Five sections, roughly twenty keys — see `ise-exporter3.toml.example`, which is
+Six sections, roughly thirty keys — see `ise-exporter3.toml.example`, which is
 commented and is what CI plans against.
 
 | Section | What it decides |
@@ -61,9 +64,15 @@ commented and is what CI plans against.
 | `[scale]` | how many NADs / endpoints / sessions / accounts, so the plan is predictive for your estate |
 | `[targets]` | which ISE personas are reachable, and as whom |
 | `[budget]` | the ceiling per target — requests/hour for REST, duty cycle for Data Connect |
-| `[datasets]` | per dataset: `enabled`, `providers` (an ordered preference list), `interval` |
+| `[limits]` | what one statement, batch and snapshot may return; derived from `[scale]`, shown so it can be read |
+| `[datasets]` | per dataset: `enabled`, `providers` (an ordered preference list), `interval`, and `options` — any bound a dataset puts on its own breakdowns |
 
-Configuration selects sources and cadences, never limits.
+Configuration selects sources and cadences. It does not tune load — that is
+`[budget]` — but every ceiling and every bound is **visible** in it. A ceiling
+nobody can read is not a contract: three of them once disagreed as constants in
+three modules, and `tacacs_activity` failed every collection at the declared
+scale as a result. `plan` prints all of them with where each value came from,
+and a value that is legal but unwise warns at start.
 
 ## What it exports
 
@@ -84,9 +93,10 @@ Every provider also declares how much of the fleet it measures — `complete`,
 
 ## Operator surface
 
-`/metrics` on port 9618 for Prometheus, and a read-only operator API bound to
-localhost on 9619 that answers from state the exporter already computed and
-never reaches ISE:
+`/metrics` on port 9618 for Prometheus — gzipped when the client offers it,
+which it always does, taking a ~6.4 MiB scrape to well under a megabyte on the
+wire — and a read-only operator API bound to localhost on 9619 that answers from
+state the exporter already computed and never reaches ISE:
 
 ```
 /api/v1/health   /api/v1/datasets   /api/v1/providers
@@ -126,13 +136,36 @@ the real transport, so the pacing gate, duty cycle, batch lease and row/byte
 ceilings are the shipped code. It measures cost, cardinality, convergence and
 pacing — never whether a value is correct.
 
+## Checking against a real appliance
+
+The simulator answers every statement from that statement's own SELECT list, so
+a column that does not exist on real ISE is invisible to it. `check_schema3.py`
+is the check that is not:
+
+```bash
+python tools/check_schema3.py --config /etc/ise-exporter3/config.toml --cache schema.json
+```
+
+It costs one Oracle dictionary read — cached after the first run — and settles
+both halves of "will this work here": every `view:` a provider declares, and
+every column the generated SQL names. Non-zero exit on a mismatch, so it can
+gate a deployment.
+
+`tools/seed_lab3.py` creates tagged `ise3-sim-*` NADs and internal users on a
+**lab** appliance, for exercising ERS paging and cache convergence against more
+than a handful of devices, and removes them again with `--remove`. It writes to
+ISE, which nothing else in this repository does.
+
 ## Repository layout
 
 ```
 ise_exporter3/          the exporter; one dataset per file under datasets/
+  limits.py             every row/byte/series ceiling, derived from [scale]
+  rate_limit.py         the token bucket that enforces [budget]
   transports/           one connection per ISE persona
 dashboards3/            generated Grafana dashboards
-tools/                  dashboard generator, scale simulator
+tools/                  dashboard generator, scale simulator,
+                        live-appliance schema check, lab seeder
 powershell/             operator cmdlets over the local API
 ise-exporter3.toml.example
 ```

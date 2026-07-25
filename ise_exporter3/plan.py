@@ -166,10 +166,135 @@ class Plan:
                 "sessions": self.config.scale.sessions,
             },
             "fits_budget": self.fits,
+            "limits": {
+                name: {"value": value, "origin": origin}
+                for name, value, origin, _description
+                in self.config.limits.describe(self.config.scale)
+            },
             "datasets": [entry.to_dict() for entry in self.entries],
             "targets": [target.to_dict() for target in self.targets],
             "warnings": list(self.config.warnings),
         }
+
+
+# A filling cache is never revisited faster than this, whatever the arithmetic
+# says. Below a few seconds the scheduler tick dominates and the collection
+# overhead stops being negligible against the work it does.
+MIN_WARMUP_INTERVAL_SECONDS = 30
+
+
+def warming_entries(plan, target):
+    """Enabled datasets on ``target`` that pay to fill a cache of their own.
+
+    ``charged`` matters here: ``posture_current`` reads the cache
+    ``session_authorization`` fills and issues no detail requests itself, so
+    counting it as a second consumer of the budget would halve the rate the one
+    that actually spends gets.
+    """
+    return tuple(
+        entry for entry in plan.enabled
+        if entry.resolved and entry.target == target and entry.charged
+        and entry.provider.cost.converges
+        and entry.provider.cost.warmup_requests > 0)
+
+
+def warmup_share(plan, entry):
+    """Requests per hour this dataset may spend while its cache fills.
+
+    What is left of the target's ceiling after the steady state everything else
+    on it costs, divided between the caches actually filling. Zero when nothing
+    can be derived -- no declared ceiling, or not a converging provider.
+    """
+    if not entry.resolved or not entry.provider.cost.converges:
+        return 0.0
+    if entry.provider.cost.warmup_requests <= 0:
+        return 0.0
+    budget = plan.config.budget_for(entry.target)
+    # The declared burst if there is one: that is exactly what it is for.
+    ceiling = budget.warmup_requests_per_hour or budget.requests_per_hour
+    if ceiling <= 0:
+        return 0.0
+    planned = next((target.load.requests_per_hour for target in plan.targets
+                    if target.target == entry.target), 0.0)
+    # Conservative on purpose: a filling cache is paying warm-up instead of its
+    # own steady churn, so subtracting the whole planned figure slightly
+    # understates what is available. Erring toward the appliance is the right
+    # direction for a number that decides how hard to push it.
+    available = max(0.0, ceiling - planned)
+    peers = len(warming_entries(plan, entry.target)) or 1
+    return available / peers
+
+
+def warmup_interval(plan, entry):
+    """The cadence a still-filling cache is revisited at, from the budget.
+
+    A converging cache used to be revisited at the cadence its *data* deserves
+    once warm -- ``network_devices`` at six hours -- which meant 500 NADs
+    classified every six hours and 5,000 of them taking sixty hours, while the
+    PAN budget sat at 1% utilisation the entire time. The cadence a cold cache
+    wants is not "how often is this worth re-reading" but "how fast may I
+    spend", and the budget already answers that.
+
+    Never faster than the derived share, even though one cache could finish
+    sooner if it took the whole ceiling while the others waited: a rate this
+    predicts and the token bucket then refuses is worse than a slower rate both
+    agree on. Never slower than the dataset's own cadence either -- that is the
+    case where enforcement, not scheduling, sets the pace.
+    """
+    share = warmup_share(plan, entry)
+    if share <= 0:
+        return 0
+    # The whole per-cycle cost, not just the warm-up batch: enumeration and any
+    # other fixed requests are spent on every pass too, and a cadence derived
+    # from the batch alone quietly asks for more than the budget allows.
+    per_cycle = entry.provider.cost.warmup_requests_for(plan.config.scale)
+    if per_cycle <= 0:
+        return 0
+    seconds = per_cycle / share * 3600.0
+    return int(max(MIN_WARMUP_INTERVAL_SECONDS, min(entry.interval, seconds)))
+
+
+@dataclass(frozen=True)
+class WarmupReport:
+    """What a cold start for one dataset costs, and what actually paces it."""
+
+    interval: int                 # cadence the scheduler uses while filling
+    cycles: int                   # passes needed at the per-cycle budget
+    requests_per_hour: float      # what that cadence asks for
+    available_per_hour: float     # what the target's budget leaves for it
+    seconds: float                # time to full coverage
+    throttled: bool               # True when the budget sets the pace, not the cadence
+
+    @property
+    def paced(self):
+        """True when the warm-up cadence differs from the dataset's own."""
+        return not self.throttled
+
+
+def warmup_report(plan, entry):
+    """Time to full coverage using the pace that will really be applied.
+
+    Two different things can set that pace. Usually it is the cadence above, and
+    the answer is cycles times interval. But when a dataset's own cadence is
+    already shorter than its share of the budget -- ``session_authorization``
+    wants 20,000 MnT requests and runs every five minutes -- scheduling cannot
+    slow it down and the token bucket is what stretches it instead. Reporting
+    the first number in that case is how "2.8x the declared budget" got quoted
+    as a plan for as long as it did.
+    """
+    cost = entry.provider.cost
+    scale = plan.config.scale
+    cycles = cost.cycles_to_warm(scale)
+    interval = warmup_interval(plan, entry) or entry.interval
+    per_cycle = cost.warmup_requests_for(scale)
+    rate = per_cycle * 3600.0 / max(1, interval)
+    share = warmup_share(plan, entry)
+    # A percent of slack, so floating-point noise does not read as throttling.
+    throttled = bool(share) and rate > share * 1.01
+    seconds = per_cycle * cycles / share * 3600.0 if throttled else cycles * interval
+    return WarmupReport(
+        interval=interval, cycles=cycles, requests_per_hour=rate,
+        available_per_hour=share, seconds=seconds, throttled=throttled)
 
 
 def _select(dataset, dataset_config, config):
@@ -325,6 +450,44 @@ def _dataset_rows(plan):
     return rows
 
 
+def _bound_rows(plan):
+    """Every dataset option that narrows what gets published, and its value.
+
+    A dataset that keeps the top K of something states K here. The alternative
+    is the one this table exists to prevent: a panel that looks like the fleet
+    and is the busiest slice of it, with the number that decided so living in a
+    collector nobody reads.
+    """
+    rows = []
+    for entry in plan.enabled:
+        settings = plan.config.dataset(entry.name)
+        for option in entry.dataset.options:
+            value = settings.options[option.name]
+            rows.append((
+                f"{entry.name}.{option.name}",
+                "true" if value is True else "false" if value is False else str(value),
+                "declared" if option.name in settings.declared_options else "default",
+                option.description,
+            ))
+    return rows
+
+
+def _approx_duration(seconds):
+    """A duration to read, not to compute with.
+
+    ``format_duration`` is exact and falls back to raw seconds, which is right
+    for a configured interval and unreadable for a derived one -- "45708s" is a
+    number nobody converts in their head while deciding whether to declare a
+    warm-up burst.
+    """
+    seconds = max(0, int(seconds))
+    if seconds < 120:
+        return f"{seconds}s"
+    if seconds < 7200:
+        return f"{seconds / 60:.0f}m"
+    return f"{seconds / 3600:.1f}h"
+
+
 def _render_table(headers, rows):
     columns = list(zip(*([headers] + rows))) if rows else [(header,) for header in headers]
     widths = [max(len(str(cell)) for cell in column) for column in columns]
@@ -393,15 +556,57 @@ def render_plan(plan):
     if warming:
         out += ["", "Caches that fill over the first few cycles, then get cheaper:"]
         for entry in warming:
-            cost = entry.provider.cost
-            cycles = cost.cycles_to_warm(config.scale)
-            burst = cost.warmup_load(entry.interval, config.scale)
+            report = warmup_report(plan, entry)
+            if not entry.charged:
+                # It converges because a pool peer pays for the fan-out, so its
+                # coverage is that peer's timeline and it needs no budget of its
+                # own. Repeating the peer's advice here would read as two
+                # datasets each wanting 24,000 req/h.
+                peers = ", ".join(entry.shared_with) or "its pool peer"
+                out.append(
+                    f"  {entry.name} ({entry.provider.name}): no requests of "
+                    f"its own; converges with {peers}")
+                continue
             out.append(
                 f"  {entry.name} ({entry.provider.name}): "
-                f"{burst.requests_per_hour:,.0f} req/h while warming, "
+                f"{report.requests_per_hour:,.0f} req/h while warming, "
                 f"{entry.load.requests_per_hour:,.0f} req/h once warm; "
-                f"full coverage after ~{cycles} cycles "
-                f"({format_duration(cycles * entry.interval)})")
+                f"full coverage in ~{_approx_duration(report.seconds)}")
+            if report.throttled:
+                # The honest version of what used to be printed here. Left
+                # unsaid, this line reads as a plan to spend 24,000 req/h
+                # against a 4,000 ceiling, which is what the budget refuses.
+                declared = config.budget_for(entry.target).warmup_requests_per_hour
+                advice = (
+                    f"Raise budget.{entry.target}.warmup_requests_per_hour "
+                    "further" if declared else
+                    f"Declare budget.{entry.target}.warmup_requests_per_hour")
+                out.append(
+                    f"      that rate exceeds the "
+                    f"{report.available_per_hour:,.0f} req/h its budget leaves "
+                    f"for warming, so the budget paces it, not the cadence. "
+                    f"{advice} to shorten it, or accept the time above")
+            elif report.interval != entry.interval:
+                out.append(
+                    f"      revisited every "
+                    f"{_approx_duration(report.interval)} while filling rather "
+                    f"than every {format_duration(entry.interval)}, which is "
+                    f"what its share of the {entry.target} budget affords")
+        # The burst is the one setting that lets the exporter knowingly exceed
+        # its own steady ceiling, so it is stated as a decision with a duration.
+        for target in plan.targets:
+            if not target.budget.warmup_requests_per_hour:
+                continue
+            longest = max(
+                (warmup_report(plan, entry).seconds for entry in warming
+                 if entry.target == target.target), default=0)
+            out.append(
+                f"  budget.{target.target} permits "
+                f"{target.budget.warmup_requests_per_hour:,.0f} req/h while any "
+                f"of them is filling -- "
+                f"{target.budget.warmup_multiple:.1f}x the steady "
+                f"{target.budget.requests_per_hour:,.0f} req/h, for about "
+                f"{_approx_duration(longest)}")
 
     # What the selected source cannot tell you. On a large estate this is the
     # difference between a number and a sample, and an operator who reads the
@@ -413,6 +618,20 @@ def render_plan(plan):
         for entry in caveats:
             out.append(f"  {entry.name} ({entry.provider.name}): "
                        f"{entry.provider.notes}")
+
+    # The ceilings, before the caveats, because a truncated breakdown is usually
+    # a ceiling doing its job and the operator should be able to see which one.
+    out += ["", "Ceilings, derived from the declared scale unless stated:"]
+    out += _render_table(
+        ("LIMIT", "VALUE", "ORIGIN", "BOUNDS"),
+        [(name, f"{value:,}", origin, description)
+         for name, value, origin, description
+         in config.limits.describe(config.scale)])
+
+    bounds = _bound_rows(plan)
+    if bounds:
+        out += ["", "What each dataset chooses to publish less than all of:"]
+        out += _render_table(("OPTION", "VALUE", "ORIGIN", "MEANING"), bounds)
 
     deferred = [entry for entry in plan.enabled if entry.deferred]
     if deferred:

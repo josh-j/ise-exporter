@@ -14,7 +14,7 @@ from dataclasses import dataclass
 
 from . import telemetry
 from .labels import bounded_detail
-from .snapshots import SOFT_SAMPLE_WARNING, Publication
+from .snapshots import Publication
 from .transports import FAILURE_EXPLANATIONS, TransportError
 
 
@@ -59,6 +59,12 @@ class Outcome:
     duration: float = 0.0
     reason: str = ""
     detail: str = ""
+    # Entities this collection left for the next one because its warm-up budget
+    # ran out. Carried out of the collection because the scheduler is the only
+    # thing that can act on it: a cache with work outstanding should be revisited
+    # at the rate the budget affords, not at the cadence the data deserves once
+    # it is warm. Zero means "nothing pending", which is the steady state.
+    deferred: int = 0
 
 
 class FetchContext:
@@ -70,7 +76,31 @@ class FetchContext:
         self.transport = transport
         self.config = config
         self.scale = config.scale
+        # The same ceilings the transport will enforce, so a provider builds its
+        # statements against what will actually be accepted rather than against
+        # a constant that used to agree.
+        self.limits = config.limits
+        self.settings = config.dataset(dataset.name)
+        self.deferred = 0
         self._publication = publication
+
+    def defer(self, count):
+        """Report entities this collection left for the next one.
+
+        A converging provider calls this with whatever its per-cycle warm-up
+        budget could not reach. It is what turns "this cache is still filling"
+        into a scheduling decision instead of a gauge nobody acts on.
+        """
+        self.deferred = max(0, int(count or 0))
+
+    def option(self, name):
+        """One of this dataset's declared options, defaulted and validated.
+
+        A provider that bounds a breakdown reads the bound from here. There is
+        no other source: an option not declared on the Dataset raises, which is
+        what stops a cap from re-appearing as a constant in a collector.
+        """
+        return self.settings.option(name)
 
     def set(self, family, value, /, **label_values):
         """Record one gauge value. The ``provider`` label is bound for you.
@@ -103,7 +133,8 @@ class Runner:
         telemetry.dataset_last_attempt_timestamp.labels(
             dataset=name, provider=provider_name).set(attempted)
 
-        publication = Publication(dataset.metrics, provider=provider_name)
+        publication = Publication(
+            dataset.metrics, limits=self.config.limits, provider=provider_name)
         context = FetchContext(
             dataset=dataset, provider=provider, transport=transport,
             config=self.config, publication=publication)
@@ -141,17 +172,19 @@ class Runner:
             return Outcome(name, provider_name, False, duration, reason,
                            bounded_detail(detail))
 
-        if publication.samples > SOFT_SAMPLE_WARNING:
+        warn_at = self.config.limits.snapshot_sample_warning
+        if publication.samples > warn_at:
             # Not an error, but a dataset this wide is usually keyed on
             # something it should not be. Say so before the hard ceiling.
             logger.warning(
                 "dataset %s published %d series, past the %d soft limit; check "
                 "it is not keyed on an endpoint identity",
-                name, publication.samples, SOFT_SAMPLE_WARNING)
+                name, publication.samples, warn_at)
         logger.info(
             "collection ok dataset=%s provider=%s duration=%.3fs series=%d",
             name, provider_name, duration, publication.samples)
-        return Outcome(name, provider_name, True, duration)
+        return Outcome(name, provider_name, True, duration,
+                       deferred=context.deferred)
 
     def _publish_success(self, publication, name, provider_name, duration):
         completed = time.time()

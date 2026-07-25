@@ -32,6 +32,7 @@ from functools import partial
 from . import known_defects, telemetry
 from .labels import bounded_detail
 from .lanes import LaneSet
+from .plan import warmup_interval
 from .runtime import Runner
 from .telemetry import _reason_slug
 from .transports import FAILURE_EXPLANATIONS
@@ -114,6 +115,11 @@ class Scheduler:
         self.runner = Runner(config)
         self.next_run = {}
         self.last_success = {}
+        # What each dataset's last successful collection left for the next one,
+        # as (target, count). A cache with work outstanding is revisited at the
+        # rate the budget affords rather than at its own cadence, and its target
+        # is told so it can allow a declared warm-up burst.
+        self.deferred = {}
         self.states = self._resolve_states()
         self.lanes = LaneSet(
             sorted({provider.target
@@ -255,6 +261,10 @@ class Scheduler:
         for state in self.states:
             self._publish_selection(state)
             self._set_next_run(state, now)
+        # Zero rather than absent: "no cache is filling" and "nobody has looked"
+        # are different facts, and only one of them is reassuring.
+        for target in self.lanes.lanes:
+            self._publish_warming(target)
         logger.info(
             "collecting %d dataset(s) across %d target(s); %d unresolved, "
             "%d with a declared fallback",
@@ -288,6 +298,40 @@ class Scheduler:
         telemetry.dataset_next_run_timestamp.labels(
             dataset=state.name, provider=state.provider.name).set(when)
 
+    # --- warm-up ----------------------------------------------------------
+
+    def _interval_after(self, state, entry, outcome):
+        """How long until this dataset runs again.
+
+        Its own cadence, unless its cache is still filling -- then the cadence
+        the budget affords, which is what turns "5,000 NADs in sixty hours" into
+        hours instead. The moment nothing is outstanding it goes back to the
+        cadence the data actually deserves.
+        """
+        if outcome.deferred <= 0:
+            return state.interval
+        warmup = warmup_interval(self.plan, entry)
+        if not warmup or warmup >= state.interval:
+            return state.interval
+        logger.info(
+            "warm-up pacing dataset=%s provider=%s deferred=%d next_in=%ds "
+            "(cadence %ds)", state.name, entry.provider.name, outcome.deferred,
+            warmup, state.interval)
+        return warmup
+
+    def _record_deferred(self, state, target, outcome):
+        """Track outstanding warm-up work, and tell the target about it."""
+        self.deferred[state.name] = (target, max(0, int(outcome.deferred)))
+        self._publish_warming(target)
+
+    def _publish_warming(self, target):
+        warming = any(count > 0 for other, count in self.deferred.values()
+                      if other == target)
+        telemetry.budget_warming.labels(target=target).set(int(warming))
+        setter = getattr(self.transports.get(target), "set_warming", None)
+        if setter is not None:
+            setter(warming)
+
     def tick(self, now=None):
         """Submit every dataset that is due. Returns the names submitted."""
         now = self.clock() if now is None else now
@@ -318,7 +362,9 @@ class Scheduler:
                 # staying on a fallback that means something slightly different.
                 self._switch_to(state, 0, "preferred_provider_recovered")
                 self.last_success[state.name] = completed
-                self._set_next_run(state, completed + state.interval)
+                self._record_deferred(state, provider.target, outcome)
+                self._set_next_run(
+                    state, completed + self._interval_after(state, entry, outcome))
             else:
                 logger.info(
                     "recovery probe failed dataset=%s provider=%s reason=%s; "
@@ -331,7 +377,9 @@ class Scheduler:
         if outcome.ok:
             state.failures = 0
             self.last_success[state.name] = completed
-            self._set_next_run(state, completed + state.interval)
+            self._record_deferred(state, provider.target, outcome)
+            self._set_next_run(
+                state, completed + self._interval_after(state, entry, outcome))
         else:
             state.failures += 1
             if (state.failures >= PROVIDER_FAILOVER_THRESHOLD
@@ -366,6 +414,12 @@ class Scheduler:
     def loop(self, shutdown):
         """Collect until ``shutdown`` is set."""
         self.bootstrap()
+        # Handed over before any work starts, not only during teardown. A
+        # transport that learns about shutdown only once the loop has exited
+        # cannot interrupt a wait that began before then -- and waits are long
+        # now: a Data Connect cooldown at a low duty cycle, or a request holding
+        # for its share of an enforced request budget.
+        self._share_shutdown(shutdown)
         self.lanes.start()
         try:
             while not shutdown.is_set():
@@ -378,8 +432,11 @@ class Scheduler:
             # Also cancel on an unexpected exit so in-flight work stops rather
             # than racing transport teardown.
             shutdown.set()
-            for transport in self.transports.values():
-                setter = getattr(transport, "set_shutdown_event", None)
-                if setter is not None:
-                    setter(shutdown)
+            self._share_shutdown(shutdown)
             self.lanes.stop()
+
+    def _share_shutdown(self, shutdown):
+        for transport in self.transports.values():
+            setter = getattr(transport, "set_shutdown_event", None)
+            if setter is not None:
+                setter(shutdown)

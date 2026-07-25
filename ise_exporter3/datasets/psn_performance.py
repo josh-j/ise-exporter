@@ -14,6 +14,7 @@ absent optional column degrades one dimension instead of failing the dataset.
 """
 from prometheus_client import Gauge
 
+from .. import reporting
 from ..labels import label
 from ..model import Cost, Dataset, Provider
 from ..parsing import finite
@@ -102,8 +103,11 @@ def _latest_per_node(view, time_column, columns, hours):
     """
 
 
-def statements(schema=None, hours=6):
-    hours = max(1, min(6, int(hours)))
+def statements(limits, schema=None, hours=0):
+    # The same window ceiling every reporting statement scans under, rather than
+    # a second copy of the number here.
+    hours = reporting.window_hours(
+        (hours or limits.window_hours) * 3600, limits)
     return {
         "kpi": _latest_per_node(
             "key_performance_metrics", "logged_time",
@@ -118,7 +122,7 @@ def statements(schema=None, hours=6):
 
 def fetch(ctx):
     schema = getattr(ctx.transport, "schema", None)
-    results = ctx.transport.query_many(statements(schema))
+    results = ctx.transport.query_many(statements(ctx.limits, schema))
 
     for row in results.get("kpi", []):
         node = label(row.get("ise_node"))
@@ -147,7 +151,7 @@ DATASET = Dataset(
         Provider(
             name="dataconnect",
             # Two short statements in one batch under a single lease.
-            cost=Cost(target="oracle", db_seconds=3.0, max_rows=6000),
+            cost=Cost(target="oracle", db_seconds=3.0),
             supplies=frozenset({"psn", "tps", "latency", "load", "resources"}),
             requires=("view:KEY_PERFORMANCE_METRICS", "view:SYSTEM_SUMMARY"),
             fetch=fetch,

@@ -21,7 +21,9 @@ api_port = 9619
 state_db = "/var/lib/ise-exporter3/state.sqlite3"
 log_level = "INFO"
 # A plan over budget is a configuration error, not a production surprise. Set
-# false to downgrade it to a startup warning.
+# false to downgrade it to a startup warning -- and to stop the runtime from
+# throttling requests to the declared rate, since both are the same statement:
+# do not enforce what [budget] says.
 enforce_budget = true
 
 # How big this deployment is. Costs that scale with the fleet are resolved
@@ -76,8 +78,15 @@ verify_tls = true
 
 # ---------------------------------------------------------------------------
 # Budget: the ceiling per target. This is what makes load a decision rather
-# than a discovery. Pacing, cooldowns, row ceilings and query timeouts are all
-# derived from these plus each provider's declared cost -- they are not knobs.
+# than a discovery. Pacing, cooldowns and query timeouts are all derived from
+# these plus each provider's declared cost -- they are not knobs.
+#
+# These are ENFORCED, not merely measured: a token bucket per target makes a
+# request wait rather than exceed the rate declared here. That matters most on a
+# cold start, which is the one case where the difference showed -- warming the
+# session cache for 20,000 endpoints ran at ~11,300 req/h against this 4,000
+# ceiling for its first two hours, and the appliance silently absorbed it.
+# `exporter.enforce_budget = false` turns enforcement back into observation.
 # ---------------------------------------------------------------------------
 
 [budget]
@@ -86,16 +95,73 @@ pan.requests_per_hour = 3000
 # `plan` for the warm-up burst and time to full coverage.
 mnt.requests_per_hour = 4000
 pxgrid.requests_per_hour = 200
+
+# Cold start versus steady state is a real decision, so it is one you make here
+# rather than one the exporter makes quietly. Left unset, a filling cache runs at
+# the steady ceiling above and simply takes longer; `plan` prints how long, and
+# `ise3_detail_fetches_deferred` stays above zero until it is done.
+#
+# At the scale declared above, full session coverage takes ~12.7h inside the
+# 4,000/h ceiling. Uncommenting the line below spends 12,000/h while any MnT
+# cache is still filling -- 3x the steady ceiling, for roughly two hours -- and
+# `plan` prints that as a decision with its duration. Nothing bursts once warm.
+#
+# mnt.warmup_requests_per_hour = 12000
+
+# Oracle takes no warm-up burst: it is budgeted as a duty cycle, and no Data
+# Connect provider caches per-entity detail. Declaring one is a config error.
 # Oracle is budgeted as a duty cycle: the share of wall-clock time the exporter
 # may keep a Data Connect statement running. 2% is the large-estate default.
 oracle.duty_cycle_percent = 2.0
 
 # ---------------------------------------------------------------------------
-# Datasets: three keys each -- enabled, providers, interval. All are optional;
+# Limits: what one statement, one batch and one snapshot may return.
+#
+# Every value here is DERIVED from [scale] above and printed by `plan`, so you
+# should not normally need this section at all -- it is written out because a
+# ceiling you cannot see is a surprise waiting for an estate large enough to
+# find it. That is not hypothetical: these used to be constants in three
+# different modules, and they contradicted each other. A statement was capped at
+# 5,500 groups, a batch at five statements, and a batch result at 12,000 rows --
+# smaller than three full-size statements -- so `tacacs_activity` failed every
+# collection at this scale, after paying for the Oracle scans each time.
+#
+# The chain, and it is checked at start:
+#
+#   group_ceiling      = nads + accounts + 500   (marginals add, they multiply
+#                                                 nothing, so this is the sum)
+#   result_rows        = group_ceiling + 500     (a statement returning every
+#                                                 group it asked for is a success)
+#   batch_result_rows  = result_rows x batch_queries
+#
+# At the scale declared above that resolves to 6,500 / 7,000 / 35,000. Setting
+# any of them by hand is allowed and warns at start; setting them into a
+# contradiction is refused outright rather than found in production. Hard floors
+# and caps are in code and are not settable.
+#
+# [limits]
+# group_ceiling = 6500
+# result_rows = 7000
+# batch_queries = 5
+# batch_result_rows = 35000
+# result_bytes = 67108864         # the real safety bound; 35,000 rows is ~7 MB
+# window_hours = 6                # how far back any event statement may scan
+# snapshot_samples = 50000        # hard: one dataset publishing more fails
+# snapshot_sample_warning = 20000 # soft: logged, so width is seen before it bites
+
+# ---------------------------------------------------------------------------
+# Datasets: enabled, providers, interval, and options. All are optional;
 # omit a dataset entirely to take its defaults. `providers` is an ordered
 # preference list: the first one whose target is reachable wins, and the runtime
 # exports which one is live. Because sources differ in meaning, `provider` is a
 # label on the data, and dashboards gate on it.
+#
+# `options` is where a dataset declares any bound it puts on its own breakdowns.
+# There is deliberately nowhere else to put one: a top-K that lives as a constant
+# in a collector produces a panel that looks like the fleet and is the busiest
+# slice of it. `plan` prints every option below its value and its meaning, and
+# every bounded breakdown exports ise3_topk_groups_returned against
+# ise3_topk_groups_total.
 # ---------------------------------------------------------------------------
 
 [datasets.active_sessions]
@@ -137,6 +203,26 @@ interval = "10m"
 
 [datasets.source_freshness]
 interval = "6h"
+
+# TACACS activity has two large dimensions -- one group per Device Admin account
+# and one per device doing Device Admin -- so it is the one dataset whose device
+# breakdown is bounded, and this is where that decision lives.
+#
+# The scan stays complete either way: every device is counted, rolled up to its
+# ops owner, and the individual devices published are the worst offenders. What
+# `top_devices` chooses is how many of them get their own time series.
+#
+#   200 (the default)  ~2,400 series for this dataset; a Device Admin dashboard
+#                      wants "who logged in to what, and what failed"
+#   0                  every device: ~25,000 series at 5,000 NADs, which is the
+#                      largest metric family in the exporter. Legal, honoured,
+#                      and warned about at start
+#
+# Either way ise3_topk_groups_returned / _total / ise3_topk_truncated say what
+# the panel is showing against what exists.
+[datasets.tacacs_activity.options]
+device_rollup = true
+top_devices = 200
 
 # Example of turning something off: TACACS costs a large ERS walk plus a
 # reporting scan, and is dead weight if Device Administration is not in use.

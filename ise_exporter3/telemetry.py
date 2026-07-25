@@ -96,6 +96,25 @@ load_measured_db_seconds_total = Counter(
     "ise3_load_measured_db_seconds_total",
     "Database seconds actually consumed on a target", ["target"])
 
+# The request budget is enforced rather than merely observed, so what the
+# enforcement is doing has to be visible. A budget that silently costs an hour of
+# wall time is as surprising as one that is silently exceeded.
+budget_enforced_requests_per_hour = Gauge(
+    "ise3_budget_enforced_requests_per_hour",
+    "Request rate the token bucket is currently enforcing on this target; "
+    "rises to the declared warm-up burst while a cache is still filling",
+    ["target"])
+budget_wait_seconds_total = Counter(
+    "ise3_budget_wait_seconds_total",
+    "Seconds requests spent waiting for budget on this target", ["target"])
+budget_throttled_total = Counter(
+    "ise3_budget_throttled_total",
+    "Requests that had to wait for budget before reaching the wire",
+    ["target", "api"])
+budget_warming = Gauge(
+    "ise3_budget_warming",
+    "A converging cache on this target still has work outstanding", ["target"])
+
 # --- transport ---
 api_requests_total = Counter(
     "ise3_api_requests_total", "API requests by target, API, and outcome",

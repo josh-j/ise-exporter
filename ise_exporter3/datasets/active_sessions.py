@@ -114,7 +114,7 @@ DATASET = Dataset(
             name="dataconnect",
             # One materialised RADIUS_ACCOUNTING scan over the stale window with
             # a ROW_NUMBER dedup. The costliest recurring statement in v2.
-            cost=Cost(target="oracle", db_seconds=5.0, max_rows=6000),
+            cost=Cost(target="oracle", db_seconds=5.0),
             supplies=frozenset({"session", "psn", "nad"}),
             requires=("view:RADIUS_ACCOUNTING",),
             notes="reconstructed from accounting; completeness depends on NAD start/stop records",

@@ -158,6 +158,7 @@ def fetch(ctx):
 
     outstanding = warm(ctx, cache, identified)
     cache.publish(len(identified), deferred_count=outstanding)
+    ctx.defer(outstanding)
 
     owners, locations, types = defaultdict(int), defaultdict(int), defaultdict(int)
     resolved, directory = 0, []

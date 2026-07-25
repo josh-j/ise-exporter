@@ -54,18 +54,10 @@ _CANONICAL_STATUS = {
     "error": "Error",
 }
 
-_AGENT_FIELDS = ("posture_agent_version", "PostureAgentVersion", "agent_version")
-_REPORT_FIELDS = ("posture_report", "PostureReport")
-_STATUS_FIELDS = ("posture_status", "PostureStatus", "posture_assessment_status")
-_OS_FIELDS = ("operating_system", "os_type", "endpoint_operating_system")
-
-
-def _first(detail, names):
-    for name in names:
-        value = detail.get(name)
-        if value not in (None, ""):
-            return str(value).strip()
-    return ""
+# The field-name variants ISE spells these with are resolved once, when the
+# record is cached -- see session_detail.project. This dataset reads the
+# resolved names, so a new spelling is handled in one place rather than in every
+# reader of the cache.
 
 
 def canonical_status(value):
@@ -115,19 +107,16 @@ def fetch_mnt(ctx):
         detail = cache.get(mac)
         if not detail:
             continue
-        owner = label(directory.ops_owner(
-            detail.get("nas_ip_address"), detail.get("network_device_name")))
-        statuses[(canonical_status(_first(detail, _STATUS_FIELDS)), owner)].add(mac)
+        owner = label(directory.ops_owner(detail["nas_ip"], detail["nad"]))
+        statuses[(canonical_status(detail["posture_status"]), owner)].add(mac)
 
-        for policy, result in parse_posture_report(_first(detail, _REPORT_FIELDS)):
+        for policy, result in parse_posture_report(detail["posture_report"]):
             policies[(label(policy), label(result))].add(mac)
 
-        agent = _first(detail, _AGENT_FIELDS)
-        if agent:
-            agents[label(agent)].add(mac)
-        system = _first(detail, _OS_FIELDS)
-        if system:
-            systems[label(system)].add(mac)
+        if detail["agent_version"]:
+            agents[label(detail["agent_version"])].add(mac)
+        if detail["operating_system"]:
+            systems[label(detail["operating_system"])].add(mac)
 
     for (status, owner), members in statuses.items():
         ctx.set(endpoints_by_status, len(members), status=status, ops_owner=owner)

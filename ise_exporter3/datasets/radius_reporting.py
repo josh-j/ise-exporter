@@ -84,15 +84,15 @@ DETAIL_DIMENSIONS = (
 )
 
 
-def statements(hours):
+def statements(hours, limits):
     """Exact totals, plus every marginal from two scans.
 
     The totals come from the aggregate view and stay exact independently of the
     breakdowns, which is the distinction that matters: a total and a breakdown
     answer different questions and must not be derived from one another.
     """
-    summary_recent = reporting.recent("timestamp", hours)
-    detail_recent = reporting.recent("timestamp", hours)
+    summary_recent = reporting.recent("timestamp", hours, limits)
+    detail_recent = reporting.recent("timestamp", hours, limits)
     return {
         "totals": f"""
             SELECT SUM(passed_count) AS passed, SUM(failed_count) AS failed
@@ -100,11 +100,13 @@ def statements(hours):
             WHERE {summary_recent}
         """,
         "summary_marginals": reporting.marginals(
-            SUMMARY_VIEW, summary_recent, SUMMARY_DIMENSIONS, SUMMARY_MEASURES),
+            SUMMARY_VIEW, summary_recent, SUMMARY_DIMENSIONS, SUMMARY_MEASURES,
+            limits=limits),
         # Method, protocol, policy and latency are dimensions the summary view
         # does not expose, so they come from the bounded raw view.
         "detail_marginals": reporting.marginals(
-            DETAIL_VIEW, detail_recent, DETAIL_DIMENSIONS, DETAIL_MEASURES),
+            DETAIL_VIEW, detail_recent, DETAIL_DIMENSIONS, DETAIL_MEASURES,
+            limits=limits),
     }
 
 
@@ -132,8 +134,8 @@ def _publish_outcomes(ctx, rows, gauges):
 
 
 def fetch(ctx):
-    hours = reporting.window_hours(ctx.dataset.default_interval)
-    results = ctx.transport.query_many(statements(hours))
+    hours = reporting.window_hours(ctx.dataset.default_interval, ctx.limits)
+    results = ctx.transport.query_many(statements(hours, ctx.limits))
 
     for row in results.get("totals", []):
         ctx.set(authentications, finite(row.get("passed")), status="passed")
@@ -175,7 +177,7 @@ DATASET = Dataset(
             name="dataconnect",
             # Three statements in one atomic batch under a single lease: exact
             # totals, and two GROUPING SETS scans covering every marginal.
-            cost=Cost(target="oracle", db_seconds=15.0, max_rows=12000),
+            cost=Cost(target="oracle", db_seconds=15.0),
             supplies=frozenset({
                 "status", "method", "protocol", "policy", "nad", "psn", "latency"}),
             requires=(

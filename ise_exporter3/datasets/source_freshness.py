@@ -42,7 +42,7 @@ VIEW_BATCHES = (
 )
 
 
-def _branch(view, column, hours):
+def _branch(view, column, hours, limits):
     return f"""
         SELECT '{view}' AS view_name,
                COUNT(*) AS recent_rows,
@@ -50,21 +50,21 @@ def _branch(view, column, hours):
                  (CAST(SYSTIMESTAMP AS DATE) - CAST(MAX({column}) AS DATE)) * 86400,
                  -1) AS age_seconds
         FROM {view}
-        WHERE {reporting.recent(column, hours)}
+        WHERE {reporting.recent(column, hours, limits)}
     """
 
 
-def statements(hours):
+def statements(hours, limits):
     return {
         f"batch_{index}": "\nUNION ALL\n".join(
-            _branch(view, column, hours) for view, column in batch)
+            _branch(view, column, hours, limits) for view, column in batch)
         for index, batch in enumerate(VIEW_BATCHES)
     }
 
 
 def fetch(ctx):
-    hours = reporting.window_hours(ctx.dataset.default_interval)
-    results = ctx.transport.query_many(statements(hours))
+    hours = reporting.window_hours(ctx.dataset.default_interval, ctx.limits)
+    results = ctx.transport.query_many(statements(hours, ctx.limits))
     for rows in results.values():
         for row in rows:
             (view,) = reporting.group(row, "view_name")
@@ -83,7 +83,7 @@ DATASET = Dataset(
     providers=(
         Provider(
             name="dataconnect",
-            cost=Cost(target="oracle", db_seconds=4.0, max_rows=1000),
+            cost=Cost(target="oracle", db_seconds=4.0),
             supplies=frozenset({"view", "has_recent_rows", "latest_row_age"}),
             fetch=fetch,
         ),

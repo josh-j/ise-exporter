@@ -104,6 +104,7 @@ def fetch(ctx):
     cache.retain({account["id"] for account in accounts})
     outstanding = warm(ctx, cache, accounts)
     cache.publish(len(accounts), deferred_count=outstanding)
+    ctx.defer(outstanding)
 
     classified = 0
     for account in accounts:

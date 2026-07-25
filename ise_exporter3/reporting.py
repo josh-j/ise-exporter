@@ -9,6 +9,13 @@ The truncation signal is the important one. A top-K breakdown that drops its tai
 looks exactly like a complete one, which is how "NAD coverage capped at 1000 of
 3693" went unnoticed in v2. Every bounded breakdown publishes what it returned
 against what existed.
+
+The group ceiling is no longer a constant in this module. It was one, at 5,500,
+and a fleet of 5,000 NADs plus 1,000 TACACS accounts needs 6,000 -- so the number
+that existed to make truncation rare instead made it certain, silently, at
+exactly the size the exporter is built for. It comes from ``config.limits`` now,
+derived from the declared scale, and every helper here takes it explicitly so no
+statement can be built without saying which ceiling it was built against.
 """
 from __future__ import annotations
 
@@ -17,35 +24,37 @@ from .labels import label
 from .parsing import finite
 
 
-# Safety valve, not a design target. Statements below are shaped so that a
-# deployment at the declared scale returns every group; this cap exists so a
-# fleet far past that scale degrades loudly (truncated = 1) instead of tripping
-# the transport's hard row ceiling and taking the dataset down.
-MAX_GROUPS = 5500
-
-# Absolute ceiling on how far back any event statement may scan. The exporter
-# samples a bounded window; it never aggregates the whole interval between runs.
-MAX_WINDOW_HOURS = 6
-
-
-def window_hours(interval_seconds, ceiling=MAX_WINDOW_HOURS):
-    """Match the scan to the cadence without exceeding the hard ceiling."""
+def window_hours(interval_seconds, limits):
+    """Match the scan to the cadence without exceeding the declared ceiling."""
     try:
         hours = max(1, int(interval_seconds) // 3600)
     except (TypeError, ValueError):
         hours = 1
-    return max(1, min(ceiling, hours))
+    return max(1, min(limits.window_hours, hours))
 
 
-def recent(column, hours):
+def recent(column, hours, limits):
     """An index-friendly lower bound built from a validated integer."""
-    hours = max(1, min(MAX_WINDOW_HOURS, int(hours)))
+    hours = max(1, min(limits.window_hours, int(hours)))
     return (f"{column} >= CAST(SYSTIMESTAMP - "
             f"NUMTODSINTERVAL({hours}, 'HOUR') AS TIMESTAMP)")
 
 
-def marginals(source, where, dimensions, measures="COUNT(*) AS events",
-              limit=MAX_GROUPS):
+def group_limit(limits, limit=0):
+    """Resolve a statement's row limit against the declared group ceiling.
+
+    A dataset may ask for fewer -- a paged scan does -- but never for more: the
+    ceiling is what the transport's row ceiling was sized against, and the two
+    are derived together precisely so they cannot drift apart.
+    """
+    ceiling = limits.group_ceiling
+    if not limit:
+        return ceiling
+    return max(1, min(ceiling, int(limit)))
+
+
+def marginals(source, where, dimensions, measures="COUNT(*) AS events", *,
+              limits, limit=0):
     """Every one-dimensional breakdown of a view, from a single scan.
 
     Grouping on a cross product is what makes a breakdown unaffordable: errors
@@ -53,7 +62,8 @@ def marginals(source, where, dimensions, measures="COUNT(*) AS events",
     survivable row cap keeps a small and arbitrary fraction of it. The marginals
     are what a dashboard actually reads, and their cardinalities add rather than
     multiply -- roughly 5,000 NADs plus a few hundred codes plus a handful of
-    methods and PSNs, which fits one statement.
+    methods and PSNs, which fits one statement. That sum is exactly what
+    ``limits.group_ceiling`` is derived from.
 
     ``GROUPING SETS`` computes them all in one pass, so this is also cheaper than
     the capped cross product it replaces. Each row names its own dimension, and
@@ -76,7 +86,6 @@ def marginals(source, where, dimensions, measures="COUNT(*) AS events",
         coalesced = "COALESCE(" + ", ".join(
             expression for _name, expression in dimensions) + ")"
     sets = ", ".join(f"({expression})" for _name, expression in dimensions)
-    limit = max(1, min(MAX_GROUPS, int(limit)))
     return f"""
         SELECT dimension, value, {_measure_names(measures)}, group_total
         FROM (
@@ -89,7 +98,7 @@ def marginals(source, where, dimensions, measures="COUNT(*) AS events",
             GROUP BY GROUPING SETS ({sets})
         )
         ORDER BY dimension, value
-        FETCH FIRST {limit} ROWS ONLY
+        FETCH FIRST {group_limit(limits, limit)} ROWS ONLY
     """
 
 
@@ -111,13 +120,12 @@ def by_dimension(rows):
     return grouped
 
 
-def top_groups(selected, source, where, group_by, order_by, limit=MAX_GROUPS):
+def top_groups(selected, source, where, group_by, order_by, *, limits, limit=0):
     """A bounded top-K aggregate that also reports the full group count.
 
     The window functions are what make truncation detectable: COUNT(*) OVER ()
     is the number of groups that existed, computed before the row limit applies.
     """
-    limit = max(1, min(MAX_GROUPS, int(limit)))
     return f"""
         SELECT grouped.*, COUNT(*) OVER () AS group_total
         FROM (
@@ -127,16 +135,19 @@ def top_groups(selected, source, where, group_by, order_by, limit=MAX_GROUPS):
             GROUP BY {group_by}
         ) grouped
         ORDER BY {order_by} DESC
-        FETCH FIRST {limit} ROWS ONLY
+        FETCH FIRST {group_limit(limits, limit)} ROWS ONLY
     """
 
 
-def publish_truncation(ctx, breakdown, rows, limit=MAX_GROUPS):
-    """Export returned-versus-existing for one bounded breakdown."""
-    returned = len(rows)
-    total = returned
-    if rows:
-        total = max(returned, int(finite(rows[0].get("group_total"), returned)))
+def publish_coverage(ctx, breakdown, returned, total):
+    """Export returned-versus-existing for one bounded breakdown.
+
+    The one call every bound goes through, whether the tail was dropped by the
+    database (a FETCH FIRST that filled) or by us (a declared top-K published
+    from a complete result). Both are the same fact to whoever reads the panel:
+    this breakdown is not all of them, and here is how many it is not.
+    """
+    returned, total = int(returned), max(int(total), int(returned))
     dataset = ctx.dataset.name
     telemetry.topk_groups_returned.labels(
         dataset=dataset, breakdown=breakdown).set(returned)
@@ -145,6 +156,15 @@ def publish_truncation(ctx, breakdown, rows, limit=MAX_GROUPS):
     telemetry.topk_truncated.labels(
         dataset=dataset, breakdown=breakdown).set(int(total > returned))
     return total > returned
+
+
+def publish_truncation(ctx, breakdown, rows):
+    """Coverage for a statement that carries its own ``group_total``."""
+    returned = len(rows)
+    total = returned
+    if rows:
+        total = max(returned, int(finite(rows[0].get("group_total"), returned)))
+    return publish_coverage(ctx, breakdown, returned, total)
 
 
 def group(row, *names, default="unknown"):

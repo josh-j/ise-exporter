@@ -67,9 +67,9 @@ ENDPOINT_MEASURE = "COUNT(DISTINCT endpoint_mac_address) AS endpoints"
 CONDITION_MEASURE = "COUNT(DISTINCT endpoint_id) AS endpoints"
 
 
-def statements(hours):
-    endpoint_recent = reporting.recent("timestamp", hours)
-    condition_recent = reporting.recent("logged_at", hours)
+def statements(hours, limits):
+    endpoint_recent = reporting.recent("timestamp", hours, limits)
+    condition_recent = reporting.recent("logged_at", hours, limits)
     return {
         # Both sides bounded (tens of policies, six statuses), and the pair is
         # the question, so this one stays a real two-dimensional group.
@@ -83,20 +83,21 @@ def statements(hours):
             GROUP BY NVL(posture_policy_matched, 'none'),
                      NVL(posture_status, 'Unknown')
             ORDER BY policy, status
-            FETCH FIRST {reporting.MAX_GROUPS} ROWS ONLY
+            FETCH FIRST {reporting.group_limit(limits)} ROWS ONLY
         """,
         "endpoint_marginals": reporting.marginals(
-            ENDPOINT_VIEW, endpoint_recent, ENDPOINT_DIMENSIONS, ENDPOINT_MEASURE),
+            ENDPOINT_VIEW, endpoint_recent, ENDPOINT_DIMENSIONS, ENDPOINT_MEASURE,
+            limits=limits),
         "condition_marginals": reporting.marginals(
             CONDITION_VIEW,
             f"{condition_recent} AND NVL(condition_status, 'Failed') = 'Failed'",
-            CONDITION_DIMENSIONS, CONDITION_MEASURE),
+            CONDITION_DIMENSIONS, CONDITION_MEASURE, limits=limits),
     }
 
 
 def fetch(ctx):
-    hours = reporting.window_hours(ctx.dataset.default_interval)
-    results = ctx.transport.query_many(statements(hours))
+    hours = reporting.window_hours(ctx.dataset.default_interval, ctx.limits)
+    results = ctx.transport.query_many(statements(hours, ctx.limits))
 
     pairs = results.get("policy_status", [])
     reporting.publish_truncation(ctx, "policy_status", pairs)
@@ -136,7 +137,7 @@ DATASET = Dataset(
     providers=(
         Provider(
             name="dataconnect",
-            cost=Cost(target="oracle", db_seconds=10.0, max_rows=6000),
+            cost=Cost(target="oracle", db_seconds=10.0),
             supplies=frozenset({
                 "status", "policy", "condition", "os", "agent_version"}),
             requires=("view:POSTURE_ASSESSMENT_BY_ENDPOINT",),

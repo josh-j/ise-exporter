@@ -24,6 +24,7 @@ import json
 import os
 import resource
 import sys
+import gzip
 import time
 import tomllib
 from collections import defaultdict
@@ -205,7 +206,7 @@ def run_simulation(arguments):
 
     from ise_exporter3.plan import build_plan, render_plan
     from ise_exporter3.scheduler import TICK_SECONDS, Scheduler
-    from ise_exporter3 import detail_cache
+    from ise_exporter3 import detail_cache, rate_limit
     from ise_exporter3.snapshots import LockedCollectorRegistry
     from ise_exporter3.transports import dataconnect as dataconnect_module
 
@@ -241,6 +242,11 @@ def run_simulation(arguments):
     # active-list cache would never expire and the whole run would collect
     # against one frozen snapshot of the fleet.
     detail_cache.time = VirtualTime(clock)
+    # The REST budget is enforced by a token bucket that waits for its tokens.
+    # On a real clock inside a simulated timeline it would pace a modelled day
+    # to a real one, so it reads the same virtual clock as everything else --
+    # which is also what makes the enforcement measurable here at all.
+    rate_limit.time = VirtualTime(clock)
 
     config = load_configuration(arguments.config, scale, workspace.name)
     plan = build_plan(config)
@@ -332,7 +338,13 @@ def measure(arguments, config, plan, estate, clock, appliance, oracle, recorder,
             baseline_rss, steady=None):
     from prometheus_client import generate_latest
 
-    from ise_exporter3.snapshots import MAX_SNAPSHOT_SAMPLES, SOFT_SAMPLE_WARNING
+    from ise_exporter3 import server as server_module
+
+    # The ceilings this run actually enforced, read from the configuration
+    # rather than from constants, so the report cannot quote a limit the
+    # exporter has stopped using.
+    MAX_SNAPSHOT_SAMPLES = config.limits.snapshot_samples
+    SOFT_SAMPLE_WARNING = config.limits.snapshot_sample_warning
 
     hours = max((clock.time() - started) / 3600.0, 1e-9)
 
@@ -343,6 +355,14 @@ def measure(arguments, config, plan, estate, clock, appliance, oracle, recorder,
         scrapes.append((time.perf_counter() - scrape_started, len(payload)))
     scrape_seconds = sorted(seconds for seconds, _size in scrapes)[2]
     scrape_bytes = scrapes[-1][1]
+
+    # What Prometheus actually pulls over the wire. Measured the same way the
+    # server does it -- and measured *after* generation, because the point of
+    # doing it there is that the snapshot lock is already released.
+    compress_started = time.perf_counter()
+    compressed = gzip.compress(payload, compresslevel=server_module.COMPRESS_LEVEL)
+    compress_seconds = time.perf_counter() - compress_started
+    scrape_wire_bytes = len(compressed)
 
     families = series_by_family()
     total_series = sum(families.values())
@@ -480,12 +500,19 @@ def measure(arguments, config, plan, estate, clock, appliance, oracle, recorder,
         "series": {
             "total": total_series,
             "scrape_bytes": scrape_bytes,
+            "scrape_wire_bytes": scrape_wire_bytes,
+            "scrape_compress_seconds": compress_seconds,
             "scrape_seconds": scrape_seconds,
             "largest_families": dict(sorted(
                 families.items(), key=lambda item: -item[1])[:12]),
         },
         "caches": caches,
         "ceilings": {
+            # The whole resolved set, because "which ceiling was in force" is
+            # the first question anyone asks of a truncated breakdown.
+            "limits": {name: value for name, value, _origin, _text
+                       in config.limits.describe(config.scale)},
+            "declared_limits": list(config.limits.overridden),
             "soft_sample_warning": SOFT_SAMPLE_WARNING,
             "hard_sample_limit": MAX_SNAPSHOT_SAMPLES,
             "over_soft_limit": {
@@ -596,6 +623,10 @@ def report(measurements):
     series = measurements["series"]
     add(f"  {series['total']:,} series, scrape {_bytes(series['scrape_bytes'])} "
         f"in {series['scrape_seconds'] * 1000:.0f} ms")
+    ratio = series["scrape_bytes"] / max(1, series["scrape_wire_bytes"])
+    add(f"  on the wire {_bytes(series['scrape_wire_bytes'])} gzipped "
+        f"({ratio:.1f}x smaller, {series['scrape_compress_seconds'] * 1000:.0f} ms "
+        f"outside the snapshot lock)")
     add("  largest families:")
     for name, count in list(series["largest_families"].items())[:8]:
         add(f"    {name:<48}{count:>8,}")

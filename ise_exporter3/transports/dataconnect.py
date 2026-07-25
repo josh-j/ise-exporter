@@ -46,13 +46,16 @@ from . import Transport, TransportError, guard_path
 
 logger = logging.getLogger(__name__)
 
-MAX_RESULT_ROWS = 6_000
-MAX_BATCH_RESULT_ROWS = 12_000
-MAX_BATCH_QUERIES = 5
+# Row, byte and nesting ceilings come from ``config.limits``, derived from the
+# declared scale -- see limits.py. They used to be three constants here, and two
+# of them contradicted a third in reporting.py: a batch was allowed five
+# statements and 5,500 groups each, but only 12,000 rows in total, so any
+# dataset with two large dimensions failed every collection *after* paying for
+# the Oracle scans. Deriving them together is what makes that unrepresentable.
+#
+# How many rows to pull per round trip. Not a ceiling: purely how often the
+# fetch loop gets to re-check the deadline and the ceilings above.
 FETCH_BATCH_ROWS = 100
-MAX_FIELD_BYTES = 1024 * 1024
-MAX_RESULT_BYTES = 64 * 1024 * 1024
-MAX_FIELD_NESTING_DEPTH = 16
 
 # A statement may spend one timeout connecting and one executing, then repeat
 # both after the single permitted reconnect. A crash lease must reserve all four.
@@ -127,37 +130,38 @@ def classify_oracle_error(error):
     return "invalid_response"
 
 
-def _materialize(value, *, depth=0):
+def _materialize(value, limits, *, depth=0):
     """Convert one Oracle field without expanding an unbounded nested value."""
-    if depth > MAX_FIELD_NESTING_DEPTH:
+    if depth > limits.field_nesting_depth:
         raise TransportError(
             "invalid_response",
-            f"field exceeded the {MAX_FIELD_NESTING_DEPTH}-level nesting ceiling")
+            f"field exceeded the {limits.field_nesting_depth}-level nesting ceiling")
+    ceiling = limits.field_bytes
     if hasattr(value, "read") and callable(value.read):
         size = getattr(value, "size", None)
         if not callable(size):
             raise TransportError(
                 "invalid_response", "LOB has no bounded size; refusing to read it")
-        if int(size()) > MAX_FIELD_BYTES:
+        if int(size()) > ceiling:
             raise TransportError(
-                "response_too_large", f"field exceeded {MAX_FIELD_BYTES} bytes")
+                "response_too_large", f"field exceeded {ceiling} bytes")
         value = value.read()
     if isinstance(value, memoryview):
         value = value.tobytes()
     if isinstance(value, bytes):
-        if len(value) > MAX_FIELD_BYTES:
+        if len(value) > ceiling:
             raise TransportError(
-                "response_too_large", f"field exceeded {MAX_FIELD_BYTES} bytes")
+                "response_too_large", f"field exceeded {ceiling} bytes")
         return "base64:" + base64.b64encode(value).decode("ascii")
-    if isinstance(value, str) and len(value.encode("utf-8")) > MAX_FIELD_BYTES:
+    if isinstance(value, str) and len(value.encode("utf-8")) > ceiling:
         raise TransportError(
-            "response_too_large", f"field exceeded {MAX_FIELD_BYTES} bytes")
+            "response_too_large", f"field exceeded {ceiling} bytes")
     if isinstance(value, (list, tuple)):
         retained, result = 0, []
         for item in value:
-            materialized = _materialize(item, depth=depth + 1)
-            retained += _size_of(materialized, depth=depth + 1)
-            if retained > MAX_FIELD_BYTES:
+            materialized = _materialize(item, limits, depth=depth + 1)
+            retained += _size_of(materialized, limits, depth=depth + 1)
+            if retained > ceiling:
                 raise TransportError(
                     "response_too_large", "nested field exceeded the byte ceiling")
             result.append(materialized)
@@ -165,10 +169,10 @@ def _materialize(value, *, depth=0):
     if isinstance(value, dict):
         retained, result = 0, {}
         for key, item in value.items():
-            materialized = _materialize(item, depth=depth + 1)
-            retained += _size_of(key, depth=depth + 1)
-            retained += _size_of(materialized, depth=depth + 1)
-            if retained > MAX_FIELD_BYTES:
+            materialized = _materialize(item, limits, depth=depth + 1)
+            retained += _size_of(key, limits, depth=depth + 1)
+            retained += _size_of(materialized, limits, depth=depth + 1)
+            if retained > ceiling:
                 raise TransportError(
                     "response_too_large", "nested field exceeded the byte ceiling")
             result[key] = materialized
@@ -176,8 +180,8 @@ def _materialize(value, *, depth=0):
     return value
 
 
-def _size_of(value, *, depth=0):
-    if depth > MAX_FIELD_NESTING_DEPTH:
+def _size_of(value, limits, *, depth=0):
+    if depth > limits.field_nesting_depth:
         raise TransportError("invalid_response", "field nesting ceiling exceeded")
     if value is None:
         return 0
@@ -186,10 +190,11 @@ def _size_of(value, *, depth=0):
     if isinstance(value, (bytes, bytearray, memoryview)):
         return len(value)
     if isinstance(value, dict):
-        return sum(_size_of(key, depth=depth + 1) + _size_of(item, depth=depth + 1)
+        return sum(_size_of(key, limits, depth=depth + 1)
+                   + _size_of(item, limits, depth=depth + 1)
                    for key, item in value.items())
     if isinstance(value, (list, tuple)):
-        return sum(_size_of(item, depth=depth + 1) for item in value)
+        return sum(_size_of(item, limits, depth=depth + 1) for item in value)
     return 8
 
 
@@ -210,6 +215,10 @@ class DataConnectTransport(Transport):
         self.verify = settings.verify_tls
         self.timeout = QUERY_TIMEOUT_SECONDS
         self.min_query_interval = MIN_QUERY_INTERVAL_SECONDS
+        # One resolved set of ceilings for the whole process. The reporting
+        # statements are built against the same object, so "what a statement may
+        # ask for" and "what this transport will accept" cannot disagree.
+        self.limits = config.limits
 
         # The duty cycle is a budget decision, not a tuning knob. This is the
         # whole point of v3: what the operator declared they will spend is what
@@ -232,6 +241,10 @@ class DataConnectTransport(Transport):
         self._shutdown = None
         self._lock = threading.RLock()
         self._batch_active = False
+        # A catalogue read is a different shape of query from a reporting one --
+        # fixed-size, set by the ISE release rather than by the estate -- so it
+        # is bounded by limits.catalog_rows instead of limits.result_rows.
+        self._catalog_active = False
         self._batch_gate = None
         self._batch_duration = 0.0
         self._batch_rows = 0
@@ -476,9 +489,9 @@ class DataConnectTransport(Transport):
                             break
                         for raw in batch:
                             self._check_ceilings(len(rows), retained)
-                            row = dict(zip(
-                                columns, (_materialize(value) for value in raw)))
-                            retained += _size_of(row)
+                            row = dict(zip(columns, (
+                                _materialize(value, self.limits) for value in raw)))
+                            retained += _size_of(row, self.limits)
                             rows.append(row)
                 if self._batch_active:
                     self._batch_rows += len(rows)
@@ -502,19 +515,23 @@ class DataConnectTransport(Transport):
         raise TransportError("unexpected_error", "the reconnect retry fell through")
 
     def _check_ceilings(self, row_count, retained):
-        if row_count >= MAX_RESULT_ROWS:
+        limits = self.limits
+        ceiling = (limits.catalog_rows if self._catalog_active
+                   else limits.result_rows)
+        if row_count >= ceiling:
             raise TransportError(
                 "response_too_large",
-                f"result exceeded the {MAX_RESULT_ROWS}-row ceiling")
-        if self._batch_active and self._batch_rows + row_count >= MAX_BATCH_RESULT_ROWS:
+                f"result exceeded the {ceiling}-row ceiling")
+        if (self._batch_active
+                and self._batch_rows + row_count >= limits.batch_result_rows):
             raise TransportError(
                 "response_too_large",
-                f"batch exceeded the {MAX_BATCH_RESULT_ROWS}-row ceiling")
+                f"batch exceeded the {limits.batch_result_rows}-row ceiling")
         carried = self._batch_bytes if self._batch_active else 0
-        if carried + retained > MAX_RESULT_BYTES:
+        if carried + retained > limits.result_bytes:
             raise TransportError(
                 "response_too_large",
-                f"result exceeded the {MAX_RESULT_BYTES}-byte ceiling")
+                f"result exceeded the {limits.result_bytes}-byte ceiling")
 
     @staticmethod
     def _apply_timeout(connection, deadline):
@@ -536,9 +553,10 @@ class DataConnectTransport(Transport):
             items = list(statements.items())
             if not items:
                 return {}
-            if len(items) > MAX_BATCH_QUERIES:
+            if len(items) > self.limits.batch_queries:
                 raise ValueError(
-                    f"batch exceeds the {MAX_BATCH_QUERIES}-statement ceiling")
+                    f"batch exceeds the {self.limits.batch_queries}-statement "
+                    "ceiling")
             if self._batch_active:
                 raise RuntimeError("nested Data Connect batches are not supported")
 
@@ -654,4 +672,9 @@ class DataConnectTransport(Transport):
                 "user_tab_columns", "user_views"}:
             raise ValueError(
                 "a catalog query must be a SELECT from an allowed dictionary view")
-        return self.query(sql, parameters, adaptive=False)
+        with self._lock:
+            self._catalog_active = True
+            try:
+                return self._query(sql, parameters, adaptive=False)
+            finally:
+                self._catalog_active = False

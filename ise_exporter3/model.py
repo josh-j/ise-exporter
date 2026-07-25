@@ -118,7 +118,6 @@ class Cost:
     scales_with: str = ""
     requests_per_1k: float = 0.0
     db_seconds_per_1k: float = 0.0
-    max_rows: int = 0
     streaming: bool = False
     shares: str = ""
 
@@ -146,7 +145,7 @@ class Cost:
                 f"cost scales_with must be one of {SCALE_DIMENSIONS}, "
                 f"got {self.scales_with!r}")
         for name in ("requests", "db_seconds", "requests_per_1k",
-                     "db_seconds_per_1k", "max_rows"):
+                     "db_seconds_per_1k"):
             if getattr(self, name) < 0:
                 raise ModelError(f"cost {name} cannot be negative")
         scaled = self.requests_per_1k or self.db_seconds_per_1k
@@ -166,22 +165,44 @@ class Cost:
         """True when this provider caches and its coverage reaches the fleet."""
         return bool(self.warmup_requests or self.churn_fraction)
 
+    def _fixed_requests_for(self, scale: Scale) -> float:
+        """What one collection costs before any per-entity work.
+
+        A converging provider still pays this every cycle, warm or cold:
+        ``network_devices`` enumerates the whole NAD list at ERS's 100-row page
+        cap on every collection, which is 50 requests at 5,000 NADs whether or
+        not a single detail fetch follows. Leaving it out of both figures below
+        understated that dataset by an order of magnitude and, once the budget
+        became something the runtime enforces rather than observes, would have
+        paced its warm-up ~10% faster than the ceiling actually allows.
+        """
+        return self.requests + self.requests_per_1k * scale.units_of(self.scales_with)
+
     def requests_for(self, scale: Scale) -> float:
         """Steady-state per-collection requests -- what you live with.
 
-        For a converging provider this is the churn, not the warm-up burst: once
-        the cache is full, only what turned over needs fetching.
+        For a converging provider the per-entity part is the churn, not the
+        warm-up burst: once the cache is full, only what turned over needs
+        fetching. The fixed part is paid regardless.
         """
         if self.converges:
             units = scale.units_of(self.scales_with) * 1000.0
-            return self.requests + units * self.churn_fraction
-        return self.requests + self.requests_per_1k * scale.units_of(self.scales_with)
+            return self._fixed_requests_for(scale) + units * self.churn_fraction
+        return self._fixed_requests_for(scale)
 
     def warmup_requests_for(self, scale: Scale) -> float:
-        """Per-collection requests while the cache is still filling."""
+        """Per-collection requests while the cache is still filling.
+
+        Bounded by the fleet, not just by the per-cycle ceiling: a warm-up
+        budget of 2,000 against an estate with 28 sessions spends 28 requests
+        and finishes, and reporting it as 2,000 makes a small deployment look
+        like it is about to do something alarming. Found on first contact with
+        the lab, where `plan` claimed 24,012 req/h to warm 28 sessions.
+        """
         if not self.converges:
             return self.requests_for(scale)
-        return self.requests + self.warmup_requests
+        units = scale.units_of(self.scales_with) * 1000.0
+        return self._fixed_requests_for(scale) + min(self.warmup_requests, units)
 
     def cycles_to_warm(self, scale: Scale) -> int:
         """Collections needed before coverage reaches the whole active set."""
@@ -217,6 +238,46 @@ class Cost:
             db_seconds_per_hour=self.db_seconds_for(scale) * cycles_per_hour,
             streams=1 if self.streaming else 0,
         )
+
+
+@dataclass(frozen=True)
+class Option:
+    """One operator-visible decision a dataset makes about its own breakdowns.
+
+    A dataset that bounds a dimension -- keeps the top K devices, rolls a
+    breakdown up to a coarser key -- must declare that bound here rather than
+    encode it as a constant in the collector. The bound then appears in the
+    config file, in ``plan``, and in the warnings printed at start, which is the
+    difference between a decision and a cap nobody knew about.
+
+    ``danger`` is called with (value, scale) at load and returns a message when
+    the declared value is legal but probably not meant at this fleet size.
+    """
+
+    name: str
+    default: object
+    description: str
+    choices: tuple = ()
+    minimum: Optional[int] = None
+    maximum: Optional[int] = None
+    danger: Optional[Callable] = None
+
+    def __post_init__(self):
+        if not self.name:
+            raise ModelError("option name is required")
+        if not self.description:
+            raise ModelError(f"option {self.name!r} must describe what it bounds")
+        if not isinstance(self.default, (bool, int, str)):
+            raise ModelError(
+                f"option {self.name!r} default must be a bool, int or string")
+        if self.choices and self.default not in self.choices:
+            raise ModelError(
+                f"option {self.name!r} default {self.default!r} is not one of "
+                f"its own choices")
+
+    @property
+    def kind(self):
+        return type(self.default)
 
 
 @dataclass(frozen=True)
@@ -277,10 +338,14 @@ class Dataset:
     providers: tuple
     default_interval: int
     metrics: tuple = field(default=())
+    options: tuple = field(default=())
 
     def __post_init__(self):
         if not self.name:
             raise ModelError("dataset name is required")
+        option_names = [option.name for option in self.options]
+        if len(set(option_names)) != len(option_names):
+            raise ModelError(f"dataset {self.name!r} declares an option twice")
         if not self.providers:
             raise ModelError(f"dataset {self.name!r} declares no providers")
         names = [provider.name for provider in self.providers]
@@ -296,6 +361,22 @@ class Dataset:
     @property
     def provider_names(self) -> tuple:
         return tuple(provider.name for provider in self.providers)
+
+    @property
+    def option_names(self) -> tuple:
+        return tuple(option.name for option in self.options)
+
+    def option(self, name: str) -> Option:
+        for option in self.options:
+            if option.name == name:
+                return option
+        raise ModelError(
+            f"dataset {self.name!r} has no option {name!r}"
+            + (f"; choose from {', '.join(self.option_names)}"
+               if self.options else ""))
+
+    def option_defaults(self) -> dict:
+        return {option.name: option.default for option in self.options}
 
     def provider(self, name: str) -> Provider:
         for provider in self.providers:

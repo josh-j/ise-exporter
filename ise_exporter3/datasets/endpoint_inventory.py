@@ -47,7 +47,7 @@ DIMENSIONS = (
 )
 
 
-def statements():
+def statements(limits):
     """One aggregate pass; the endpoint snapshot is not an event history.
 
     No time bound here on purpose: ENDPOINTS_DATA is current-state, so a window
@@ -70,12 +70,12 @@ def statements():
         # scan, and it avoids ordering by an aggregate outside its own GROUP BY
         # (ORA-00937), which is what the capped form did.
         "marginals": reporting.marginals(VIEW, "1 = 1", DIMENSIONS,
-                                         "COUNT(*) AS endpoints"),
+                                         "COUNT(*) AS endpoints", limits=limits),
     }
 
 
 def fetch(ctx):
-    results = ctx.transport.query_many(statements())
+    results = ctx.transport.query_many(statements(ctx.limits))
 
     for row in results.get("totals", []):
         ctx.set(endpoints_total, finite(row.get("endpoints")))
@@ -106,7 +106,7 @@ DATASET = Dataset(
         Provider(
             name="dataconnect",
             cost=Cost(target="oracle", db_seconds=6.0, scales_with="endpoints",
-                      db_seconds_per_1k=0.02, max_rows=6000),
+                      db_seconds_per_1k=0.02),
             supplies=frozenset({
                 "total", "profile", "identity_group", "posture_applicable"}),
             requires=("view:ENDPOINTS_DATA",),

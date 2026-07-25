@@ -58,17 +58,17 @@ GAUGES = {
 }
 
 
-def statements(hours):
-    recent = reporting.recent("timestamp", hours)
+def statements(hours, limits):
+    recent = reporting.recent("timestamp", hours, limits)
     return {
         "totals": f"SELECT COUNT(*) AS events FROM {VIEW} WHERE {recent}",
-        "marginals": reporting.marginals(VIEW, recent, DIMENSIONS),
+        "marginals": reporting.marginals(VIEW, recent, DIMENSIONS, limits=limits),
     }
 
 
 def fetch(ctx):
-    hours = reporting.window_hours(ctx.dataset.default_interval)
-    results = ctx.transport.query_many(statements(hours))
+    hours = reporting.window_hours(ctx.dataset.default_interval, ctx.limits)
+    results = ctx.transport.query_many(statements(hours, ctx.limits))
 
     for row in results.get("totals", []):
         ctx.set(errors_total, finite(row.get("events")))
@@ -93,7 +93,7 @@ DATASET = Dataset(
     providers=(
         Provider(
             name="dataconnect",
-            cost=Cost(target="oracle", db_seconds=4.0, max_rows=6000),
+            cost=Cost(target="oracle", db_seconds=4.0),
             supplies=frozenset({"message_code", "nad", "method", "psn"}),
             requires=("view:RADIUS_ERRORS_VIEW",),
             fetch=fetch,

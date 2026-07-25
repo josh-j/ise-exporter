@@ -34,6 +34,7 @@ from urllib3.util.retry import Retry
 
 from .. import telemetry
 from ..auth_guard import PersistentAuthGuard
+from ..rate_limit import BudgetLimiter
 from . import Transport, TransportError, guard_path
 
 
@@ -109,6 +110,14 @@ class RestTransport(Transport):
         self.mnt_url = f"https://{settings.host}/admin/API/mnt"
         self._lock = threading.RLock()
         self._shutdown = None
+        # The declared budget, enforced rather than merely measured. Before this
+        # the plan checked that the steady state fitted and nothing stopped a
+        # cold start from spending 2.8x the ceiling for its first two hours.
+        # `exporter.enforce_budget = false` turns it back into an observation,
+        # which is the same thing that flag already means for a plan over budget.
+        self.limiter = BudgetLimiter(
+            target, config.budget_for(target),
+            enforce=config.exporter.enforce_budget)
         self._guard = PersistentAuthGuard(
             guard_path(config, "rest"),
             (credentials.user, config.targets["pan"].host, config.targets["mnt"].host),
@@ -143,6 +152,16 @@ class RestTransport(Transport):
 
     def set_shutdown_event(self, shutdown):
         self._shutdown = shutdown
+        self.limiter.set_shutdown_event(shutdown)
+
+    def set_warming(self, warming):
+        """Whether a converging cache on this target still has work to do.
+
+        Set by the scheduler from the ``deferred`` count a collection reports,
+        because that is the only place that knows. Without a declared warm-up
+        burst this changes nothing.
+        """
+        self.limiter.set_warming(warming)
 
     def close(self):
         with self._lock:
@@ -183,6 +202,13 @@ class RestTransport(Transport):
             self._count(api, "auth_blocked")
             self._error(api, "auth_blocked", 401)
             raise TransportError("authentication_backoff")
+
+        # Wait for budget before the wire attempt, and after the auth guard: a
+        # request the guard is going to refuse should not first consume an
+        # hour's worth of allowance waiting for a slot it will not use.
+        self.limiter.acquire(api)
+        if self._shutdown is not None and self._shutdown.is_set():
+            raise TransportError("unexpected_error", "Shutting down")
 
         # Every attempt past this point reaches the wire, so it is what the
         # measured-load counter must reflect.

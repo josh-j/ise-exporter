@@ -20,6 +20,22 @@ NAD is a cross product: at 5,000 switches and ten dimension values each that is
 exception is the policy set, which is kept per NAD because "which switches are
 still in open mode" is a per-switch question and has no useful coarser form.
 
+That exception was still 20,000 series on its own -- past the soft warning and
+41 % of the hard ceiling for one metric family, before any other dataset has
+published anything. So it is bounded, and like every other bound in this
+exporter the bound is an operator decision declared in
+``datasets.session_authorization.options`` rather than a constant here:
+
+    policy_set_by_nad  publish the per-switch view at all
+    top_nads           switches published per policy set, most endpoints first
+
+Every session is still counted and still rolled up per ops owner by
+``ise3_session_policy_set_endpoints``; ``top_nads`` chooses only how many
+switches get their own series under each policy set. The breakdown exports
+``ise3_topk_groups_returned`` against ``ise3_topk_groups_total``, so a panel
+showing 200 switches out of 5,000 says so, and ``top_nads = 0`` publishes every
+switch and warns at start with the series count that implies.
+
 Location is deliberately absent: `network_devices` already publishes
 `ise3_network_device_assignment{nad,location,ops_owner}`, so a dashboard joins
 for it rather than every session series carrying a copy.
@@ -28,9 +44,10 @@ from collections import defaultdict
 
 from prometheus_client import Gauge
 
-from .. import detail_cache, nad_directory
+from .. import detail_cache, nad_directory, reporting
 from ..labels import label
-from ..model import Cost, Dataset, Provider
+from ..model import Cost, Dataset, Option, Provider
+from ..session_detail import project
 
 
 CACHE = "mnt_session_detail"
@@ -84,30 +101,57 @@ _METRICS = (status_endpoints, failure_reasons, auth_methods, authz_profiles,
 # lane; the cache converges over several cycles instead.
 WARMUP_FETCHES_PER_CYCLE = 2000
 
+# Only used to size a startup warning: how many policy sets a deployment
+# typically runs, so "one series per NAD" can be stated as a number rather than
+# as a shape. The real count comes from the appliance and is not knowable here.
+TYPICAL_POLICY_SETS = 4
+
+
+def _top_nads_danger(value, scale):
+    if value:
+        return ""
+    return (
+        "datasets.session_authorization.options.top_nads = 0 publishes one "
+        "series per (policy set, NAD) pair: about "
+        f"{scale.nads * TYPICAL_POLICY_SETS:,} series at the declared "
+        f"{scale.nads:,} NADs and a typical {TYPICAL_POLICY_SETS} policy sets, "
+        "which on its own is past the soft series warning. Nothing is truncated "
+        "and nothing is hidden -- this is only worth knowing before it lands")
+
+
+def _policy_set_by_nad_danger(value, scale):
+    if value:
+        return ""
+    return (
+        "datasets.session_authorization.options.policy_set_by_nad = false drops "
+        "the per-switch view of which policy set each NAD matched, which is the "
+        "open-mode versus closed-mode signal; the per-ops-owner rollup remains, "
+        "but no panel can name the switch")
+
+
+OPTIONS = (
+    Option(
+        name="policy_set_by_nad",
+        default=True,
+        description="publish the per-switch policy set breakdown, the "
+                    "open-mode versus closed-mode signal",
+        danger=_policy_set_by_nad_danger,
+    ),
+    Option(
+        name="top_nads",
+        default=200,
+        minimum=0,
+        maximum=100_000,
+        description="switches published per policy set, most endpoints first; "
+                    "0 publishes every switch",
+        danger=_top_nads_danger,
+    ),
+)
+
 
 def normalize_mac(mac):
     """ActiveList uses colons, some fields use dashes; the URL accepts colons."""
     return str(mac or "").strip().upper().replace("-", ":")
-
-
-def normalize_location(value):
-    """Strip the 'All Locations#' root so this joins with NAD inventory labels."""
-    if not value:
-        return "Unknown"
-    parts = str(value).split("#")
-    if parts and parts[0] == "All Locations" and len(parts) > 1:
-        return "#".join(parts[1:])
-    return value
-
-
-def parse_attributes(value):
-    """Parse ISE's ``:!:Key=Value:!:...`` other_attr_string format."""
-    parsed = {}
-    for part in str(value or "").split(":!:"):
-        key, separator, item = part.partition("=")
-        if separator and key.strip() and item.strip():
-            parsed[key.strip()] = item.strip()
-    return parsed
 
 
 def active_list(ctx):
@@ -153,17 +197,12 @@ def warm(ctx, cache, macs):
         if not rows:
             cache.count("empty")
             continue
-        cache.put(mac, rows[0])
+        # The projection, not the record: an MnT session document carries
+        # dozens of fields and 20,000 of them held whole was the largest thing
+        # this process retained. See session_detail.project.
+        cache.put(mac, project(rows[0]))
         cache.count("fetched")
     return len(outstanding) - len(batch)
-
-
-def _nad_key(detail):
-    return (
-        label(detail.get("network_device_name") or detail.get("nas_ip_address"),
-              "unknown"),
-        label(normalize_location(detail.get("location")), "Unknown"),
-    )
 
 
 def aggregate(cache, macs, directory):
@@ -184,36 +223,34 @@ def aggregate(cache, macs, directory):
         covered += 1
         # Accounting-only records carry no verdict and cannot say anything about
         # authorization; counting them would dilute every ratio below.
-        if "passed" not in detail and "failed" not in detail:
+        if not detail["has_verdict"]:
             continue
 
-        nad, _location = _nad_key(detail)
+        nad = label(detail["nad"] or detail["nas_ip"], "unknown")
         # ops_owner lives only in ERS groups, so it comes from the inventory
         # directory. A NAD that is not in inventory still counts, as "unknown" --
         # a session from an unconfigured NAD is itself worth seeing.
-        owner = label(directory.ops_owner(
-            detail.get("nas_ip_address"), detail.get("network_device_name")))
+        owner = label(directory.ops_owner(detail["nas_ip"], detail["nad"]))
 
-        if str(detail.get("passed", "")).lower() == "true":
+        if detail["passed"]:
             buckets["status"][("passed", owner)].add(mac)
-        if str(detail.get("failed", "")).lower() == "true":
+        if detail["failed"]:
             buckets["status"][("failed", owner)].add(mac)
-            reason = str(detail.get("failure_reason", "")).split(" ", 1)[0]
+            reason = detail["failure_reason"].split(" ", 1)[0]
             if reason:
                 buckets["reason"][(label(reason), owner)].add(mac)
 
-        method = detail.get("authentication_method")
-        if method:
-            buckets["method"][(label(method), owner)].add(mac)
+        if detail["method"]:
+            buckets["method"][(label(detail["method"]), owner)].add(mac)
 
         # selected_azn_profiles can be comma-separated.
-        for profile in str(detail.get("selected_azn_profiles", "")).split(","):
+        for profile in detail["profiles"].split(","):
             if profile.strip():
                 buckets["profile"][(label(profile.strip()), owner)].add(mac)
 
-        attributes = parse_attributes(detail.get("other_attr_string"))
-        rule = attributes.get("AuthorizationPolicyMatchedRule")
-        policy_set = attributes.get("ISEPolicySetName")
+        # Already parsed out of other_attr_string when the record was cached,
+        # rather than on every read of every session on every cycle.
+        rule, policy_set = detail["authz_rule"], detail["policy_set"]
         if rule:
             buckets["rule"][(label(rule), owner)].add(mac)
         if policy_set:
@@ -221,6 +258,27 @@ def aggregate(cache, macs, directory):
             buckets["policy_set_nad"][(label(policy_set), nad)].add(mac)
 
     return buckets, covered
+
+
+def rank_nads(bucket, keep):
+    """Order each policy set's switches by endpoint count and keep the top K.
+
+    Ranked within a policy set rather than across all of them, because the
+    question is "which switches are on this policy set", and a global top-K
+    would let one busy policy set crowd every other one out of the answer.
+    Ties break on the switch name so the published set is stable between
+    collections -- a top-K that reshuffles makes every panel look like something
+    changed. ``keep`` of 0 keeps all of them.
+    """
+    by_policy = {}
+    for (policy_set, nad), members in bucket.items():
+        by_policy.setdefault(policy_set, []).append((nad, members))
+    kept = []
+    for policy_set in sorted(by_policy):
+        rows = sorted(by_policy[policy_set], key=lambda row: (-len(row[1]), row[0]))
+        for nad, members in (rows if not keep else rows[:keep]):
+            kept.append((policy_set, nad, members))
+    return kept
 
 
 def fetch(ctx):
@@ -238,6 +296,9 @@ def fetch(ctx):
     directory = nad_directory.shared()
     buckets, covered = aggregate(cache, macs, directory)
     cache.publish(len(macs), deferred_count=outstanding)
+    # The scheduler revisits a filling cache at the rate the budget affords
+    # rather than at this dataset's cadence, so it needs the count too.
+    ctx.defer(outstanding)
 
     for (status, owner), members in buckets["status"].items():
         ctx.set(status_endpoints, len(members), status=status, ops_owner=owner)
@@ -251,8 +312,20 @@ def fetch(ctx):
         ctx.set(authz_rules, len(members), authz_rule=rule, ops_owner=owner)
     for (name, owner), members in buckets["policy_set"].items():
         ctx.set(policy_sets, len(members), policy_set=name, ops_owner=owner)
-    for (name, nad), members in buckets["policy_set_nad"].items():
-        ctx.set(policy_set_by_nad, len(members), policy_set=name, nad=nad)
+
+    # The one bounded breakdown in this dataset. The rollup above is computed
+    # from every session regardless, so bounding this one narrows what is
+    # published and never what is measured.
+    pairs = buckets["policy_set_nad"]
+    if ctx.option("policy_set_by_nad"):
+        kept = rank_nads(pairs, ctx.option("top_nads"))
+        reporting.publish_coverage(ctx, "policy_set_nad", len(kept), len(pairs))
+        for name, nad, members in kept:
+            ctx.set(policy_set_by_nad, len(members), policy_set=name, nad=nad)
+    else:
+        # Zero of however many exist, rather than no signal at all: an absent
+        # coverage series and a complete one look identical on a dashboard.
+        reporting.publish_coverage(ctx, "policy_set_nad", 0, len(pairs))
 
 
 DATASET = Dataset(
@@ -260,6 +333,7 @@ DATASET = Dataset(
     description="Policy set, authorization rule, profile and method per endpoint",
     default_interval=300,
     metrics=_METRICS,
+    options=OPTIONS,
     providers=(
         Provider(
             name="mnt",

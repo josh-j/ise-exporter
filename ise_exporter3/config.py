@@ -1,18 +1,28 @@
-"""TOML configuration: five sections, and everything else is derived.
+"""TOML configuration: six sections, and everything else is derived.
 
 v2 had roughly ninety flat fields, and its safety limits were spread across
 config hard ranges, client-side clamps and collector helpers, so no one could
-read a config and say what it would do. Here a config answers four questions:
+read a config and say what it would do. Here a config answers five questions:
 
     profile   how big is this deployment, and what is it allowed to spend
     scale     how many NADs / endpoints / sessions (makes the plan predictive)
     targets   which ISE personas can be reached, and as whom
     budget    the ceiling per target
-    datasets  which are on, which source to prefer, and how often
+    limits    the ceilings on what one statement, batch and snapshot may return
+    datasets  which are on, which source to prefer, how often, and any bound
+              a dataset puts on its own breakdowns
 
-Pacing, cooldowns, row ceilings and timeouts are *not* configurable knobs. They
-fall out of the budget and the provider's declared cost, which is what keeps this
-file short and keeps the load model honest. Hard safety floors live in code.
+Pacing, cooldowns and timeouts are still not knobs: they fall out of the budget
+and the provider's declared cost. Row ceilings used to be in that list, as
+module constants nobody could see -- and three of them silently contradicted
+each other until ``tacacs_activity`` stopped publishing at the declared scale.
+They are derived from ``[scale]`` now and shown in ``[limits]``, because a
+ceiling an operator cannot see or name is not a contract. See ``limits.py`` for
+the derivation and for which values are refused outright.
+
+The same rule governs ``datasets.<name>.options``: a dataset that bounds one of
+its own dimensions must declare that bound here, so no breakdown is narrowed by
+a constant in a collector. Hard safety floors still live in code.
 
 Secrets never appear here: passwords come from the environment only.
 """
@@ -29,6 +39,7 @@ try:
 except ModuleNotFoundError:  # pragma: no cover - Python 3.10 compatibility
     import tomli as tomllib
 
+from . import limits as limits_module
 from .model import SCALE_DIMENSIONS, TARGETS, Scale
 
 
@@ -45,7 +56,8 @@ SECRET_ENV = MappingProxyType({
 _DURATION = re.compile(r"^\s*(\d+)\s*([smhd]?)\s*$")
 _DURATION_UNITS = {"": 1, "s": 1, "m": 60, "h": 3600, "d": 86400}
 
-_TOP_LEVEL = frozenset({"profile", "exporter", "scale", "targets", "budget", "datasets"})
+_TOP_LEVEL = frozenset({"profile", "exporter", "scale", "targets", "budget",
+                        "limits", "datasets"})
 
 _EXPORTER_FIELDS = frozenset({
     "port", "api_port", "api_host", "state_db", "log_level", "enforce_budget",
@@ -63,8 +75,9 @@ _TARGET_FIELDS = MappingProxyType({
                          "client_key", "ca_bundle", "verify_tls"}),
 })
 
-_BUDGET_FIELDS = frozenset({"requests_per_hour", "duty_cycle_percent"})
-_DATASET_FIELDS = frozenset({"enabled", "providers", "interval"})
+_BUDGET_FIELDS = frozenset({"requests_per_hour", "duty_cycle_percent",
+                            "warmup_requests_per_hour"})
+_DATASET_FIELDS = frozenset({"enabled", "providers", "interval", "options"})
 
 # A profile is a size and a spending ceiling. It deliberately does not override
 # cadences: those belong to the dataset that knows what its data is worth.
@@ -182,25 +195,54 @@ class TargetConfig:
 
 @dataclass(frozen=True)
 class TargetBudget:
-    """What one target may be spent per hour. Zero means no declared ceiling."""
+    """What one target may be spent per hour. Zero means no declared ceiling.
+
+    ``warmup_requests_per_hour`` is the one place where "what this costs once
+    warm" and "what it may cost while filling" are allowed to differ. A cold
+    start is a genuinely different decision from a steady state -- 20,000 MnT
+    requests to reach full session coverage is either two hours of burst or
+    twelve hours of patience -- and the exporter should make an operator say
+    which, rather than picking one silently.
+    """
 
     target: str
     requests_per_hour: float = 0.0
     duty_cycle_percent: float = 0.0
+    warmup_requests_per_hour: float = 0.0
 
     @property
     def declared(self):
         return bool(self.requests_per_hour or self.duty_cycle_percent)
 
+    @property
+    def warmup_multiple(self):
+        """How many times the steady ceiling the declared burst allows."""
+        if not (self.warmup_requests_per_hour and self.requests_per_hour):
+            return 0.0
+        return self.warmup_requests_per_hour / self.requests_per_hour
+
 
 @dataclass(frozen=True)
 class DatasetConfig:
-    """Operator intent for one dataset. Three keys, nothing else."""
+    """Operator intent for one dataset: three keys plus its declared options."""
 
     name: str
     enabled: bool = True
     providers: tuple = ()   # empty means the dataset's own declared order
     interval: int = 0       # zero means the dataset's default cadence
+    # Every option the dataset declares, defaults filled in, so a collector
+    # never has to ask whether a bound was configured -- only what it is.
+    options: MappingProxyType = field(default_factory=lambda: MappingProxyType({}))
+    # The subset the operator set by hand, for `plan` and for the warnings.
+    declared_options: tuple = ()
+
+    def option(self, name):
+        try:
+            return self.options[name]
+        except KeyError:
+            raise KeyError(
+                f"dataset {self.name!r} has no option {name!r}; declare it in "
+                "its Dataset(options=...)") from None
 
 
 @dataclass(frozen=True)
@@ -225,6 +267,7 @@ class Config:
     exporter: ExporterConfig
     targets: MappingProxyType
     budget: MappingProxyType
+    limits: object                   # limits.Limits, derived from scale
     datasets: MappingProxyType
     warnings: tuple = field(default=())
 
@@ -232,7 +275,23 @@ class Config:
         return self.targets[name]
 
     def dataset(self, name):
-        return self.datasets.get(name, DatasetConfig(name=name))
+        """Operator intent for one dataset, with its option defaults filled in.
+
+        A dataset absent from the file is configured -- by its own declared
+        defaults -- rather than unconfigured, so no collector has to carry a
+        second copy of a bound in case nobody wrote one down.
+        """
+        existing = self.datasets.get(name)
+        if existing is not None:
+            return existing
+        from . import datasets as registry
+
+        try:
+            declared = registry.get(name)
+        except KeyError:
+            return DatasetConfig(name=name)
+        return DatasetConfig(
+            name=name, options=MappingProxyType(declared.option_defaults()))
 
     def budget_for(self, target):
         return self.budget[target]
@@ -268,7 +327,8 @@ class Config:
         exporter = _build_exporter(document.get("exporter", {}))
         targets = _build_targets(document.get("targets", {}), environ)
         budget = _build_budget(document.get("budget", {}), preset["budget"], warnings)
-        datasets = _build_datasets(document.get("datasets", {}))
+        limits = _build_limits(document.get("limits", {}), scale, warnings)
+        datasets = _build_datasets(document.get("datasets", {}), scale, warnings)
 
         return cls(
             path=path,
@@ -277,6 +337,7 @@ class Config:
             exporter=exporter,
             targets=MappingProxyType(targets),
             budget=MappingProxyType(budget),
+            limits=limits,
             datasets=MappingProxyType(datasets),
             warnings=tuple(warnings),
         )
@@ -393,15 +454,103 @@ def _build_budget(document, preset, warnings):
             raise ConfigError(
                 f"budget.{name}.duty_cycle_percent does not apply; only the "
                 "oracle target has a duty cycle")
+        if name == "oracle" and values.get("warmup_requests_per_hour"):
+            raise ConfigError(
+                "budget.oracle.warmup_requests_per_hour does not apply; the "
+                "oracle target is budgeted as a duty cycle, and no Data Connect "
+                "provider caches per-entity detail")
         entry = TargetBudget(target=name, **values)
         if not entry.declared:
             warnings.append(
                 f"budget.{name} declares no ceiling; load on this target is unbounded")
+        if entry.warmup_requests_per_hour and not entry.requests_per_hour:
+            raise ConfigError(
+                f"budget.{name}.warmup_requests_per_hour is declared without a "
+                f"budget.{name}.requests_per_hour to burst above")
+        if 0 < entry.warmup_requests_per_hour < entry.requests_per_hour:
+            raise ConfigError(
+                f"budget.{name}.warmup_requests_per_hour "
+                f"({entry.warmup_requests_per_hour:,.0f}) is below the steady "
+                f"budget.{name}.requests_per_hour ({entry.requests_per_hour:,.0f}), "
+                "so it would slow a cold start rather than shorten it")
+        if entry.warmup_multiple > 1:
+            # Deliberate, declared, and worth restating at start: this is the
+            # one setting that lets the exporter knowingly exceed its own
+            # steady ceiling, and the appliance is what absorbs it.
+            warnings.append(
+                f"budget.{name}.warmup_requests_per_hour allows "
+                f"{entry.warmup_requests_per_hour:,.0f} requests/hour while a "
+                f"cache is still filling -- {entry.warmup_multiple:.1f}x the "
+                f"declared steady ceiling of {entry.requests_per_hour:,.0f}. "
+                "`plan` prints how long that burst is expected to last")
         budget[name] = entry
     return budget
 
 
-def _build_datasets(document):
+def _build_limits(document, scale, warnings):
+    """Resolve the row, byte and series ceilings against the declared scale.
+
+    A contradiction here is refused rather than warned about: the ceilings that
+    disagreed before this section existed did not produce a degraded dataset,
+    they produced a dataset that failed every collection after paying for the
+    scan. That is a configuration error and it should look like one.
+    """
+    if not isinstance(document, dict):
+        raise ConfigError("limits must be a table")
+    try:
+        return limits_module.derive(scale, document, warnings)
+    except limits_module.LimitsError as error:
+        raise ConfigError(str(error)) from error
+
+
+def _build_dataset_options(dataset, document):
+    """Validate one dataset's declared options and fill in its defaults."""
+    if not isinstance(document, dict):
+        raise ConfigError(f"datasets.{dataset.name}.options must be a table")
+    _reject_unknown(document, set(dataset.option_names),
+                    f"datasets.{dataset.name}.options")
+    values = dataset.option_defaults()
+    for name, value in document.items():
+        option = dataset.option(name)
+        key = f"datasets.{dataset.name}.options.{name}"
+        value = _typed(value, option.kind, key)
+        if option.choices and value not in option.choices:
+            raise ConfigError(
+                f"{key} must be one of "
+                f"{', '.join(repr(choice) for choice in option.choices)}, "
+                f"got {value!r}")
+        if option.minimum is not None and value < option.minimum:
+            raise ConfigError(f"{key} must be at least {option.minimum}")
+        if option.maximum is not None and value > option.maximum:
+            raise ConfigError(f"{key} must be at most {option.maximum}")
+        values[name] = value
+    return MappingProxyType(values), tuple(sorted(document))
+
+
+def _warn_dangerous_options(configured, scale, warnings):
+    """Say out loud what each enabled dataset's bounds will actually do.
+
+    Judged on the **effective** value rather than on whether an operator typed
+    it, because the warning describes what the exporter is about to publish, not
+    who chose it. A disabled dataset publishes nothing, so it says nothing.
+    """
+    from . import datasets as registry
+
+    for dataset in registry.all_datasets():
+        settings = configured.get(dataset.name)
+        if settings is not None and not settings.enabled:
+            continue
+        values = (settings.options if settings is not None
+                  else dataset.option_defaults())
+        for option in dataset.options:
+            if option.danger is None:
+                continue
+            message = option.danger(values[option.name], scale)
+            if message:
+                warnings.append(message)
+
+
+def _build_datasets(document, scale, warnings):
     from . import datasets as registry
 
     known = set(registry.names())
@@ -413,6 +562,8 @@ def _build_datasets(document):
         _reject_unknown(section, _DATASET_FIELDS, f"datasets.{name}")
         dataset = registry.get(name)
         values = {"name": name}
+        values["options"], values["declared_options"] = _build_dataset_options(
+            dataset, section.get("options", {}))
         if "enabled" in section:
             values["enabled"] = _typed(
                 section["enabled"], bool, f"datasets.{name}.enabled")
@@ -435,4 +586,5 @@ def _build_datasets(document):
                     f"datasets.{name}.providers lists a provider twice")
             values["providers"] = tuple(providers)
         configured[name] = DatasetConfig(**values)
+    _warn_dangerous_options(configured, scale, warnings)
     return configured
