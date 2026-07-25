@@ -78,6 +78,25 @@ def _page(hours, offset, limits):
 
 
 def fetch(ctx):
+    # Checked BEFORE any Oracle work, not after. This dataset cannot answer
+    # without the inventory, and a scan whose result is then discarded is the
+    # exact failure the batch-ceiling defect had: paying for the query and
+    # aborting anyway. Retrying on a one-minute timer made that a recurring
+    # cost rather than a one-off, which is how it was caught -- in production,
+    # burning duty cycle every sixty seconds through a cold start.
+    directory = nad_directory.shared()
+    if not len(directory):
+        # Silence is measured against the set of configured NADs, so an empty
+        # directory does not mean "nothing is dead" -- it means the question
+        # cannot be asked yet. Failing keeps the previous snapshot and names
+        # the reason; `dependency_pending` is deliberately not a slow-retry
+        # reason, so the first inventory collection unblocks this within a
+        # minute.
+        ctx.fail("dependency_pending",
+                 "the NAD directory is empty; network_devices has not published "
+                 "an inventory yet, so silence cannot be distinguished from an "
+                 "unconfigured switch")
+
     hours = reporting.window_hours(ctx.dataset.default_interval, ctx.limits)
 
     rows = ctx.transport.query(_page(hours, 0, ctx.limits))
@@ -102,24 +121,6 @@ def fetch(ctx):
 
     # A NAD that authenticated nothing produces no row at all, so silence has to
     # come from the inventory side. This is the dead-switch signal.
-    directory = nad_directory.shared()
-    if not len(directory):
-        # Without the inventory there is no set to be silent *against*, and the
-        # loop below would fall through to `silent_total = 0` -- "no dead
-        # switches" -- which is the confident wrong answer this exporter exists
-        # to avoid. Found on the lab: at a cold start this dataset runs before
-        # network_devices has filled the directory, and published two series
-        # against 504 configured NADs.
-        #
-        # Failing keeps the previous snapshot and names the reason.
-        # `dependency_pending` is deliberately not a slow-retry reason, so the
-        # scheduler comes back in a minute rather than in fifteen, and the very
-        # first inventory collection unblocks it.
-        ctx.fail("dependency_pending",
-                 "the NAD directory is empty; network_devices has not published "
-                 "an inventory yet, so silence cannot be distinguished from an "
-                 "unconfigured switch")
-
     quiet = 0
     for nad, _location, _owner in directory.classifications():
         nad = label(nad)
