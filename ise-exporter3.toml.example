@@ -1,0 +1,146 @@
+# ise-exporter3 configuration.
+#
+# Run `ise-exporter3 plan --config <this file>` to see exactly which source will
+# supply each dataset and what it will cost each ISE persona per hour. That
+# command needs no credentials and no appliance, so you can check a configuration
+# before pointing it at production.
+#
+# Passwords are never written here. They come from the environment:
+#   ISE_PASS                     the PAN/MnT read-only account
+#   ISE_DATACONNECT_PASSWORD     the fixed `dataconnect` Oracle account
+#   ISE_PXGRID_PASSWORD          only when using password-based pxGrid auth
+
+# Fleet size and spending ceilings. "production" (the default, sized for
+# ~100k endpoints / ~5k NADs) or "lab". Anything below overrides it.
+profile = "production"
+
+[exporter]
+port = 9618                                   # Prometheus scrape listener
+api_host = "127.0.0.1"                        # operator API; localhost by default
+api_port = 9619
+state_db = "/var/lib/ise-exporter3/state.sqlite3"
+log_level = "INFO"
+# A plan over budget is a configuration error, not a production surprise. Set
+# false to downgrade it to a startup warning.
+enforce_budget = true
+
+# How big this deployment is. Costs that scale with the fleet are resolved
+# against these numbers, so the plan is predictive for *your* estate.
+[scale]
+nads = 5000
+accounts = 1000
+endpoints = 100000
+sessions = 20000
+
+# ---------------------------------------------------------------------------
+# Targets: which ISE personas can be reached, and as whom.
+# A dataset whose provider targets an unconfigured persona is reported by `plan`
+# as unavailable, by name, instead of silently producing an empty panel.
+# ---------------------------------------------------------------------------
+
+[targets.pan]
+host = "pan1.example.com"
+user = "ers.readonly"
+ers_port = 9060
+ca_bundle = "/etc/ise-exporter3/certs/ise-rest-ca.pem"
+verify_tls = true
+
+[targets.mnt]
+# Authenticates with the PAN account above; no separate credential.
+host = "mnt1.example.com"
+ca_bundle = "/etc/ise-exporter3/certs/ise-mnt-ca.pem"
+verify_tls = true
+
+[targets.oracle]
+# Data Connect. ISE fixes the user, service name and port; they are not ordinary
+# Oracle settings. Must be the *active* Data Connect MnT, and must be the
+# hostname on that node's Admin certificate.
+host = "mnt1.example.com"
+port = 2484
+service = "cpm10"
+user = "dataconnect"
+ca_bundle = "/etc/ise-exporter3/certs/ise-dataconnect-ca.pem"
+verify_tls = true
+
+[targets.pxgrid]
+# Optional. Supplies live sessions and the endpoint attributes (model, OS, MDM)
+# that no Data Connect view carries. Leave the host empty to run without it:
+# datasets that can fall back will say so in `plan`.
+host = ""
+port = 8910
+node_name = "ise-exporter"
+client_cert = ""
+client_key = ""
+ca_bundle = ""
+verify_tls = true
+
+# ---------------------------------------------------------------------------
+# Budget: the ceiling per target. This is what makes load a decision rather
+# than a discovery. Pacing, cooldowns, row ceilings and query timeouts are all
+# derived from these plus each provider's declared cost -- they are not knobs.
+# ---------------------------------------------------------------------------
+
+[budget]
+pan.requests_per_hour = 3000
+# Sized for full per-endpoint coverage rather than a sample. See
+# `plan` for the warm-up burst and time to full coverage.
+mnt.requests_per_hour = 4000
+pxgrid.requests_per_hour = 200
+# Oracle is budgeted as a duty cycle: the share of wall-clock time the exporter
+# may keep a Data Connect statement running. 2% is the large-estate default.
+oracle.duty_cycle_percent = 2.0
+
+# ---------------------------------------------------------------------------
+# Datasets: three keys each -- enabled, providers, interval. All are optional;
+# omit a dataset entirely to take its defaults. `providers` is an ordered
+# preference list: the first one whose target is reachable wins, and the runtime
+# exports which one is live. Because sources differ in meaning, `provider` is a
+# label on the data, and dashboards gate on it.
+# ---------------------------------------------------------------------------
+
+[datasets.active_sessions]
+# pxGrid is nearest to real time and cheapest; MnT is authoritative for PSN;
+# Data Connect reconstructs from accounting and is by far the most expensive.
+providers = ["pxgrid", "mnt", "dataconnect"]
+interval = "5m"
+
+[datasets.endpoint_attributes]
+# Model / OS / MDM exist only on pxGrid, and deliberately have no fallback: the
+# ERS alternative supplied `profile` alone, which endpoint_inventory already
+# covers from one Data Connect query, and at 100k endpoints it could not keep a
+# cache warm inside the PAN budget. Without pxGrid configured this dataset is
+# unavailable, and `plan` says so by name.
+providers = ["pxgrid"]
+interval = "6h"
+
+[datasets.endpoint_inventory]
+# Data Connect aggregates server-side and is nearly flat in fleet size. The ERS
+# fallback pages at 100 rows -- roughly 1000 PAN requests at 100k endpoints.
+providers = ["dataconnect", "ers"]
+interval = "6h"
+
+[datasets.radius_reporting]
+interval = "30m"
+
+[datasets.nad_health]
+interval = "6h"
+
+# The two settings below are what `plan` talked us out of. At the tempting
+# psn_performance = "5m" and source_freshness = "30m", the oracle target lands at
+# 2.44% duty against a 2.0% ceiling -- psn_performance alone is 1.0% of it. That
+# is the v2 failure mode in miniature: cadences that read as operational in the
+# config but are throttled to fiction at runtime. Slowing the PSN rollup to 10m
+# and demoting the freshness probe to 6h brings the plan to ~1.7% and makes every
+# stated cadence one the exporter can actually keep.
+[datasets.psn_performance]
+interval = "10m"
+
+[datasets.source_freshness]
+interval = "6h"
+
+# Example of turning something off: TACACS costs a large ERS walk plus a
+# reporting scan, and is dead weight if Device Administration is not in use.
+# [datasets.tacacs_config]
+# enabled = false
+# [datasets.tacacs_activity]
+# enabled = false

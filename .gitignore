@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+.venv/
+.env
+certs/
+*.cer
+*.key
+dist/
+test-results/
+docs/
+tests/

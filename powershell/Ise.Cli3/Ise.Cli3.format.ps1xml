@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Default table views so the common cmdlets read well without piping to
+     Format-Table. The dataset view leads with the source, because "which one
+     is answering" is the first thing an operator needs to know. -->
+<Configuration>
+  <ViewDefinitions>
+    <View>
+      <Name>IseDataset</Name>
+      <ViewSelectedBy>
+        <TypeName>Deserialized.System.Management.Automation.PSCustomObject</TypeName>
+      </ViewSelectedBy>
+      <TableControl>
+        <TableHeaders>
+          <TableColumnHeader><Label>Dataset</Label><Width>24</Width></TableColumnHeader>
+          <TableColumnHeader><Label>Provider</Label><Width>12</Width></TableColumnHeader>
+          <TableColumnHeader><Label>Every</Label><Width>6</Width></TableColumnHeader>
+          <TableColumnHeader><Label>AgeSec</Label><Width>8</Width></TableColumnHeader>
+          <TableColumnHeader><Label>Fails</Label><Width>6</Width></TableColumnHeader>
+          <TableColumnHeader><Label>Reason</Label></TableColumnHeader>
+        </TableHeaders>
+        <TableRowEntries>
+          <TableRowEntry>
+            <TableColumnItems>
+              <TableColumnItem><PropertyName>dataset</PropertyName></TableColumnItem>
+              <TableColumnItem><PropertyName>provider</PropertyName></TableColumnItem>
+              <TableColumnItem><PropertyName>interval</PropertyName></TableColumnItem>
+              <TableColumnItem><PropertyName>last_success_age_seconds</PropertyName></TableColumnItem>
+              <TableColumnItem><PropertyName>consecutive_failures</PropertyName></TableColumnItem>
+              <TableColumnItem><PropertyName>failure_reason</PropertyName></TableColumnItem>
+            </TableColumnItems>
+          </TableRowEntry>
+        </TableRowEntries>
+      </TableControl>
+    </View>
+  </ViewDefinitions>
+</Configuration>

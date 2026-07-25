@@ -1,0 +1,305 @@
+{
+  "annotations": {},
+  "description": "Which source supplies each dataset, when it changed, and why. Sources differ in meaning, so a dataset running on a fallback may be answering a narrower question than its preferred source would.",
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "panels": [
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "id": 0,
+      "panels": [],
+      "title": "Active source",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${prometheus}"
+      },
+      "description": "The source currently supplying each dataset. A dataset with a row here is being collected; one that vanished has no usable source at all, which the Collection row explains.",
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 9,
+        "w": 12,
+        "x": 0,
+        "y": 1
+      },
+      "options": null,
+      "repeatDirection": "h",
+      "targets": [
+        {
+          "expr": "ise3_dataset_provider_active == 1",
+          "instant": true,
+          "legendFormat": "{{dataset}} / {{provider}}",
+          "range": false,
+          "refId": "A"
+        }
+      ],
+      "title": "Live source per dataset",
+      "transformations": [],
+      "transparent": false,
+      "type": "table"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${prometheus}"
+      },
+      "description": "Non-zero means a dataset fell back. This is the signal v1 never had: it swapped sources silently, so a panel changed meaning with nothing to show for it.",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "fillOpacity": 0
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 9,
+        "w": 12,
+        "x": 12,
+        "y": 1
+      },
+      "options": {
+        "legend": {
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": false
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "asc"
+        }
+      },
+      "repeatDirection": "h",
+      "targets": [
+        {
+          "expr": "sum(ise3_dataset_provider_degraded)",
+          "instant": false,
+          "legendFormat": "degraded",
+          "range": true,
+          "refId": "A"
+        },
+        {
+          "expr": "ise3_dataset_provider_degraded == 1",
+          "instant": false,
+          "legendFormat": "{{dataset}}",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "title": "Datasets not on their preferred source",
+      "transformations": [],
+      "transparent": false,
+      "type": "timeseries"
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 10
+      },
+      "id": 0,
+      "panels": [],
+      "title": "Why it changed",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${prometheus}"
+      },
+      "description": "The bounded reason recorded when a dataset stepped to another source, and the source it stepped to.",
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 11
+      },
+      "options": null,
+      "repeatDirection": "h",
+      "targets": [
+        {
+          "expr": "ise3_dataset_provider_reason_info == 1",
+          "instant": true,
+          "legendFormat": "{{dataset}} {{provider}} {{reason}}",
+          "range": false,
+          "refId": "A"
+        }
+      ],
+      "title": "Reason each fallback engaged",
+      "transformations": [],
+      "transparent": false,
+      "type": "table"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${prometheus}"
+      },
+      "description": "Sources an operator listed that this build cannot run: not implemented, target not configured, or a required reporting view the account cannot see.",
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 11
+      },
+      "options": null,
+      "repeatDirection": "h",
+      "targets": [
+        {
+          "expr": "ise3_dataset_provider_available == 0",
+          "instant": true,
+          "legendFormat": "{{dataset}} / {{provider}}",
+          "range": false,
+          "refId": "A"
+        }
+      ],
+      "title": "Declared but unusable sources",
+      "transformations": [],
+      "transparent": false,
+      "type": "table"
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 19
+      },
+      "id": 0,
+      "panels": [],
+      "title": "Collection",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${prometheus}"
+      },
+      "description": "up is the last attempt; fresh means the snapshot is inside two cadences. A dataset that is up but not fresh is collecting more slowly than it claims.",
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 9,
+        "w": 12,
+        "x": 0,
+        "y": 20
+      },
+      "options": null,
+      "repeatDirection": "h",
+      "targets": [
+        {
+          "expr": "ise3_dataset_up",
+          "instant": true,
+          "legendFormat": "{{dataset}} up",
+          "range": false,
+          "refId": "A"
+        },
+        {
+          "expr": "ise3_dataset_fresh",
+          "instant": true,
+          "legendFormat": "{{dataset}} fresh",
+          "range": false,
+          "refId": "B"
+        }
+      ],
+      "title": "Dataset health",
+      "transformations": [],
+      "transparent": false,
+      "type": "table"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${prometheus}"
+      },
+      "description": "One bounded operator explanation per failing dataset. Empty is the healthy state.",
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 9,
+        "w": 12,
+        "x": 12,
+        "y": 20
+      },
+      "options": null,
+      "repeatDirection": "h",
+      "targets": [
+        {
+          "expr": "ise3_dataset_last_failure_detail_info == 1",
+          "instant": true,
+          "legendFormat": "{{dataset}} {{reason}}",
+          "range": false,
+          "refId": "A"
+        }
+      ],
+      "title": "Latest failure per dataset",
+      "transformations": [],
+      "transparent": false,
+      "type": "table"
+    }
+  ],
+  "refresh": "1m",
+  "schemaVersion": 36,
+  "style": "dark",
+  "tags": [
+    "ise",
+    "ise-exporter3"
+  ],
+  "templating": {
+    "list": [
+      {
+        "auto": false,
+        "auto_count": 30,
+        "auto_min": "10s",
+        "hide": 0,
+        "id": "00000000-0000-0000-0000-000000000000",
+        "includeAll": false,
+        "label": "Prometheus",
+        "multi": false,
+        "name": "prometheus",
+        "query": "prometheus",
+        "skipUrlSync": false,
+        "type": "datasource"
+      }
+    ]
+  },
+  "time": {
+    "from": "now-6h",
+    "to": "now"
+  },
+  "timezone": "browser",
+  "title": "ISE Exporter 3 \u2014 Sources",
+  "uid": "ise3-sources"
+}

@@ -1,0 +1,216 @@
+"""Framework metrics: dataset health, provider selection, and load.
+
+Only metrics the framework itself owns live here. Data metrics belong to the
+dataset module that produces them, listed in its ``Dataset.metrics`` -- that is
+what keeps dataset facts in one file instead of scattered across a registry.
+
+The load families are the honesty mechanism. Planned load comes from declared
+costs; measured load is counted by the transports as requests actually leave.
+Drift between the two means a cost declaration is wrong, and it is the one defect
+this design cannot catch by construction.
+"""
+from prometheus_client import Counter, Gauge, Histogram
+
+
+# --- identity ---
+exporter_build_info = Gauge(
+    "ise3_exporter_build_info", "Exporter version and compatibility target",
+    ["version", "target_ise_release"])
+
+# --- dataset health ---
+dataset_enabled = Gauge(
+    "ise3_dataset_enabled", "Dataset is enabled in configuration", ["dataset"])
+dataset_interval_seconds = Gauge(
+    "ise3_dataset_interval_seconds", "Configured collection cadence", ["dataset"])
+dataset_up = Gauge(
+    "ise3_dataset_up", "Latest collection attempt succeeded",
+    ["dataset", "provider"])
+dataset_fresh = Gauge(
+    "ise3_dataset_fresh", "Latest successful snapshot is within two cadences",
+    ["dataset", "provider"])
+dataset_last_success_timestamp = Gauge(
+    "ise3_dataset_last_success_timestamp", "Unix time of the last success",
+    ["dataset", "provider"])
+dataset_last_attempt_timestamp = Gauge(
+    "ise3_dataset_last_attempt_timestamp", "Unix time of the last attempt",
+    ["dataset", "provider"])
+dataset_next_run_timestamp = Gauge(
+    "ise3_dataset_next_run_timestamp", "Unix time this dataset is next due",
+    ["dataset", "provider"])
+dataset_collection_duration_seconds = Gauge(
+    "ise3_dataset_collection_duration_seconds", "Duration of the last collection",
+    ["dataset", "provider"])
+dataset_consecutive_failures = Gauge(
+    "ise3_dataset_consecutive_failures", "Consecutive failed attempts", ["dataset"])
+dataset_failures_total = Counter(
+    "ise3_dataset_failures_total", "Failed collection attempts by bounded reason",
+    ["dataset", "provider", "reason"])
+dataset_last_failure_info = Gauge(
+    "ise3_dataset_last_failure_info", "Bounded reason for the latest failure",
+    ["dataset", "provider", "reason"])
+dataset_last_failure_detail_info = Gauge(
+    "ise3_dataset_last_failure_detail_info",
+    "One bounded operator explanation for the latest failure",
+    ["dataset", "provider", "reason", "detail"])
+
+# --- provider selection ---
+# Sources differ in meaning, so which one is live is data, not just health. A
+# dashboard reading a multi-source dataset must gate on provider_active.
+dataset_provider_active = Gauge(
+    "ise3_dataset_provider_active", "Provider currently supplying this dataset",
+    ["dataset", "provider"])
+dataset_provider_available = Gauge(
+    "ise3_dataset_provider_available", "Provider is configured and usable",
+    ["dataset", "provider"])
+dataset_provider_degraded = Gauge(
+    "ise3_dataset_provider_degraded",
+    "Active provider is not the operator's first choice", ["dataset"])
+dataset_provider_reason_info = Gauge(
+    "ise3_dataset_provider_reason_info",
+    "Why the active provider was chosen over an earlier preference",
+    ["dataset", "provider", "reason"])
+
+# --- declared and measured load ---
+load_planned_requests_per_hour = Gauge(
+    "ise3_load_planned_requests_per_hour",
+    "Requests per hour this plan intends to send a target", ["target"])
+load_planned_db_seconds_per_hour = Gauge(
+    "ise3_load_planned_db_seconds_per_hour",
+    "Database seconds per hour this plan intends to consume", ["target"])
+load_planned_duty_cycle_percent = Gauge(
+    "ise3_load_planned_duty_cycle_percent",
+    "Planned share of wall time spent in database work", ["target"])
+load_budget_requests_per_hour = Gauge(
+    "ise3_load_budget_requests_per_hour",
+    "Configured request ceiling; zero means none declared", ["target"])
+load_budget_duty_cycle_percent = Gauge(
+    "ise3_load_budget_duty_cycle_percent",
+    "Configured duty-cycle ceiling; zero means none declared", ["target"])
+load_budget_utilisation = Gauge(
+    "ise3_load_budget_utilisation",
+    "Planned load as a fraction of the declared ceiling", ["target"])
+load_measured_requests_total = Counter(
+    "ise3_load_measured_requests_total",
+    "Requests actually sent to a target", ["target"])
+load_measured_db_seconds_total = Counter(
+    "ise3_load_measured_db_seconds_total",
+    "Database seconds actually consumed on a target", ["target"])
+
+# --- transport ---
+api_requests_total = Counter(
+    "ise3_api_requests_total", "API requests by target, API, and outcome",
+    ["target", "api", "status"])
+api_errors_total = Counter(
+    "ise3_api_errors_total", "API errors by target, API, kind, and HTTP code",
+    ["target", "api", "error_type", "http_code"])
+api_request_duration_seconds = Histogram(
+    "ise3_api_request_duration_seconds", "API request duration",
+    ["target", "api"],
+    buckets=(0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30))
+
+# --- Data Connect ---
+# The duty cycle is the one budget expressed in time rather than requests, so it
+# gets its own visibility: what was configured, what each view actually cost, and
+# how long the resulting global cooldown froze every reporting dataset.
+dataconnect_queries_total = Counter(
+    "ise3_dataconnect_queries_total", "Data Connect statements by view and result",
+    ["view", "result"])
+dataconnect_query_duration_seconds = Histogram(
+    "ise3_dataconnect_query_duration_seconds", "Oracle statement duration",
+    ["view"], buckets=(0.1, 0.5, 1, 2, 5, 10, 15, 30))
+dataconnect_query_last_duration_seconds = Gauge(
+    "ise3_dataconnect_query_last_duration_seconds",
+    "Duration of the most recent statement for a view", ["view", "result"])
+dataconnect_query_rows = Gauge(
+    "ise3_dataconnect_query_rows", "Rows returned by the most recent statement",
+    ["view"])
+dataconnect_query_cooldown_seconds = Gauge(
+    "ise3_dataconnect_query_cooldown_seconds",
+    "Global cooldown the most recent statement imposed on all reporting datasets",
+    ["view"])
+dataconnect_effective_duty_cycle_percent = Gauge(
+    "ise3_dataconnect_effective_duty_cycle_percent",
+    "Duty cycle the running process is enforcing, from the oracle budget")
+
+# --- bounded breakdowns ---
+# A top-K breakdown that silently drops the tail is indistinguishable from a
+# complete one. Every bounded provider publishes what it returned against what
+# existed, so a dashboard can show "top 1000 of 3693" rather than implying 1000
+# was the whole answer.
+topk_groups_returned = Gauge(
+    "ise3_topk_groups_returned", "Groups published for a bounded breakdown",
+    ["dataset", "breakdown"])
+topk_groups_total = Gauge(
+    "ise3_topk_groups_total", "Groups that existed for a bounded breakdown",
+    ["dataset", "breakdown"])
+topk_truncated = Gauge(
+    "ise3_topk_truncated", "A bounded breakdown dropped part of its tail",
+    ["dataset", "breakdown"])
+
+dataset_series = Gauge(
+    "ise3_dataset_series", "Series this dataset published in its last snapshot",
+    ["dataset"])
+
+# --- on-disk footprint ---
+# The exporter is not a database. Prometheus already stores time series far
+# better than a SQLite file beside the process, so anything time-shaped is
+# emitted and left to Prometheus. What remains on disk is cross-process safety
+# state measured in hundreds of bytes. This gauge exists so that stays true:
+# growth here means someone started accumulating history in the wrong place.
+exporter_state_bytes = Gauge(
+    "ise3_exporter_state_bytes", "Bytes the exporter keeps on local disk")
+
+# --- scheduler ---
+lane_busy = Gauge(
+    "ise3_lane_busy", "A collection is running on this target's lane", ["target"])
+lane_queue_depth = Gauge(
+    "ise3_lane_queue_depth", "Datasets waiting on this target's lane", ["target"])
+
+
+def _reason_slug(text):
+    """Compress a human reason into a bounded, stable label value."""
+    slug = "".join(
+        character if character.isalnum() else "_"
+        for character in str(text).lower()).strip("_")
+    while "__" in slug:
+        slug = slug.replace("__", "_")
+    return slug[:96] or "unavailable"
+
+
+def publish_plan(plan):
+    """Export the planned load and provider selection for a resolved plan."""
+    for target in plan.targets:
+        labels = {"target": target.target}
+        load_planned_requests_per_hour.labels(**labels).set(
+            target.load.requests_per_hour)
+        load_planned_db_seconds_per_hour.labels(**labels).set(
+            target.load.db_seconds_per_hour)
+        load_planned_duty_cycle_percent.labels(**labels).set(
+            target.load.duty_cycle_percent)
+        load_budget_requests_per_hour.labels(**labels).set(
+            target.budget.requests_per_hour)
+        load_budget_duty_cycle_percent.labels(**labels).set(
+            target.budget.duty_cycle_percent)
+        load_budget_utilisation.labels(**labels).set(target.utilisation or 0.0)
+
+    for entry in plan.entries:
+        dataset_enabled.labels(dataset=entry.name).set(int(entry.enabled))
+        dataset_interval_seconds.labels(dataset=entry.name).set(entry.interval)
+        dataset_provider_degraded.labels(dataset=entry.name).set(int(entry.degraded))
+        for rejected in entry.rejected:
+            dataset_provider_available.labels(
+                dataset=entry.name, provider=rejected.name).set(0)
+            dataset_provider_reason_info.labels(
+                dataset=entry.name, provider=rejected.name,
+                reason=_reason_slug(rejected.reason)).set(1)
+        if not entry.resolved:
+            continue
+        dataset_provider_active.labels(
+            dataset=entry.name, provider=entry.provider.name).set(1)
+        dataset_provider_available.labels(
+            dataset=entry.name, provider=entry.provider.name).set(1)
+        for alternative in entry.alternatives:
+            dataset_provider_active.labels(
+                dataset=entry.name, provider=alternative.name).set(0)
+            dataset_provider_available.labels(
+                dataset=entry.name, provider=alternative.name).set(1)

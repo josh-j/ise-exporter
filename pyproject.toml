@@ -1,0 +1,33 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "ise-exporter3"
+version = "3.0.0.dev0"
+description = "Prometheus exporter for Cisco ISE with provider adapters and declared load"
+requires-python = ">=3.10"
+dependencies = [
+    "prometheus-client>=0.20",
+    "requests>=2.31",
+    "oracledb>=3.4",
+    "tomli>=2.0; python_version < '3.11'",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0", "ruff>=0.4"]
+# Build-time only: dashboards are generated from tools/build_dashboards3.py and
+# the resulting JSON is committed, so running the exporter never needs this.
+dashboards = ["grafana-foundation-sdk>=10.1"]
+
+[project.scripts]
+ise-exporter3 = "ise_exporter3.__main__:main"
+
+[tool.hatch.build]
+exclude = ["/dist"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["ise_exporter3"]
+
+[tool.ruff]
+line-length = 100

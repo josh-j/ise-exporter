@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+# Launcher for the ise-exporter3 operator REPL.
+#
+# With no arguments this drops into PowerShell with the cmdlets loaded. With
+# arguments it runs one command and exits, so it works in scripts too.
+#
+# There is no Python backend to find: the cmdlets talk to the exporter's local
+# API over HTTP, so this only needs pwsh.
+set -euo pipefail
+
+SCRIPT_PATH="$(readlink -f "${BASH_SOURCE[0]}")"
+SCRIPT_DIR="$(cd "$(dirname "$SCRIPT_PATH")" && pwd)"
+export PSModulePath="${SCRIPT_DIR}${PSModulePath:+:${PSModulePath}}"
+
+if ! command -v pwsh >/dev/null 2>&1; then
+    echo "ise-cli3 requires PowerShell 7 (pwsh)" >&2
+    exit 127
+fi
+
+PROFILE="${SCRIPT_DIR}/Ise.Cli3.Profile.ps1"
+
+if [[ $# -eq 0 ]]; then
+    exec pwsh -NoLogo -NoProfile -NoExit -File "$PROFILE"
+fi
+
+exec pwsh -NoLogo -NoProfile -Command \
+    "Import-Module '${SCRIPT_DIR}/Ise.Cli3/Ise.Cli3.psd1' -Force; $*"

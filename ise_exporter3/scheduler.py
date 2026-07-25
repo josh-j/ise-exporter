@@ -1,0 +1,385 @@
+"""Plan executor, including runtime provider failover.
+
+The plan decided what runs, from which source, and how often. This turns that
+into collections: it tracks when each dataset is next due, submits it to its
+target's lane, and reschedules from completion.
+
+It also owns the one decision the offline plan cannot make -- what to do when the
+chosen source stops answering. After a few consecutive failures a dataset steps
+to the next source its operator declared, and every step is exported. While
+degraded it sends one canary to its preferred source periodically, and returns
+the moment that source answers again.
+
+Two rules keep this from becoming v1's silent fallback:
+
+- A step never happens quietly. ``provider_active``, ``provider_degraded`` and
+  ``provider_reason_info`` move together with the data, so a dashboard can gate
+  on which source is live and a human can see when it changed.
+- ``provider`` is a label on the data itself, so samples from two sources with
+  different meanings never merge into one series.
+
+It holds no dataset knowledge. There is no priority table, no per-dataset call
+list and no persisted-metrics map -- those were five parallel tables in v2 that
+had to be edited in lockstep.
+"""
+from __future__ import annotations
+
+import logging
+import time
+from dataclasses import dataclass, field, replace
+from functools import partial
+
+from . import known_defects, telemetry
+from .labels import bounded_detail
+from .lanes import LaneSet
+from .runtime import Runner
+from .telemetry import _reason_slug
+from .transports import FAILURE_EXPLANATIONS
+
+
+logger = logging.getLogger(__name__)
+
+# How often the loop looks for due datasets. Cheap (a scan of ~20 entries) and
+# small enough that a five-minute cadence is honoured to the second.
+TICK_SECONDS = 5
+
+FAST_RETRY_SECONDS = 60
+BACKOFF_SECONDS = 900
+MAX_CONSECUTIVE_FAILURES = 5
+
+# Step to the next source before the protected backoff engages: when an
+# alternative exists, trying it beats waiting fifteen minutes on a dead one.
+PROVIDER_FAILOVER_THRESHOLD = 3
+# While degraded, retry the preferred source this often. Long enough that a
+# genuinely down source is not probed constantly, short enough that recovery is
+# noticed within one slow dataset's cadence.
+PROVIDER_RECHECK_SECONDS = 900
+
+# Failures the exporter must not hammer through: retrying fast against an
+# account guard or missing safety state makes the situation worse.
+SLOW_RETRY_REASONS = frozenset({
+    "authentication_backoff", "authentication_failed", "authorization_failed",
+    "state_unavailable",
+})
+
+
+@dataclass
+class DatasetState:
+    """One dataset's live provider selection."""
+
+    entry: object
+    candidates: tuple           # providers in declared preference order
+    unusable: tuple = ()        # declared, but not runnable in this build
+    active: int = 0
+    failures: int = 0
+    last_probe: float = 0.0
+    reason: str = ""
+    history: list = field(default_factory=list)
+
+    @property
+    def name(self):
+        return self.entry.name
+
+    @property
+    def interval(self):
+        return self.entry.interval
+
+    @property
+    def provider(self):
+        return self.candidates[self.active]
+
+    @property
+    def target(self):
+        return self.provider.target
+
+    @property
+    def degraded(self):
+        return self.active > 0
+
+    @property
+    def preferred(self):
+        return self.candidates[0]
+
+
+class Scheduler:
+    def __init__(self, config, plan, transports, *, asynchronous=True,
+                 clock=time.time):
+        self.config = config
+        self.plan = plan
+        self.transports = transports
+        # One clock for all scheduling decisions. Mixing an injected time with
+        # a real one in the completion path makes cadence untestable and hides
+        # the wall-clock assumptions this class makes.
+        self.clock = clock
+        self.runner = Runner(config)
+        self.next_run = {}
+        self.last_success = {}
+        self.states = self._resolve_states()
+        self.lanes = LaneSet(
+            sorted({provider.target
+                    for state in self.states
+                    for provider in state.candidates}),
+            asynchronous=asynchronous)
+
+    # --- resolution -------------------------------------------------------
+
+    def _usable(self, provider):
+        """A provider this build can actually run, and why not if it cannot."""
+        if provider.fetch is None:
+            return False, "not_implemented", (
+                f"the {provider.name} provider is not built in this release")
+        if provider.target not in self.transports:
+            return False, "not_configured", (
+                f"no {provider.target} transport is available")
+        return True, "", ""
+
+    def _resolve_states(self):
+        """Keep every usable source per dataset, in the operator's order."""
+        states = []
+        for entry in self.plan.enabled:
+            if not entry.resolved:
+                continue
+            ordered = (entry.provider,) + tuple(entry.alternatives)
+            candidates, rejected = [], []
+            for provider in ordered:
+                usable, reason, detail = self._usable(provider)
+                if usable:
+                    candidates.append(provider)
+                else:
+                    rejected.append((provider, reason, detail))
+            if not candidates:
+                provider, reason, detail = rejected[0]
+                self._publish_unavailable(entry, provider.name, reason, detail)
+                continue
+            for provider, reason, detail in rejected:
+                logger.info(
+                    "provider unusable dataset=%s provider=%s reason=%s detail=%s",
+                    entry.name, provider.name, reason, detail)
+            states.append(DatasetState(
+                entry=entry, candidates=tuple(candidates),
+                unusable=tuple(provider.name for provider, _r, _d in rejected)))
+        return tuple(states)
+
+    def _publish_unavailable(self, entry, provider, reason, detail):
+        bounded = bounded_detail(detail or FAILURE_EXPLANATIONS.get(reason, reason))
+        telemetry.dataset_up.labels(dataset=entry.name, provider=provider).set(0)
+        telemetry.dataset_fresh.labels(dataset=entry.name, provider=provider).set(0)
+        telemetry.dataset_last_failure_info.labels(
+            dataset=entry.name, provider=provider, reason=reason).set(1)
+        telemetry.dataset_last_failure_detail_info.labels(
+            dataset=entry.name, provider=provider, reason=reason,
+            detail=bounded).set(1)
+        logger.warning(
+            "dataset unavailable dataset=%s provider=%s reason=%s detail=%s",
+            entry.name, provider, reason, bounded)
+
+    # --- provider selection ----------------------------------------------
+
+    def _publish_selection(self, state):
+        # Re-asserted rather than set once: the plan publishes what configuration
+        # allows, and this publishes what this build can actually run. The second
+        # answer must win, and must survive a later republication of the plan.
+        for name in state.unusable:
+            telemetry.dataset_provider_available.labels(
+                dataset=state.name, provider=name).set(0)
+            telemetry.dataset_provider_active.labels(
+                dataset=state.name, provider=name).set(0)
+        for index, provider in enumerate(state.candidates):
+            telemetry.dataset_provider_active.labels(
+                dataset=state.name, provider=provider.name).set(
+                    int(index == state.active))
+            telemetry.dataset_provider_available.labels(
+                dataset=state.name, provider=provider.name).set(1)
+        telemetry.dataset_provider_degraded.labels(
+            dataset=state.name).set(int(state.degraded))
+        if state.reason:
+            telemetry.dataset_provider_reason_info.labels(
+                dataset=state.name, provider=state.provider.name,
+                reason=_reason_slug(state.reason)).set(1)
+
+    def _switch_to(self, state, index, reason):
+        previous = state.provider.name
+        # Clear the old selection's data series: two sources for one dataset do
+        # not mean the same thing, so a stale sample under the previous provider
+        # label would keep answering a query that is now about something else.
+        for family in state.entry.dataset.metrics:
+            self._forget_provider(family, previous)
+        if state.reason:
+            telemetry.dataset_provider_reason_info.remove(
+                state.name, previous, _reason_slug(state.reason))
+        state.active = index
+        state.failures = 0
+        state.reason = reason
+        # Start the recovery clock now. Left at zero, a dataset would probe the
+        # source it just escaped on its very next collection, so it would spend
+        # every other cycle failing against a source already known to be down.
+        state.last_probe = self.clock()
+        # The failure run belonged to the source we just left.
+        self.runner.reset_failures(state.name)
+        self._publish_selection(state)
+        logger.warning(
+            "provider changed dataset=%s from=%s to=%s reason=%s degraded=%s",
+            state.name, previous, state.provider.name, reason, state.degraded)
+
+    @staticmethod
+    def _forget_provider(family, provider):
+        """Drop one provider's children from a metric family."""
+        names = tuple(getattr(family, "_labelnames", ()))
+        if "provider" not in names:
+            return
+        position = names.index("provider")
+        for labels in [key for key in getattr(family, "_metrics", {})
+                       if key[position] == provider]:
+            family._metrics.pop(labels, None)
+
+    def _choose(self, state, now):
+        """Return the provider to use now, and whether it is a recovery canary."""
+        if not state.degraded:
+            return state.provider, False
+        if now - state.last_probe >= PROVIDER_RECHECK_SECONDS:
+            return state.preferred, True
+        return state.provider, False
+
+    # --- scheduling -------------------------------------------------------
+
+    def bootstrap(self, now=None):
+        """Publish identity and the plan, and make every dataset due."""
+        from . import SUPPORTED_ISE_RELEASE, __version__
+
+        now = self.clock() if now is None else now
+        telemetry.exporter_build_info.labels(
+            version=__version__, target_ise_release=SUPPORTED_ISE_RELEASE).set(1)
+        telemetry.publish_plan(self.plan)
+        self.publish_state_size()
+        known_defects.publish()
+        for state in self.states:
+            self._publish_selection(state)
+            self._set_next_run(state, now)
+        logger.info(
+            "collecting %d dataset(s) across %d target(s); %d unresolved, "
+            "%d with a declared fallback",
+            len(self.states), len(self.lanes.lanes), len(self.plan.unresolved),
+            sum(1 for state in self.states if len(state.candidates) > 1))
+
+    def publish_state_size(self):
+        """Report what the exporter keeps on disk.
+
+        It should be the pacing gate and the authentication guards -- hundreds
+        of bytes. Prometheus already stores time series properly; an exporter
+        that accumulates history beside it is building a worse second one, and
+        v2's restart-persistent snapshots grew to a documented 256 MiB ceiling.
+        """
+        import os
+
+        directory = os.path.dirname(
+            os.path.abspath(os.path.expanduser(self.config.exporter.state_db)))
+        total = 0
+        for root, _dirs, files in os.walk(directory):
+            for name in files:
+                try:
+                    total += os.path.getsize(os.path.join(root, name))
+                except OSError:
+                    continue
+        telemetry.exporter_state_bytes.set(total)
+        return total
+
+    def _set_next_run(self, state, when):
+        self.next_run[state.name] = when
+        telemetry.dataset_next_run_timestamp.labels(
+            dataset=state.name, provider=state.provider.name).set(when)
+
+    def tick(self, now=None):
+        """Submit every dataset that is due. Returns the names submitted."""
+        now = self.clock() if now is None else now
+        submitted = []
+        for state in self.states:
+            if now < self.next_run.get(state.name, 0):
+                continue
+            # Reserve the next slot before running: a collection slower than its
+            # own cadence must not re-arm on every tick and queue without bound.
+            self._set_next_run(state, now + state.interval)
+            if self.lanes.submit(state.target, state.name,
+                                 partial(self._collect, state)):
+                submitted.append(state.name)
+        self.refresh_freshness(now)
+        return submitted
+
+    def _collect(self, state):
+        now = self.clock()
+        provider, canary = self._choose(state, now)
+        entry = replace(state.entry, provider=provider)
+        outcome = self.runner.run(entry, self.transports[provider.target])
+        completed = self.clock()
+
+        if canary:
+            state.last_probe = completed
+            if outcome.ok:
+                # The preferred source answered again. Return to it rather than
+                # staying on a fallback that means something slightly different.
+                self._switch_to(state, 0, "preferred_provider_recovered")
+                self.last_success[state.name] = completed
+                self._set_next_run(state, completed + state.interval)
+            else:
+                logger.info(
+                    "recovery probe failed dataset=%s provider=%s reason=%s; "
+                    "staying on %s", state.name, provider.name, outcome.reason,
+                    state.provider.name)
+                self._set_next_run(state, completed + state.interval)
+            self.refresh_freshness(completed)
+            return outcome
+
+        if outcome.ok:
+            state.failures = 0
+            self.last_success[state.name] = completed
+            self._set_next_run(state, completed + state.interval)
+        else:
+            state.failures += 1
+            if (state.failures >= PROVIDER_FAILOVER_THRESHOLD
+                    and state.active + 1 < len(state.candidates)):
+                self._switch_to(state, state.active + 1, outcome.reason)
+                # Try the new source now rather than waiting out a backoff that
+                # was earned by a different source.
+                self._set_next_run(state, completed)
+            else:
+                self._set_next_run(
+                    state, completed + self._retry_delay(state, outcome))
+        self.refresh_freshness(completed)
+        return outcome
+
+    def _retry_delay(self, state, outcome):
+        """Retry soon after a transient failure, slowly after a systemic one."""
+        if outcome.reason in SLOW_RETRY_REASONS:
+            return max(state.interval, BACKOFF_SECONDS)
+        if self.runner.consecutive_failures(state.name) >= MAX_CONSECUTIVE_FAILURES:
+            return max(state.interval, BACKOFF_SECONDS)
+        return min(state.interval, FAST_RETRY_SECONDS)
+
+    def refresh_freshness(self, now=None):
+        """A snapshot older than two cadences is no longer fresh."""
+        now = self.clock() if now is None else now
+        for state in self.states:
+            success = self.last_success.get(state.name)
+            fresh = success is not None and (now - success) <= 2 * state.interval
+            telemetry.dataset_fresh.labels(
+                dataset=state.name, provider=state.provider.name).set(int(fresh))
+
+    def loop(self, shutdown):
+        """Collect until ``shutdown`` is set."""
+        self.bootstrap()
+        self.lanes.start()
+        try:
+            while not shutdown.is_set():
+                try:
+                    self.tick()
+                except Exception:       # noqa: BLE001 - the loop must survive
+                    logger.exception("scheduler tick failed")
+                shutdown.wait(TICK_SECONDS)
+        finally:
+            # Also cancel on an unexpected exit so in-flight work stops rather
+            # than racing transport teardown.
+            shutdown.set()
+            for transport in self.transports.values():
+                setter = getattr(transport, "set_shutdown_event", None)
+                if setter is not None:
+                    setter(shutdown)
+            self.lanes.stop()

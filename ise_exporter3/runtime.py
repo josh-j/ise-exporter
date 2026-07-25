@@ -1,0 +1,222 @@
+"""One collection attempt: fetch, publish atomically, record health.
+
+A provider's ``fetch`` receives a context and writes through it. It never touches
+metric families directly, which is what lets the runner guarantee two things the
+provider cannot: the dataset's data and its health metadata commit inside one
+scrape boundary, and a failed attempt leaves the previous snapshot in place
+rather than publishing a convincing empty one.
+"""
+from __future__ import annotations
+
+import logging
+import time
+from dataclasses import dataclass
+
+from . import telemetry
+from .labels import bounded_detail
+from .snapshots import SOFT_SAMPLE_WARNING, Publication
+from .transports import FAILURE_EXPLANATIONS, TransportError
+
+
+logger = logging.getLogger(__name__)
+
+_HEALTH_FAMILIES = (
+    telemetry.dataset_up,
+    telemetry.dataset_fresh,
+    telemetry.dataset_last_success_timestamp,
+    telemetry.dataset_last_failure_info,
+    telemetry.dataset_last_failure_detail_info,
+    telemetry.dataset_consecutive_failures,
+    telemetry.dataset_collection_duration_seconds,
+)
+
+
+def classify(error):
+    """Map an arbitrary exception onto the bounded failure vocabulary.
+
+    Providers raise TransportError for anything they understand. This exists so
+    a genuine bug in normalisation still produces a bounded label instead of an
+    exception string becoming a Prometheus dimension.
+    """
+    if isinstance(error, TransportError):
+        return error.reason, error.detail
+    name = type(error).__name__.lower()
+    message = str(error).lower()
+    if "timeout" in name or "timed out" in message:
+        return "timeout", str(error)
+    if "connection" in name:
+        return "connection_failed", str(error)
+    if "json" in name or "decode" in name or isinstance(error, (ValueError, KeyError)):
+        return "invalid_response", str(error)
+    return "unexpected_error", str(error)
+
+
+@dataclass(frozen=True)
+class Outcome:
+    dataset: str
+    provider: str
+    ok: bool
+    duration: float = 0.0
+    reason: str = ""
+    detail: str = ""
+
+
+class FetchContext:
+    """What a provider is given: its transport, the config, and a way to write."""
+
+    def __init__(self, *, dataset, provider, transport, config, publication):
+        self.dataset = dataset
+        self.provider = provider
+        self.transport = transport
+        self.config = config
+        self.scale = config.scale
+        self._publication = publication
+
+    def set(self, family, value, /, **label_values):
+        """Record one gauge value. The ``provider`` label is bound for you.
+
+        Positional-only: a dataset may legitimately have a label named ``value``
+        (``tacacs_activity`` does), and a keyword parameter here would collide
+        with it at runtime for every row.
+        """
+        self._publication.set(family, value, **label_values)
+
+    def fail(self, reason, detail=""):
+        raise TransportError(reason, detail)
+
+
+class Runner:
+    """Executes one dataset attempt and owns everything it publishes."""
+
+    def __init__(self, config):
+        self.config = config
+        self.failures = {}
+
+    def run(self, entry, transport):
+        """Run ``entry``'s active provider against ``transport``."""
+        dataset = entry.dataset
+        provider = entry.provider
+        name, provider_name = entry.name, provider.name
+        started = time.monotonic()
+        attempted = time.time()
+
+        telemetry.dataset_last_attempt_timestamp.labels(
+            dataset=name, provider=provider_name).set(attempted)
+
+        publication = Publication(dataset.metrics, provider=provider_name)
+        context = FetchContext(
+            dataset=dataset, provider=provider, transport=transport,
+            config=self.config, publication=publication)
+
+        try:
+            # Settle the preconditions the offline plan had to defer before
+            # spending an attempt on a source that cannot answer.
+            if transport is not None:
+                transport.prepare()
+                ready, reason, detail = transport.satisfies(provider.requires)
+                if not ready:
+                    raise TransportError(reason, detail)
+            provider.fetch(context)
+        except Exception as error:      # noqa: BLE001 - classified below
+            reason, detail = classify(error)
+            duration = max(0.0, time.monotonic() - started)
+            self._publish_failure(publication, name, provider_name, reason,
+                                  detail, duration)
+            level = logger.warning if reason != "unexpected_error" else logger.exception
+            level("collection failed dataset=%s provider=%s reason=%s detail=%s",
+                  name, provider_name, reason, bounded_detail(detail))
+            return Outcome(name, provider_name, False, duration, reason,
+                           bounded_detail(detail))
+
+        duration = max(0.0, time.monotonic() - started)
+        try:
+            self._publish_success(publication, name, provider_name, duration)
+        except Exception as error:      # noqa: BLE001 - publication is a failure too
+            reason, detail = classify(error)
+            self._publish_failure(publication, name, provider_name, reason,
+                                  detail, duration)
+            logger.warning(
+                "publication failed dataset=%s provider=%s reason=%s detail=%s",
+                name, provider_name, reason, bounded_detail(detail))
+            return Outcome(name, provider_name, False, duration, reason,
+                           bounded_detail(detail))
+
+        if publication.samples > SOFT_SAMPLE_WARNING:
+            # Not an error, but a dataset this wide is usually keyed on
+            # something it should not be. Say so before the hard ceiling.
+            logger.warning(
+                "dataset %s published %d series, past the %d soft limit; check "
+                "it is not keyed on an endpoint identity",
+                name, publication.samples, SOFT_SAMPLE_WARNING)
+        logger.info(
+            "collection ok dataset=%s provider=%s duration=%.3fs series=%d",
+            name, provider_name, duration, publication.samples)
+        return Outcome(name, provider_name, True, duration)
+
+    def _publish_success(self, publication, name, provider_name, duration):
+        completed = time.time()
+        previous = self.failures.pop(name, None)
+
+        def writers():
+            telemetry.dataset_up.labels(dataset=name, provider=provider_name).set(1)
+            telemetry.dataset_fresh.labels(dataset=name, provider=provider_name).set(1)
+            telemetry.dataset_last_success_timestamp.labels(
+                dataset=name, provider=provider_name).set(completed)
+            telemetry.dataset_consecutive_failures.labels(dataset=name).set(0)
+            telemetry.dataset_collection_duration_seconds.labels(
+                dataset=name, provider=provider_name).set(duration)
+            if previous:
+                telemetry.dataset_last_failure_info.remove(
+                    name, provider_name, previous["reason"])
+                telemetry.dataset_last_failure_detail_info.remove(
+                    name, provider_name, previous["reason"], previous["detail"])
+
+        publication.commit(_HEALTH_FAMILIES, (writers,))
+        # Published after the commit, because the count is a property of the
+        # snapshot that commit just validated -- a writer running inside it
+        # would always observe zero. This is an observation about the boundary,
+        # not part of what crosses it.
+        telemetry.dataset_series.labels(dataset=name).set(publication.samples)
+
+    def _publish_failure(self, publication, name, provider_name, reason, detail,
+                         duration):
+        bounded = bounded_detail(detail or FAILURE_EXPLANATIONS.get(reason, reason))
+        previous = self.failures.get(name)
+        count = (previous["count"] if previous else 0) + 1
+
+        def writers():
+            telemetry.dataset_failures_total.labels(
+                dataset=name, provider=provider_name, reason=reason).inc()
+            telemetry.dataset_up.labels(dataset=name, provider=provider_name).set(0)
+            telemetry.dataset_consecutive_failures.labels(dataset=name).set(count)
+            telemetry.dataset_collection_duration_seconds.labels(
+                dataset=name, provider=provider_name).set(duration)
+            if previous and (previous["reason"], previous["detail"]) != (reason, bounded):
+                telemetry.dataset_last_failure_info.remove(
+                    name, provider_name, previous["reason"])
+                telemetry.dataset_last_failure_detail_info.remove(
+                    name, provider_name, previous["reason"], previous["detail"])
+            telemetry.dataset_last_failure_info.labels(
+                dataset=name, provider=provider_name, reason=reason).set(1)
+            telemetry.dataset_last_failure_detail_info.labels(
+                dataset=name, provider=provider_name, reason=reason,
+                detail=bounded).set(1)
+
+        # The previous snapshot survives: a reporting failure must never be
+        # published as a valid empty result.
+        publication.discard(_HEALTH_FAMILIES, (writers,))
+        self.failures[name] = {"reason": reason, "detail": bounded, "count": count}
+
+    def consecutive_failures(self, name):
+        entry = self.failures.get(name)
+        return entry["count"] if entry else 0
+
+    def reset_failures(self, name):
+        """Forget a dataset's failure run.
+
+        Called when a dataset changes provider: the backoff was earned by the
+        source that failed, and making its replacement serve that sentence would
+        add minutes of blank panel for a source that has not failed at all.
+        """
+        self.failures.pop(name, None)
+        telemetry.dataset_consecutive_failures.labels(dataset=name).set(0)
