@@ -17,6 +17,9 @@ The architecture is complete end to end: `plan` reports cost without
 credentials, `run` collects and serves, sources fail over visibly, the operator
 API answers from live state, and dashboards are generated and contract-tested.
 
+`ROADMAP.md` carries the work this build needs before it can replace v2, with
+the measurements behind each item.
+
 Two things are deliberately not done:
 
 - **It has not run against a live appliance.** The Data Connect SQL is written
