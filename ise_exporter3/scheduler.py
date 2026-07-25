@@ -63,6 +63,19 @@ SLOW_RETRY_REASONS = frozenset({
     "state_unavailable",
 })
 
+# Reasons that mean "not yet", not "broken". A dataset waiting on shared state
+# another dataset fills, or on schema discovery, has not failed at anything --
+# it asked a question that cannot be answered yet, and the answer arrives on
+# someone else's schedule rather than after a repair.
+#
+# These must never escalate into the consecutive-failure backoff. They did, and
+# it was caught in production: nad_health refused five times at one-minute
+# intervals while the NAD inventory warmed, hit MAX_CONSECUTIVE_FAILURES, and
+# was then pushed out to a six-hour retry -- reinstating exactly the blind
+# window the refusal existed to close, only now with an honest label on it.
+# Five minutes of waiting turned into six hours of waiting.
+PENDING_REASONS = frozenset({"dependency_pending", "schema_pending"})
+
 
 @dataclass
 class DatasetState:
@@ -398,6 +411,11 @@ class Scheduler:
         """Retry soon after a transient failure, slowly after a systemic one."""
         if outcome.reason in SLOW_RETRY_REASONS:
             return max(state.interval, BACKOFF_SECONDS)
+        # A pending dependency is not a failure to back off from. Escalating it
+        # would make the wait longer the longer it has already waited, which is
+        # precisely backwards: the thing it is waiting for is on its way.
+        if outcome.reason in PENDING_REASONS:
+            return min(state.interval, FAST_RETRY_SECONDS)
         if self.runner.consecutive_failures(state.name) >= MAX_CONSECUTIVE_FAILURES:
             return max(state.interval, BACKOFF_SECONDS)
         return min(state.interval, FAST_RETRY_SECONDS)
