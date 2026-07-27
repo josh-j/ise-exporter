@@ -8,9 +8,9 @@ declared budget and scale plus those costs rather than chosen, the budget is
 **enforced** rather than merely checked, and what the exporter actually spent is
 exported beside what it planned to spend.
 
-This is the v3 build, split out of the v2 repository. v2 remains deployed and is
-maintained separately; nothing here is a drop-in replacement for it yet (see
-**Status**).
+This is the v3 build, split out of the v2 repository. Its configuration schema
+is intentionally not a drop-in replacement for v2; the native installer below
+stages both versions separately and performs an explicit health-checked handoff.
 
 ## Status
 
@@ -52,6 +52,68 @@ python -m ise_exporter3 run --config /etc/ise-exporter3/config.toml
 
 `plan` exits non-zero when the configuration is over budget, which makes it
 usable as a pre-deploy gate. Passwords are never written to the config file.
+
+## Native systemd install, update, and v2 migration
+
+Debian 12/13 and Ubuntu Server 24.04 can use the idempotent native installer:
+
+```bash
+sudo ./deploy/install.sh
+```
+
+It creates a locked `ise-exporter3` account, installs the application under
+`/opt/ise-exporter3`, seeds `/etc/ise-exporter3/config.toml` once, installs the
+hardened `ise-exporter3.service`, and exposes the PowerShell operator shell as
+`/usr/local/bin/ise-cli3`. Re-run the same command from any newer checkout to
+upgrade. Existing v3 configuration, certificates, passwords, and an
+intentionally stopped service are preserved.
+
+A fresh install without v2 present is enabled but left stopped until its hosts
+and credentials validate. When v2 is detected, v3 remains disabled as well as
+stopped so both cannot claim port 9618 after a reboot. Set or rotate passwords
+without putting them in TOML, command arguments, or shell history:
+
+```bash
+sudoedit /etc/ise-exporter3/config.toml
+sudo ise-exporter3-set-passwords --start
+sudo systemctl status ise-exporter3
+curl --fail --silent http://127.0.0.1:9618/metrics | head
+```
+
+The helper reads secrets without echo and atomically writes the systemd
+environment file `/etc/ise-exporter3/credentials` as `root:root` mode `0600`.
+It manages `ISE_PASS`, `ISE_DATACONNECT_PASSWORD`, and optional
+`ISE_PXGRID_PASSWORD`. Blank input preserves the existing value. Use
+`--no-restart` to stage a rotation or `--check` for a non-secret readiness
+check. An active service restarts by default; an inactive one stays stopped
+unless `--start` is given.
+
+### Migrating an existing v2 service
+
+The installer detects `ise-exporter.service` and stages v3 beside it without
+stopping v2 or claiming its port. It preserves the complete v2 `/opt` and
+`/etc` trees, copies CA material only when the v3 certificate directory is
+empty, and can import non-placeholder v2 passwords without printing them:
+
+```bash
+sudo ./deploy/install.sh
+sudoedit /etc/ise-exporter3/config.toml       # v2 TOML is not schema-compatible
+sudo ise-exporter3-set-passwords --import-v2 --no-restart
+sudo ./deploy/install.sh --migrate-v2
+```
+
+The explicit migration stops and disables v2, starts v3, and requires an active
+unit, a successful unauthenticated local `/metrics` request, an in-budget
+operator-health response, and at least one successfully collecting dataset. If
+any check fails, it disables v3 and restores v2's previous enabled/running
+state. Once migrated, later `deploy/install.sh` runs are ordinary in-place v3
+updates.
+
+The service runs `ise-exporter3 plan` as `ExecStartPre`, so invalid or
+over-budget configuration is rejected before collection begins. It is limited
+to three starts per hour with five minutes between failure restarts, uses
+`StateDirectory=ise-exporter3`, and has a read-only system sandbox around its
+configuration and certificates.
 
 ## Configuration
 

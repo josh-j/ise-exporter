@@ -1,0 +1,49 @@
+[Unit]
+Description=Cisco ISE Prometheus Exporter 3
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=1h
+StartLimitBurst=3
+
+[Service]
+Type=simple
+User=ise-exporter3
+Group=ise-exporter3
+Environment=ISE_EXPORTER3_CONFIG=/etc/ise-exporter3/config.toml
+Environment=PYTHONUNBUFFERED=1
+# Root-only file managed by ise-exporter3-set-passwords. systemd reads it before
+# dropping privileges; passwords never belong in the TOML or unit file.
+EnvironmentFile=/etc/ise-exporter3/credentials
+ExecStartPre=/opt/ise-exporter3/.venv/bin/ise-exporter3 plan --config /etc/ise-exporter3/config.toml
+ExecStart=/opt/ise-exporter3/.venv/bin/ise-exporter3 run --config /etc/ise-exporter3/config.toml
+Restart=on-failure
+RestartSec=5min
+
+# The production-scale simulator peaks around 480 MiB RSS. Leave room for
+# Python/TLS overhead while containing malformed responses and scrape storms.
+MemoryHigh=768M
+MemoryMax=1G
+TasksMax=64
+LimitNOFILE=1024
+OOMScoreAdjust=500
+
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+ProtectClock=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+LockPersonality=true
+StateDirectory=ise-exporter3
+StateDirectoryMode=0750
+UMask=0007
+ReadOnlyPaths=/etc/ise-exporter3
+AmbientCapabilities=
+
+[Install]
+WantedBy=multi-user.target

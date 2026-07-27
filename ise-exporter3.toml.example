@@ -9,6 +9,8 @@
 #   ISE_PASS                     the PAN/MnT read-only account
 #   ISE_DATACONNECT_PASSWORD     the fixed `dataconnect` Oracle account
 #   ISE_PXGRID_PASSWORD          only when using password-based pxGrid auth
+# Native systemd installs set these through `ise-exporter3-set-passwords`, which
+# maintains /etc/ise-exporter3/credentials as a root-only EnvironmentFile.
 
 # Fleet size and spending ceilings. "production" (the default, sized for
 # ~100k endpoints / ~5k NADs) or "lab". Anything below overrides it.
