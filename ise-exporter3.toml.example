@@ -152,6 +152,7 @@ oracle.duty_cycle_percent = 3.0
 # batch_queries = 5
 # batch_result_rows = 35000
 # result_bytes = 67108864         # the real safety bound; 35,000 rows is ~7 MB
+# pxgrid_session_bytes = 163840000 # unpaged getSessions; derived as 8 KiB/session
 # window_hours = 6                # how far back any event statement may scan
 # snapshot_samples = 50000        # hard: one dataset publishing more fails
 # snapshot_sample_warning = 20000 # soft: logged, so width is seen before it bites

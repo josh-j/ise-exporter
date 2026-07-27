@@ -42,6 +42,18 @@ fresh baseline before data is exposed again. Password or client-certificate
 authentication is supported, with the same persistent account-lockout guard
 and enforced request budget as the other transports.
 
+`getSessions` is one unpaged response. The plan therefore shows
+`limits.pxgrid_session_bytes`, derived as 8 KiB per declared active session with
+a 64 MiB floor and 512 MiB hard cap. This is separate from Data Connect's
+`result_bytes`: a production session object can carry enough AD, MDM, posture,
+and authorization attributes to be much wider than a reporting row. A
+`STREAM DOWN reason=response_too_large` during startup or reconciliation means
+this REST baseline crossed that ceiling; it does not by itself mean the WSS
+topic sent an oversized frame. Set `[scale].sessions` to the actual active
+session count first. If records are unusually wide, explicitly raise
+`[limits].pxgrid_session_bytes`; the warning detail reports the received
+`Content-Length` when ISE supplies it and always reports the enforced ceiling.
+
 ### ISE-side pxGrid configuration required
 
 The successful ISE 3.3 Patch 11 lab run required all of the following on ISE:

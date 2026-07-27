@@ -17,6 +17,7 @@ derived from the fleet, in one order, from one declaration:
     scale.nads + scale.accounts + DIMENSION_HEADROOM  ->  group_ceiling
     group_ceiling + ROW_HEADROOM                      ->  result_rows
     result_rows * batch_queries                       ->  batch_result_rows
+    scale.sessions * 8 KiB                            ->  pxgrid_session_bytes
 
 Everything here is visible in ``[limits]`` and printed by ``plan``, because a
 ceiling nobody can see or name is not a contract -- it is a surprise waiting for
@@ -65,6 +66,14 @@ DEFAULT_BATCH_QUERIES = 5
 ESTIMATED_ROW_BYTES = 200
 
 DEFAULT_RESULT_BYTES = 64 * 1024 * 1024
+# pxGrid getSessions is an intentionally unpaged snapshot. Session objects are
+# much wider than reporting rows, so the receiver has to scale with the active
+# session declaration instead of inheriting the 64 MiB Data Connect default.
+# Eight KiB per session is deliberately conservative: the normal object is
+# smaller, while optional AD, MDM, posture and authorization attributes can make
+# production records substantially wider than lab records.
+PXGRID_SESSION_BYTES_PER_RECORD = 8 * 1024
+DEFAULT_PXGRID_SESSION_BYTES = DEFAULT_RESULT_BYTES
 DEFAULT_FIELD_BYTES = 1024 * 1024
 DEFAULT_FIELD_NESTING_DEPTH = 16
 
@@ -109,6 +118,7 @@ HARD_BOUNDS = MappingProxyType({
     "batch_queries": (1, 10),
     "batch_result_rows": (101, 1_000_000),
     "result_bytes": (1024 * 1024, 512 * 1024 * 1024),
+    "pxgrid_session_bytes": (1024 * 1024, 512 * 1024 * 1024),
     "field_bytes": (4096, 64 * 1024 * 1024),
     "field_nesting_depth": (2, 64),
     "window_hours": (1, 24),
@@ -120,7 +130,10 @@ FIELDS = tuple(HARD_BOUNDS)
 
 # Set from [scale] unless the operator names them. Overriding one of these
 # breaks the chain the section docstring describes, so each says so at start.
-DERIVED_FIELDS = ("group_ceiling", "result_rows", "batch_result_rows")
+DERIVED_FIELDS = (
+    "group_ceiling", "result_rows", "batch_result_rows",
+    "pxgrid_session_bytes",
+)
 
 DESCRIPTIONS = MappingProxyType({
     "group_ceiling": "groups one reporting statement may return",
@@ -129,6 +142,7 @@ DESCRIPTIONS = MappingProxyType({
     "batch_queries": "statements one Data Connect batch may hold",
     "batch_result_rows": "rows one Data Connect batch may return in total",
     "result_bytes": "bytes one statement or batch may retain",
+    "pxgrid_session_bytes": "bytes the unpaged pxGrid session baseline may retain",
     "field_bytes": "bytes one field of one row may retain",
     "field_nesting_depth": "levels a nested field may be expanded to",
     "window_hours": "hours back any event statement may scan",
@@ -151,6 +165,7 @@ class Limits:
     batch_result_rows: int
     catalog_rows: int = DEFAULT_CATALOG_ROWS
     result_bytes: int = DEFAULT_RESULT_BYTES
+    pxgrid_session_bytes: int = DEFAULT_PXGRID_SESSION_BYTES
     field_bytes: int = DEFAULT_FIELD_BYTES
     field_nesting_depth: int = DEFAULT_FIELD_NESTING_DEPTH
     window_hours: int = DEFAULT_WINDOW_HOURS
@@ -196,6 +211,17 @@ def group_ceiling_for(scale):
     return _clamp("group_ceiling", scale.nads + scale.accounts + DIMENSION_HEADROOM)
 
 
+def pxgrid_session_bytes_for(scale):
+    """Bound the one unpaged pxGrid session snapshot at the declared scale."""
+    return _clamp(
+        "pxgrid_session_bytes",
+        max(
+            DEFAULT_PXGRID_SESSION_BYTES,
+            scale.sessions * PXGRID_SESSION_BYTES_PER_RECORD,
+        ),
+    )
+
+
 def derive(scale, document=None, warnings=None):
     """Resolve ``[limits]`` against the declared scale.
 
@@ -236,6 +262,8 @@ def derive(scale, document=None, warnings=None):
         batch_result_rows=batch_result_rows,
         catalog_rows=declared.get("catalog_rows", DEFAULT_CATALOG_ROWS),
         result_bytes=declared.get("result_bytes", DEFAULT_RESULT_BYTES),
+        pxgrid_session_bytes=declared.get(
+            "pxgrid_session_bytes", pxgrid_session_bytes_for(scale)),
         field_bytes=declared.get("field_bytes", DEFAULT_FIELD_BYTES),
         field_nesting_depth=declared.get(
             "field_nesting_depth", DEFAULT_FIELD_NESTING_DEPTH),
@@ -367,6 +395,8 @@ def _expected(limits, scale, name):
         return limits.group_ceiling + ROW_HEADROOM
     if name == "batch_result_rows":
         return limits.batch_queries * limits.result_rows
+    if name == "pxgrid_session_bytes":
+        return pxgrid_session_bytes_for(scale)
     return None
 
 

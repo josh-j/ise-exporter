@@ -8,6 +8,7 @@ from prometheus_client import REGISTRY
 
 from ise_exporter3.config import Config
 from ise_exporter3.datasets import active_sessions, endpoint_attributes, posture_current
+from ise_exporter3.limits import DEFAULT_RESULT_BYTES, for_scale
 from ise_exporter3.model import Scale
 from ise_exporter3.plan import PlannedDataset, build_plan
 from ise_exporter3.pxgrid import as_list
@@ -44,6 +45,7 @@ def _config(tmp_path=None):
 
 def _state_transport():
     transport = object.__new__(PxGridTransport)
+    transport.config = _config()
     transport._state_lock = threading.RLock()
     transport._sync_lock = threading.Lock()
     transport._sessions = {}
@@ -60,6 +62,31 @@ def test_config_accepts_a_bounded_pxgrid_request_timeout():
     target = _config().target("pxgrid")
     assert target.configured
     assert target.request_timeout == 7
+
+
+def test_pxgrid_session_baseline_ceiling_scales_past_the_lab_default():
+    lab = Scale(
+        nads=10, endpoints=10, sessions=10, accounts=10, policy_sets=10)
+    production = Scale(
+        nads=5_000, endpoints=100_000, sessions=20_000,
+        accounts=1_000, policy_sets=100)
+
+    assert for_scale(lab).pxgrid_session_bytes == DEFAULT_RESULT_BYTES
+    assert for_scale(production).pxgrid_session_bytes == 20_000 * 8 * 1024
+
+
+def test_session_refresh_uses_the_pxgrid_specific_response_ceiling():
+    transport = _state_transport()
+    calls = []
+
+    def query(self, *_args, **kwargs):
+        calls.append(kwargs["max_bytes"])
+        return {"sessions": []}
+
+    transport._query = MethodType(query, transport)
+    transport._refresh_sessions(force=True)
+
+    assert calls == [transport.config.limits.pxgrid_session_bytes]
 
 
 def test_plan_selects_built_pxgrid_collectors():

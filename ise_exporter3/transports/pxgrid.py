@@ -180,31 +180,34 @@ class PxGridTransport(Transport):
             http_code=str(code)).inc()
 
     @staticmethod
-    def _buffer_response(response):
+    def _buffer_response(response, max_bytes):
         raw = str(response.headers.get("Content-Length", "") or "").strip()
         try:
             declared = int(raw)
         except (TypeError, ValueError):
             declared = None
-        if declared is not None and declared > MAX_HTTP_RESPONSE_BYTES:
+        if declared is not None and declared > max_bytes:
             response.close()
             raise ResponseTooLarge(
-                f"Content-Length {declared} exceeds {MAX_HTTP_RESPONSE_BYTES} bytes")
+                f"Content-Length {declared} exceeds {max_bytes} bytes")
         retained = bytearray()
         try:
             for chunk in response.iter_content(chunk_size=HTTP_READ_CHUNK_BYTES):
                 if not chunk:
                     continue
-                if len(retained) + len(chunk) > MAX_HTTP_RESPONSE_BYTES:
+                if len(retained) + len(chunk) > max_bytes:
                     raise ResponseTooLarge(
-                        f"streamed body exceeds {MAX_HTTP_RESPONSE_BYTES} bytes")
+                        f"streamed body exceeds {max_bytes} bytes")
                 retained.extend(chunk)
         finally:
             response.close()
         response._content = bytes(retained)
         response._content_consumed = True
 
-    def _post(self, url, body, *, auth=None, api, account_auth=False):
+    def _post(
+        self, url, body, *, auth=None, api, account_auth=False,
+        max_bytes=MAX_HTTP_RESPONSE_BYTES,
+    ):
         if self._stopping():
             raise TransportError("unexpected_error", "Shutting down")
         try:
@@ -248,7 +251,7 @@ class PxGridTransport(Transport):
                     raise TransportError(
                         "http_error",
                         f"ISE returned HTTP {status} for {api}: {snippet}")
-                self._buffer_response(response)
+                self._buffer_response(response, max_bytes)
                 try:
                     data = response.json()
                 except ValueError as error:
@@ -266,7 +269,7 @@ class PxGridTransport(Transport):
             except ResponseTooLarge as error:
                 self._count(api, "response_too_large")
                 self._error(api, "response_too_large")
-                raise TransportError("response_too_large") from error
+                raise TransportError("response_too_large", str(error)) from error
             except requests.exceptions.Timeout as error:
                 self._count(api, "timeout")
                 self._error(api, "timeout")
@@ -392,7 +395,10 @@ class PxGridTransport(Transport):
         self._rest_services[service] = tuple(resolved)
         return self._rest_services[service]
 
-    def _query(self, service, endpoint, body=None, *, api):
+    def _query(
+        self, service, endpoint, body=None, *, api,
+        max_bytes=MAX_HTTP_RESPONSE_BYTES,
+    ):
         last = None
         for resolution in (False, True):
             candidates = self._resolve_rest(service, refresh=resolution)
@@ -402,7 +408,7 @@ class PxGridTransport(Transport):
                     result = self._post(
                         f"{base}/{endpoint.lstrip('/')}", body or {},
                         auth=HTTPBasicAuth(self.settings.node_name, secret),
-                        api=api)
+                        api=api, max_bytes=max_bytes)
                     # ISE can advertise every node even when one persona or
                     # hostname is unreachable from the exporter. Remember the
                     # provider that answered so a periodic baseline does not
@@ -775,7 +781,8 @@ class PxGridTransport(Transport):
             try:
                 data = self._query(
                     SESSION_SERVICE, "getSessions", {},
-                    api="pxgrid_get_sessions")
+                    api="pxgrid_get_sessions",
+                    max_bytes=self.config.limits.pxgrid_session_bytes)
                 if not isinstance(data, (dict, list)):
                     raise TransportError(
                         "invalid_response", "pxGrid getSessions was not a collection")
