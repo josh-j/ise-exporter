@@ -396,12 +396,24 @@ class PxGridTransport(Transport):
         last = None
         for resolution in (False, True):
             candidates = self._resolve_rest(service, refresh=resolution)
-            for peer, base, secret in candidates:
+            for candidate in candidates:
+                peer, base, secret = candidate
                 try:
-                    return self._post(
+                    result = self._post(
                         f"{base}/{endpoint.lstrip('/')}", body or {},
                         auth=HTTPBasicAuth(self.settings.node_name, secret),
                         api=api)
+                    # ISE can advertise every node even when one persona or
+                    # hostname is unreachable from the exporter. Remember the
+                    # provider that answered so a periodic baseline does not
+                    # pay for the same known-dead attempt on every cycle.
+                    cached = self._rest_services.get(service, ())
+                    if cached and cached[0] != candidate:
+                        self._rest_services[service] = (
+                            candidate,
+                            *(row for row in cached if row != candidate),
+                        )
+                    return result
                 except TransportError as error:
                     last = error
                     if error.reason not in {

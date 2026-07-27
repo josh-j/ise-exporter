@@ -12,7 +12,7 @@ from ise_exporter3.model import Scale
 from ise_exporter3.plan import PlannedDataset, build_plan
 from ise_exporter3.pxgrid import as_list
 from ise_exporter3.runtime import Runner
-from ise_exporter3.transports import Transport
+from ise_exporter3.transports import Transport, TransportError
 from ise_exporter3.transports.pxgrid import PxGridTransport
 from ise_exporter3.transports.pxgrid import PUBSUB_SERVICE, SESSION_SERVICE
 
@@ -100,6 +100,45 @@ def test_session_startup_does_not_discover_the_unused_endpoint_service():
 
     assert calls == [SESSION_SERVICE, PUBSUB_SERVICE]
     assert "capability:pxgrid_session_topic" in transport._capabilities
+
+
+def test_rest_failover_promotes_the_provider_that_answered():
+    transport = object.__new__(PxGridTransport)
+    transport.settings = _config().target("pxgrid")
+    transport._rest_services = {
+        SESSION_SERVICE: (
+            ("bad-peer", "https://bad.example/rest", "bad-secret"),
+            ("good-peer", "https://good.example/rest", "good-secret"),
+        ),
+    }
+    calls = []
+
+    def resolve(self, service, *, refresh=False):
+        assert service == SESSION_SERVICE
+        assert not refresh
+        return self._rest_services[service]
+
+    def post(self, url, _body, **_kwargs):
+        calls.append(url)
+        if "bad.example" in url:
+            raise TransportError("connection_failed", "unreachable")
+        return {"sessions": []}
+
+    transport._resolve_rest = MethodType(resolve, transport)
+    transport._post = MethodType(post, transport)
+
+    assert transport._query(
+        SESSION_SERVICE, "getSessions", {}, api="pxgrid_get_sessions",
+    ) == {"sessions": []}
+    assert transport._query(
+        SESSION_SERVICE, "getSessions", {}, api="pxgrid_get_sessions",
+    ) == {"sessions": []}
+    assert calls == [
+        "https://bad.example/rest/getSessions",
+        "https://good.example/rest/getSessions",
+        "https://good.example/rest/getSessions",
+    ]
+    assert transport._rest_services[SESSION_SERVICE][0][0] == "good-peer"
 
 
 def test_snapshot_drain_keeps_a_newer_disconnect():
