@@ -42,6 +42,44 @@ fresh baseline before data is exposed again. Password or client-certificate
 authentication is supported, with the same persistent account-lockout guard
 and enforced request budget as the other transports.
 
+### ISE-side pxGrid configuration required
+
+The successful ISE 3.3 Patch 11 lab run required all of the following on ISE:
+
+1. Under **Administration > System > Deployment**, at least one reachable node
+   had the **pxGrid** persona enabled.
+2. The pxGrid system certificate served on TCP 8910 was trusted by the exporter
+   and its DNS SAN matched the hostnames ISE advertised in its pxGrid REST and
+   WSS service URLs. Those advertised names must also resolve from the exporter
+   host. In the lab ISE still advertised the legacy `ise01.ise.lab` identity, so
+   that alias, its matching certificate, and the CA bundle all had to be kept.
+3. For the password mode used by the lab, **Administration > pxGrid Services >
+   Settings > Allow password based account creation** was enabled while the
+   client was created. The client name exactly matched
+   `targets.pxgrid.node_name`; its generated password was stored as
+   `ISE_PXGRID_PASSWORD`, never in TOML. The setting may be disabled again after
+   creating the account.
+4. Under **Administration > pxGrid Services > Client Management > Clients**,
+   that client was approved and enabled. The exporter deliberately fails
+   activation while ISE reports it as `PENDING` or `DISABLED`; automatic
+   approval is not required.
+5. The client could read `com.cisco.ise.session` (`getSessions`) and
+   `com.cisco.ise.endpoint` (`getEndpoints`), and subscribe to the session topic
+   advertised by `com.cisco.ise.pubsub`—on ISE 3.3 this was
+   `/topic/com.cisco.ise.session`. If custom pxGrid policies are used, grant only
+   those read operations (`gets`) and that exact `subscribe` topic; the exporter
+   does not need `sets`, `publish`, or pxGrid administrator access.
+6. TCP 8910 and every HTTPS/WSS provider returned by `ServiceLookup` were
+   reachable from the exporter. A deployment may advertise more than one
+   provider; v3 tries the available peers and remembers the one that answers.
+
+Certificate authentication is the alternative to steps 3's password. Generate
+or import a separate client certificate under **Administration > pxGrid
+Services > Client Management > Certificates**, make its identity match
+`node_name`, configure `client_cert` and `client_key`, and omit
+`ISE_PXGRID_PASSWORD`. The `ca_bundle` still verifies the ISE server and is not
+a client credential.
+
 ## Quick start
 
 ```bash
