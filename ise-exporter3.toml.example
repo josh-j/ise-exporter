@@ -13,7 +13,9 @@
 # maintains /etc/ise-exporter3/credentials as a root-only EnvironmentFile.
 
 # Fleet size and spending ceilings. "production" (the default, sized for
-# ~100k endpoints / ~5k NADs) or "lab". Anything below overrides it.
+# ~90k endpoints / ~60k sessions / ~5k NADs) or "lab". Anything below overrides
+# it. Every key this exporter accepts appears in this file, so an unknown or
+# misplaced one is refused at load and names itself.
 profile = "production"
 
 [exporter]
@@ -22,6 +24,9 @@ api_host = "127.0.0.1"                        # operator API; localhost by defau
 api_port = 9619
 state_db = "/var/lib/ise-exporter3/state.sqlite3"
 log_level = "INFO"
+# What Prometheus is expected to scrape at. Freshness is reported against this,
+# so a dataset is called stale on the schedule you actually poll it on.
+scrape_interval = 60
 # A plan over budget is a configuration error, not a production surprise. Set
 # false to downgrade it to a startup warning -- and to stop the runtime from
 # throttling requests to the declared rate, since both are the same statement:
@@ -34,8 +39,8 @@ enforce_budget = true
 # explains their sources, and previews the plan without changing this file.
 [scale]
 nads = 5000        # configured switches, WLCs, VPN headends, and other AAA NADs
-endpoints = 100000 # endpoint-database records, including inactive devices
-sessions = 20000   # active RADIUS sessions now; not unique endpoints or users
+endpoints = 90000  # endpoint-database records, including inactive devices
+sessions = 60000   # active RADIUS sessions now; not unique endpoints or users
 accounts = 1000    # ISE Internal Users records; excludes external AD/LDAP users
 policy_sets = 100  # Device Admin TACACS+ policy sets, not rules inside the sets
 
@@ -51,17 +56,23 @@ user = "ers.readonly"
 ers_port = 9060
 ca_bundle = "/etc/ise-exporter3/certs/ise-rest-ca.pem"
 verify_tls = true
+# One wall budget per request, split across the connect and read phases rather
+# than allowed once for each. Capped at 30s.
+request_timeout = 30
 
 [targets.mnt]
 # Authenticates with the PAN account above; no separate credential.
 host = "mnt1.example.com"
 ca_bundle = "/etc/ise-exporter3/certs/ise-mnt-ca.pem"
 verify_tls = true
+request_timeout = 30
 
 [targets.oracle]
 # Data Connect. ISE fixes the user, service name and port; they are not ordinary
 # Oracle settings. Must be the *active* Data Connect MnT, and must be the
-# hostname on that node's Admin certificate.
+# hostname on that node's Admin certificate. There is deliberately no
+# request_timeout here: a statement timeout is a load-safety property of the
+# duty cycle below, not a per-target preference, so it lives in code.
 host = "mnt1.example.com"
 port = 2484
 service = "cpm10"
@@ -89,9 +100,9 @@ request_timeout = 30
 #
 # These are ENFORCED, not merely measured: a token bucket per target makes a
 # request wait rather than exceed the rate declared here. That matters most on a
-# cold start, which is the one case where the difference showed -- warming the
-# session cache for 20,000 endpoints ran at ~11,300 req/h against this 4,000
-# ceiling for its first two hours, and the appliance silently absorbed it.
+# cold start, which is the one case where the difference showed -- an unpaced
+# session-cache warm-up asks for 24,000 req/h at the scale declared above, and
+# the appliance silently absorbed it until the ceiling below made it a decision.
 # `exporter.enforce_budget = false` turns enforcement back into observation.
 # ---------------------------------------------------------------------------
 
@@ -99,7 +110,7 @@ request_timeout = 30
 pan.requests_per_hour = 3000
 # Sized for full per-endpoint coverage rather than a sample. See
 # `plan` for the warm-up burst and time to full coverage.
-mnt.requests_per_hour = 4000
+mnt.requests_per_hour = 12000
 pxgrid.requests_per_hour = 200
 
 # Cold start versus steady state is a real decision, so it is one you make here
@@ -107,12 +118,18 @@ pxgrid.requests_per_hour = 200
 # the steady ceiling above and simply takes longer; `plan` prints how long, and
 # `ise3_detail_fetches_deferred` stays above zero until it is done.
 #
-# At the scale declared above, full session coverage takes ~12.7h inside the
-# 4,000/h ceiling. Uncommenting the line below spends 12,000/h while any MnT
+# At the scale declared above, full session coverage takes ~12.6h inside the
+# 12,000/h ceiling. Uncommenting the line below spends 36,000/h while any MnT
 # cache is still filling -- 3x the steady ceiling, for roughly two hours -- and
 # `plan` prints that as a decision with its duration. Nothing bursts once warm.
 #
-# mnt.warmup_requests_per_hour = 12000
+# mnt.warmup_requests_per_hour = 36000
+#
+# PAN has converging caches too -- network_devices, tacacs_config and
+# tacacs_policy_rules each walk the fleet once before they settle -- so the same
+# declaration is available there and `plan` reports its effect the same way.
+#
+# pan.warmup_requests_per_hour = 9000
 
 # Oracle takes no warm-up burst: it is budgeted as a duty cycle, and no Data
 # Connect provider caches per-entity detail. Declaring one is a config error.
@@ -149,10 +166,14 @@ oracle.duty_cycle_percent = 3.0
 # [limits]
 # group_ceiling = 6500
 # result_rows = 7000
+# catalog_rows = 20000            # one Oracle dictionary read; set by the ISE
+#                                 # release, not by the estate, so it is flat
 # batch_queries = 5
 # batch_result_rows = 35000
 # result_bytes = 67108864         # the real safety bound; 35,000 rows is ~7 MB
-# pxgrid_session_bytes = 163840000 # unpaged getSessions; derived as 8 KiB/session
+# pxgrid_session_bytes = 491520000 # unpaged getSessions; derived as 8 KiB/session
+# field_bytes = 1048576           # one field of one row; bounds a rogue LOB
+# field_nesting_depth = 16        # levels a nested field may be expanded to
 # window_hours = 6                # how far back any event statement may scan
 # snapshot_samples = 50000        # hard: one dataset publishing more fails
 # snapshot_sample_warning = 20000 # soft: logged, so width is seen before it bites
@@ -172,16 +193,88 @@ oracle.duty_cycle_percent = 3.0
 # ise3_topk_groups_total.
 # ---------------------------------------------------------------------------
 
+# --- Deployment and appliance inventory, all from the PAN -------------------
+# These are small, flat in fleet size, and change rarely, so they run on the
+# slow cadence. Each is listed with the value it already defaults to: naming a
+# dataset here changes nothing until you change one of its keys.
+
+# Node roles, personas and replication state. The one PAN dataset on a fast
+# cadence, because a node leaving the deployment is an operational event.
+[datasets.deployment]
+interval = "5m"
+
+# The NAD inventory. Converging: it walks the ERS device list at a 100-row page
+# cap -- ~50 requests at 5,000 NADs -- on every collection, warm or cold.
+[datasets.network_devices]
+interval = "6h"
+
+# System and portal certificate expiry.
+[datasets.certificates]
+interval = "6h"
+
+# Licence entitlement and consumption.
+[datasets.licensing]
+interval = "6h"
+
+# Configuration backup recency and outcome.
+[datasets.backup]
+interval = "6h"
+
+# Installed patch and hot-patch inventory per node.
+[datasets.patches]
+interval = "6h"
+
+# Device Admin inventory: the TACACS+ device group and account walk.
+[datasets.tacacs_config]
+interval = "6h"
+
+# Device Admin policy-rule coverage. Converging, and the one cache that needs
+# two requests per entity -- authentication and authorization are separate.
+[datasets.tacacs_policy_rules]
+interval = "6h"
+
+# --- Sessions and endpoints -------------------------------------------------
+
 [datasets.active_sessions]
 # pxGrid is nearest to real time and cheapest; MnT is authoritative for PSN;
 # Data Connect reconstructs from accounting and is by far the most expensive.
 providers = ["pxgrid", "mnt", "dataconnect"]
 interval = "5m"
 
+# Per-endpoint policy set, authorization rule, profile and method. MnT-only:
+# nothing else carries the per-session authorization detail. This is the single
+# largest consumer of the MnT budget, and its interval is the lever -- one fetch
+# per MAC, cached for the session's life, so the steady cost is session churn.
+#
+# `policy_set_by_nad` publishes the per-switch policy set breakdown, which is the
+# open-mode versus closed-mode signal; `top_nads` bounds how many switches get
+# their own series per policy set. 0 publishes every switch.
+[datasets.session_authorization]
+interval = "5m"
+
+[datasets.session_authorization.options]
+policy_set_by_nad = true
+top_nads = 200
+# The whole cost of this dataset is one MnT request per MAC, and a session that
+# never leaves the active list is re-read every time this elapses. Departed
+# endpoints are dropped every cycle regardless, so this is not a memory bound --
+# it is only how long a still-active session may hold a decision that a CoA,
+# posture remediation or ANC quarantine could have changed underneath it.
+# Raising it removes requests the plan does not model; lowering it buys
+# freshness with requests it also does not model. `plan` prints the value.
+detail_refresh_hours = 24
+
+# Posture compliance as it stands now. Rides the same MnT ActiveList and detail
+# cache as session_authorization above, so it adds no requests of its own; the
+# pxGrid fallback answers the same question from the session topic.
+[datasets.posture_current]
+providers = ["mnt", "pxgrid"]
+interval = "5m"
+
 [datasets.endpoint_attributes]
 # Model / OS / MDM exist only on pxGrid, and deliberately have no fallback: the
 # ERS alternative supplied `profile` alone, which endpoint_inventory already
-# covers from one Data Connect query, and at 100k endpoints it could not keep a
+# covers from one Data Connect query, and at 90k endpoints it could not keep a
 # cache warm inside the PAN budget. Without pxGrid configured this dataset is
 # unavailable, and `plan` says so by name.
 providers = ["pxgrid"]
@@ -189,8 +282,9 @@ interval = "6h"
 
 [datasets.endpoint_inventory]
 # Data Connect aggregates server-side and is nearly flat in fleet size. The ERS
-# fallback pages at 100 rows -- roughly 1000 PAN requests at 100k endpoints.
-providers = ["dataconnect", "ers"]
+# fallback pages at 100 rows -- roughly 900 PAN requests at 90k endpoints -- and
+# pxGrid is the last resort, listed here because it is the shipped default order.
+providers = ["dataconnect", "ers", "pxgrid"]
 interval = "6h"
 
 [datasets.profile_events]
@@ -200,6 +294,16 @@ interval = "6h"
 
 [datasets.radius_reporting]
 interval = "30m"
+
+# Authentication failures broken out by reason and offender. Separate from
+# radius_reporting so a failure panel can run at its own cadence.
+[datasets.radius_errors]
+interval = "30m"
+
+# Posture assessment history, as distinct from the current compliance snapshot
+# that posture_current publishes.
+[datasets.posture_history]
+interval = "6h"
 
 [datasets.radius_accounting]
 # Accounting is event history, not the current-session directory. It supplies

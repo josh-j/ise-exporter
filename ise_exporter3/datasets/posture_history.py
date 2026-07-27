@@ -152,7 +152,7 @@ def statements(hours, limits):
 
 
 def fetch(ctx):
-    hours = reporting.window_hours(ctx.dataset.default_interval, ctx.limits)
+    hours = reporting.scan_window(ctx)
     results = ctx.transport.query_many(statements(hours, ctx.limits))
 
     pairs = results.get("policy_status", [])
@@ -205,6 +205,7 @@ DATASET = Dataset(
     name="posture_history",
     description="Historical posture assessments, conditions, Secure Client versions",
     default_interval=21600,
+    windowed=True,
     metrics=_METRICS,
     providers=(
         Provider(

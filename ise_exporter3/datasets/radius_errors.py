@@ -67,7 +67,7 @@ def statements(hours, limits):
 
 
 def fetch(ctx):
-    hours = reporting.window_hours(ctx.dataset.default_interval, ctx.limits)
+    hours = reporting.scan_window(ctx)
     results = ctx.transport.query_many(statements(hours, ctx.limits))
 
     for row in results.get("totals", []):
@@ -89,6 +89,7 @@ DATASET = Dataset(
     name="radius_errors",
     description="RADIUS error aggregates by code, NAD, method, PSN",
     default_interval=1800,
+    windowed=True,
     metrics=_METRICS,
     providers=(
         Provider(

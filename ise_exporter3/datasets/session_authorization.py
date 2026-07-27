@@ -41,6 +41,7 @@ Location is deliberately absent: `network_devices` already publishes
 for it rather than every session series carrying a copy.
 """
 import math
+import time
 from collections import defaultdict
 
 from prometheus_client import Gauge
@@ -48,16 +49,20 @@ from prometheus_client import Gauge
 from .. import detail_cache, nad_directory, reporting
 from ..labels import label
 from ..model import Cost, Dataset, Option, Provider
+from ..pxgrid import normalize_mac as _canonical_mac
 from ..session_detail import project
 
 
 CACHE = "mnt_session_detail"
-# The active list is one request that two datasets need in the same tick. A TTL
-# well under the cadence lets them share one fetch while still re-reading it
-# every cycle -- without this, session_authorization and posture_current each
-# fetch it and the shared cost pool understates MnT load by one request a cycle.
+# The active list is one request that two datasets need in the same tick, so the
+# pool owner refreshes it and the pool readers reuse what the owner left. It was
+# a short wall-clock TTL, which cannot work here: the owner holds the serialized
+# mnt lane for WARMUP_LANE_FRACTION of a cadence, so any TTL shorter than the
+# cadence has always expired by the time the reader runs and both datasets fetch
+# it -- the shared cost pool then understates MnT load by one full ActiveList
+# read a cycle and the two aggregate over snapshots minutes apart. The staleness
+# bound is one cadence: reuse this cycle's listing, never the previous owner's.
 ACTIVE_LIST_CACHE = "mnt_active_list"
-ACTIVE_LIST_TTL_SECONDS = 60
 # One fan-out answers this dataset and posture_current, so they share a pool and
 # the plan charges it once.
 POOL = "mnt_session_detail"
@@ -131,6 +136,10 @@ _METRICS = (status_endpoints, failure_reasons, auth_methods, authz_profiles,
 # Per-cycle warm-up ceiling. Bounded so a cold start cannot monopolise the MnT
 # lane; the cache converges over several cycles instead.
 WARMUP_FETCHES_PER_CYCLE = 2000
+# Share of one cadence a warm-up pass may hold the lane for. Half leaves the
+# other datasets on this target the rest of the cycle, which is what keeps
+# dataset_fresh honest for them while this cache fills.
+WARMUP_LANE_FRACTION = 0.5
 
 # Only used to size a startup warning: how many policy sets a deployment
 # typically runs, so "one series per NAD" can be stated as a number rather than
@@ -162,7 +171,32 @@ def _policy_set_by_nad_danger(value, scale):
         "but no panel can name the switch")
 
 
+def _detail_refresh_danger(value, scale):
+    if value < 24:
+        return (
+            "datasets.session_authorization.options.detail_refresh_hours = "
+            f"{value} re-reads the detail of every session still active after "
+            f"{value}h. Sessions outlive that on most wired estates, so this "
+            "buys freshness with MnT requests the plan does not model")
+    return ""
+
+
 OPTIONS = (
+    Option(
+        name="detail_refresh_hours",
+        default=24,
+        minimum=1,
+        maximum=720,
+        # The fan-out is one request per MAC and the whole cost of this dataset.
+        # Entries for MACs that left the active set are dropped every cycle, so
+        # this bound is not about memory: it is only how long a *still active*
+        # session keeps its cached decision before being read again.
+        description="hours a still-active session keeps its cached "
+                    "authorization detail before it is re-read; longer costs "
+                    "fewer MnT requests, but a mid-session change (CoA, posture "
+                    "remediation, ANC quarantine) stays stale for that long",
+        danger=_detail_refresh_danger,
+    ),
     Option(
         name="policy_set_by_nad",
         default=True,
@@ -183,18 +217,33 @@ OPTIONS = (
 
 
 def normalize_mac(mac):
-    """ActiveList uses colons, some fields use dashes; the URL accepts colons."""
-    return str(mac or "").strip().upper().replace("-", ":")
+    """ActiveList uses colons, some fields use dashes or Cisco's dotted
+    three-group form; the URL accepts colons.
+
+    One canonicaliser with the pxGrid provider, so the same endpoint has the
+    same identity whichever source published it and the detail cache is not
+    keyed on a form the detail URL does not accept.
+    """
+    return _canonical_mac(mac)
 
 
-def active_list(ctx):
-    """Read the active list, sharing one fetch across the datasets in this tick."""
-    cache = detail_cache.shared(
-        ACTIVE_LIST_CACHE, ttl_seconds=ACTIVE_LIST_TTL_SECONDS)
-    cached = cache.get("current")
-    if cached is not None:
-        cache.count("cache_hit")
-        return cached
+def active_list(ctx, *, refresh=False):
+    """Read the active list, sharing one fetch across the datasets in this tick.
+
+    ``refresh`` is the pool owner (the cache filler); everything else is a pool
+    reader and consumes whatever the owner left this cycle, fetching only when
+    there is nothing -- the case where the owner is disabled, which the plan
+    charges separately.
+    """
+    cache = detail_cache.shared(ACTIVE_LIST_CACHE, ttl_seconds=max(ctx.interval, 1))
+    # shared() ignores ttl_seconds for a cache that already exists, and the
+    # bound is the owner's configured cadence, which is only known here.
+    cache.ttl = max(ctx.interval, 1)
+    if not refresh:
+        cached = cache.get("current")
+        if cached is not None:
+            cache.count("cache_hit")
+            return cached
     listing = ctx.transport.get_mnt_xml("/Session/ActiveList", api="mnt_active_list")
     cache.put("current", listing)
     cache.count("fetched")
@@ -216,10 +265,23 @@ def warm(ctx, cache, macs):
 
     Returns how many were left for the next cycle. Nothing already cached is
     re-fetched: the fact does not change while the session lives.
+
+    Bounded in wall-clock as well as in count. The count stopped being a bound
+    on lane time once the request budget became something the transport enforces
+    by blocking: 2,000 detail requests through the limiter hold the serialized
+    mnt lane for minutes to hours, and every other mnt dataset -- including
+    posture_current, which only reads this cache -- waits behind it and reads as
+    stale. What this pass does not reach is deferred, which the scheduler
+    already paces the next visit from.
     """
     outstanding = cache.uncached(macs)
     batch = outstanding[:WARMUP_FETCHES_PER_CYCLE]
+    deadline = time.monotonic() + max(1.0, ctx.interval * WARMUP_LANE_FRACTION)
+    fetched = 0
     for mac in batch:
+        if time.monotonic() >= deadline:
+            break
+        fetched += 1
         try:
             record = ctx.transport.get_mnt_xml(
                 f"/Session/MACAddress/{mac}", api="mnt_session_detail")
@@ -235,7 +297,7 @@ def warm(ctx, cache, macs):
         # this process retained. See session_detail.project.
         cache.put(mac, project(rows[0]))
         cache.count("fetched")
-    return len(outstanding) - len(batch)
+    return len(outstanding) - fetched
 
 
 def _milliseconds(value):
@@ -374,7 +436,15 @@ def rank_nads(bucket, keep):
 
 def fetch(ctx):
     cache = detail_cache.shared(CACHE)
-    listing = active_list(ctx)
+    # retain() below already drops departed MACs, so this bound is not what
+    # keeps the cache finite -- it is only how long a still-active session may
+    # hold a decision that a CoA could have changed underneath it. shared()
+    # ignores ttl_seconds for a cache that already exists, so set it here where
+    # the operator's choice is known.
+    cache.ttl = ctx.option("detail_refresh_hours") * 3600
+    # The pool owner: this dataset's read is the one the plan charges, and its
+    # snapshot is what the readers in this cycle aggregate against.
+    listing = active_list(ctx, refresh=True)
     macs = active_macs(listing.get("sessions") or [])
 
     # Drop departed MACs first, so coverage is measured against the current set.
@@ -471,7 +541,7 @@ DATASET = Dataset(
             # mean session of roughly eight hours.
             cost=Cost(target="mnt", requests=1, scales_with="sessions",
                       warmup_requests=WARMUP_FETCHES_PER_CYCLE,
-                      churn_fraction=0.01, shares=POOL),
+                      churn_fraction=0.01, churn_interval=300, shares=POOL),
             supplies=frozenset({
                 "policy_set", "authz_rule", "authz_profile", "method",
                 "failure_reason", "failure_context", "status", "nad",

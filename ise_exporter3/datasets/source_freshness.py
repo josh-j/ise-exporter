@@ -63,7 +63,7 @@ def statements(hours, limits):
 
 
 def fetch(ctx):
-    hours = reporting.window_hours(ctx.dataset.default_interval, ctx.limits)
+    hours = reporting.scan_window(ctx)
     results = ctx.transport.query_many(statements(hours, ctx.limits))
     for rows in results.values():
         for row in rows:
@@ -79,6 +79,7 @@ DATASET = Dataset(
     name="source_freshness",
     description="Per-view row recency across Data Connect reporting views",
     default_interval=21600,
+    windowed=True,
     metrics=_METRICS,
     providers=(
         Provider(

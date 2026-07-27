@@ -97,7 +97,7 @@ def fetch(ctx):
                  "an inventory yet, so silence cannot be distinguished from an "
                  "unconfigured switch")
 
-    hours = reporting.window_hours(ctx.dataset.default_interval, ctx.limits)
+    hours = reporting.scan_window(ctx)
 
     rows = ctx.transport.query(_page(hours, 0, ctx.limits))
     total_groups = int(finite(rows[0].get("group_total"), len(rows))) if rows else 0
@@ -141,6 +141,7 @@ DATASET = Dataset(
     name="nad_health",
     description="Per-NAD authentication activity and dead-switch detection",
     default_interval=21600,
+    windowed=True,
     metrics=_METRICS,
     providers=(
         Provider(

@@ -29,11 +29,12 @@ import time
 from dataclasses import dataclass, field, replace
 from functools import partial
 
-from . import known_defects, telemetry
+from . import known_defects, reporting, telemetry
 from .labels import bounded_detail
 from .lanes import LaneSet
 from .plan import warmup_interval
-from .runtime import Runner
+from .runtime import Runner, forget_provider_health
+from .snapshots import snapshot_lock
 from .telemetry import _reason_slug
 from .transports import FAILURE_EXPLANATIONS
 
@@ -67,6 +68,12 @@ SLOW_RETRY_REASONS = frozenset({
 # another dataset fills, or on schema discovery, has not failed at anything --
 # it asked a question that cannot be answered yet, and the answer arrives on
 # someone else's schedule rather than after a repair.
+#
+# They are exempt from two things, not one: the consecutive-failure backoff
+# below, and the failover counter. A source that cannot answer yet is not
+# evidence that the source is bad, and stepping away from it on that evidence
+# lands on a provider that means something coarser -- for as long as the
+# recovery probe cadence, which is usually longer than the wait itself.
 #
 # These must never escalate into the consecutive-failure backoff. They did, and
 # it was caught in production: nad_health refused five times at one-minute
@@ -218,17 +225,34 @@ class Scheduler:
 
     def _switch_to(self, state, index, reason):
         previous = state.provider.name
-        # Clear the old selection's data series: two sources for one dataset do
-        # not mean the same thing, so a stale sample under the previous provider
-        # label would keep answering a query that is now about something else.
-        for family in state.entry.dataset.metrics:
-            self._forget_provider(family, previous)
-        if state.reason:
-            telemetry.dataset_provider_reason_info.remove(
-                state.name, previous, _reason_slug(state.reason))
-        state.active = index
+        # One unit, so a scrape cannot observe the half-switched state.
+        with snapshot_lock:
+            # Clear the old selection's data series: two sources for one dataset
+            # do not mean the same thing, so a stale sample under the previous
+            # provider label would keep answering a query that is now about
+            # something else.
+            for family in state.entry.dataset.metrics:
+                self._forget_provider(family, previous)
+            # Coverage carries no provider label and the incoming source may not
+            # publish it at all, so it is dropped rather than relabelled.
+            reporting.forget_coverage(state.name)
+            # And its health, which is the same lie in the other direction: left
+            # alone, the departing source keeps asserting fresh=1 over a snapshot
+            # this method just deleted, and a provider abandoned mid-chain is
+            # never written again at all.
+            forget_provider_health(
+                state.name, previous,
+                extra_families=(telemetry.dataset_next_run_timestamp,
+                                telemetry.dataset_last_attempt_timestamp))
+            if state.reason:
+                telemetry.dataset_provider_reason_info.remove(
+                    state.name, previous, _reason_slug(state.reason))
+            state.active = index
         state.failures = 0
         state.reason = reason
+        # Freshness was earned by the source we just left. The incoming one
+        # publishes fresh=0 until it has a success of its own.
+        self.last_success.pop(state.name, None)
         # Start the recovery clock now. Left at zero, a dataset would probe the
         # source it just escaped on its very next collection, so it would spend
         # every other cycle failing against a source already known to be down.
@@ -355,37 +379,26 @@ class Scheduler:
             # Reserve the next slot before running: a collection slower than its
             # own cadence must not re-arm on every tick and queue without bound.
             self._set_next_run(state, now + state.interval)
-            if self.lanes.submit(state.target, state.name,
-                                 partial(self._collect, state)):
+            # Decided here, from the same clock reading as the due check, so the
+            # work is submitted to the lane of the persona it will actually talk
+            # to. Choosing inside the worker ran a recovery probe against one
+            # target from another target's lane.
+            provider, canary = self._choose(state, now)
+            if self.lanes.submit(provider.target, state.name,
+                                 partial(self._collect, state, provider, canary)):
                 submitted.append(state.name)
         self.refresh_freshness(now)
         return submitted
 
-    def _collect(self, state):
-        now = self.clock()
-        provider, canary = self._choose(state, now)
+    def _collect(self, state, provider=None, canary=False):
+        if provider is None:
+            provider, canary = self._choose(state, self.clock())
+        if canary:
+            return self._probe(state, provider)
+
         entry = replace(state.entry, provider=provider)
         outcome = self.runner.run(entry, self.transports[provider.target])
         completed = self.clock()
-
-        if canary:
-            state.last_probe = completed
-            if outcome.ok:
-                # The preferred source answered again. Return to it rather than
-                # staying on a fallback that means something slightly different.
-                self._switch_to(state, 0, "preferred_provider_recovered")
-                self.last_success[state.name] = completed
-                self._record_deferred(state, provider.target, outcome)
-                self._set_next_run(
-                    state, completed + self._interval_after(state, entry, outcome))
-            else:
-                logger.info(
-                    "recovery probe failed dataset=%s provider=%s reason=%s; "
-                    "staying on %s", state.name, provider.name, outcome.reason,
-                    state.provider.name)
-                self._set_next_run(state, completed + state.interval)
-            self.refresh_freshness(completed)
-            return outcome
 
         if outcome.ok:
             state.failures = 0
@@ -394,8 +407,14 @@ class Scheduler:
             self._set_next_run(
                 state, completed + self._interval_after(state, entry, outcome))
         else:
-            state.failures += 1
-            if (state.failures >= PROVIDER_FAILOVER_THRESHOLD
+            # A pending reason is not a strike against the source: it is the
+            # answer "not yet" from a source that is answering. Counting it both
+            # steps away from a working provider and leaves the counter armed
+            # for the next real failure.
+            if outcome.reason not in PENDING_REASONS:
+                state.failures += 1
+            if (outcome.reason not in PENDING_REASONS
+                    and state.failures >= PROVIDER_FAILOVER_THRESHOLD
                     and state.active + 1 < len(state.candidates)):
                 self._switch_to(state, state.active + 1, outcome.reason)
                 # Try the new source now rather than waiting out a backoff that
@@ -405,6 +424,44 @@ class Scheduler:
                 self._set_next_run(
                     state, completed + self._retry_delay(state, outcome))
         self.refresh_freshness(completed)
+        return outcome
+
+    def _probe(self, state, provider):
+        """Try the preferred source once; the active one still collects.
+
+        The probe is additive, not a replacement for the cycle. As a replacement
+        it starved any degraded dataset whose cadence is longer than the recheck
+        window: endpoint_inventory at six hours probed a dead source on every
+        single cycle and collected from its fallback exactly once, at the moment
+        of failover, while dataset_up and the fallback's gauges said otherwise.
+        """
+        entry = replace(state.entry, provider=provider)
+        outcome = self.runner.run(entry, self.transports[provider.target])
+        completed = self.clock()
+        state.last_probe = completed
+        if outcome.ok:
+            # The preferred source answered again. Return to it rather than
+            # staying on a fallback that means something slightly different.
+            self._switch_to(state, 0, "preferred_provider_recovered")
+            self.last_success[state.name] = completed
+            self._record_deferred(state, provider.target, outcome)
+            self._set_next_run(
+                state, completed + self._interval_after(state, entry, outcome))
+            self.refresh_freshness(completed)
+            return outcome
+
+        logger.info(
+            "recovery probe failed dataset=%s provider=%s reason=%s; "
+            "staying on %s", state.name, provider.name, outcome.reason,
+            state.provider.name)
+        # The failure belonged to the preferred source, so it does not touch
+        # state.failures. The active source still owes this cycle its data, and
+        # it must produce it on its own target's lane rather than on this one.
+        active = state.provider
+        if active.target == provider.target:
+            return self._collect(state, active, False)
+        self.lanes.submit(active.target, state.name,
+                          partial(self._collect, state, active, False))
         return outcome
 
     def _retry_delay(self, state, outcome):

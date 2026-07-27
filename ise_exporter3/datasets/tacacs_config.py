@@ -160,7 +160,7 @@ DATASET = Dataset(
             # per cycle behind a long cache, so classification converges.
             cost=Cost(target="pan", requests=25, scales_with="accounts",
                       warmup_requests=WARMUP_FETCHES_PER_CYCLE,
-                      churn_fraction=0.0005),
+                      churn_fraction=0.0005, churn_interval=21600),
             supplies=frozenset({
                 "account", "policy_set", "policy_object", "rule_count", "hygiene"}),
             coverage="converging",

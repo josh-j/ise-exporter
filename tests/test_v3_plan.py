@@ -13,6 +13,7 @@ from ise_exporter3.model import TARGETS, Scale
 from ise_exporter3.plan import (
     build_plan,
     render_plan,
+    uncoverable_windows,
     warming_entries,
     warmup_report,
 )
@@ -130,16 +131,21 @@ def test_shared_work_is_charged_once_not_once_per_dataset():
     assert posture.shared_with == ("session_authorization",)
     assert authorization.charged and not posture.charged
     assert posture.load.requests_per_hour == 0
-    # Steady state is churn: 1% of 20,000 sessions per 5-minute cycle.
-    assert authorization.load.requests_per_hour == pytest.approx((1 + 200) * 12)
+    # Steady state is churn: 1% of the declared sessions per 5-minute cycle.
+    churn = plan.config.scale.sessions * 0.01
+    assert authorization.load.requests_per_hour == pytest.approx((1 + churn) * 12)
 
 
-def test_session_authorization_interval_changes_its_pooled_request_rate():
-    # posture_current reads the same ActiveList and detail cache, but it never
-    # fetches uncached per-session details. When authorization slows from five
-    # to ten minutes, posture's five-minute runs add only the six intervening
-    # ActiveList requests -- they must not keep 200 detail fetches/cycle charged
-    # at the old cadence.
+def test_a_longer_interval_does_not_reduce_turnover_driven_load():
+    # Session detail is fetched once per MAC and cached for that session's life,
+    # so the steady cost is turnover -- a rate. Running half as often means twice
+    # as much has turned over since the last look, and the hourly cost is flat.
+    # Reporting it as halved promised a saving the runtime could not deliver:
+    # the cache simply ran with twice the misses per cycle.
+    #
+    # posture_current still reads the same ActiveList and detail cache without
+    # fetching uncached detail of its own, so its five-minute runs add only the
+    # six intervening enumerations.
     without_pxgrid = {key: value for key, value in ALL_TARGETS.items()
                       if key != "pxgrid"}
     fast = _plan(
@@ -151,11 +157,48 @@ def test_session_authorization_interval_changes_its_pooled_request_rate():
 
     fast_load = _entry(fast, "session_authorization").load.requests_per_hour
     slow_load = _entry(slow, "session_authorization").load.requests_per_hour
-    assert fast_load == pytest.approx(2_412)
-    assert slow_load == pytest.approx(1_212)
-    assert slow_load < fast_load
-    assert next(t for t in slow.targets if t.target == "mnt").load.requests_per_hour < (
-        next(t for t in fast.targets if t.target == "mnt").load.requests_per_hour)
+    churn = fast.config.scale.sessions * 0.01
+    assert fast_load == pytest.approx((1 + churn) * 12)
+    assert slow_load == pytest.approx((1 + churn * 2) * 6 + 6)
+    assert slow_load == pytest.approx(fast_load)
+    assert next(t for t in slow.targets if t.target == "mnt").load.requests_per_hour == (
+        pytest.approx(
+            next(t for t in fast.targets if t.target == "mnt").load.requests_per_hour))
+
+
+def test_the_plan_says_why_a_longer_interval_bought_nothing():
+    # An operator who lengthens a cadence and sees the same figure would read
+    # the plan as broken. It has to name turnover as the thing setting the cost.
+    without_pxgrid = {key: value for key, value in ALL_TARGETS.items()
+                      if key != "pxgrid"}
+    text = render_plan(_plan(
+        targets=without_pxgrid,
+        datasets={"session_authorization": {"interval": "15m"}}))
+    assert "steady cost is turnover, not cadence" in text
+    assert "one refetch per session per ~8.3h" in text
+    # network_devices walks every NAD each cycle to refetch a handful, so there
+    # cadence really is the lever and the same line would be a lie.
+    assert "one refetch per nad" not in text
+
+
+def test_a_cadence_past_the_mean_session_does_reduce_load():
+    # The flat region ends where a cycle outlives the average session: at 1% per
+    # five minutes that is ~8.3h, past which everything has turned over and a
+    # longer cadence genuinely does cost less per hour.
+    without_pxgrid = {key: value for key, value in ALL_TARGETS.items()
+                      if key != "pxgrid"}
+    flat = _plan(targets=without_pxgrid,
+                 datasets={"session_authorization": {"interval": "1h"}})
+    beyond = _plan(targets=without_pxgrid,
+                   datasets={"session_authorization": {"interval": "12h"}})
+    flat_load = _entry(flat, "session_authorization").load.requests_per_hour
+    beyond_load = _entry(beyond, "session_authorization").load.requests_per_hour
+    sessions = flat.config.scale.sessions
+    assert flat_load == pytest.approx((1 + sessions * 0.01) * 12)
+    assert beyond_load < flat_load
+    # Everything turned over, so each 12-hour cycle refetches the whole active
+    # set -- sessions/12 an hour -- plus posture's own five-minute enumerations.
+    assert beyond_load == pytest.approx(sessions / 12 + 12, rel=1e-3)
 
 
 def test_a_converging_provider_is_budgeted_on_what_it_costs_once_warm():
@@ -163,13 +206,16 @@ def test_a_converging_provider_is_budgeted_on_what_it_costs_once_warm():
     # the steady state forever; hiding it would understate the first hour. The
     # plan reports both, and the budget checks the steady figure.
     without_pxgrid = {key: value for key, value in ALL_TARGETS.items() if key != "pxgrid"}
-    entry = _entry(_plan(targets=without_pxgrid), "session_authorization")
+    plan = _plan(targets=without_pxgrid)
+    entry = _entry(plan, "session_authorization")
     cost = entry.provider.cost
-    scale = Scale(sessions=20_000)
+    scale = plan.config.scale
 
     assert cost.converges
-    assert cost.warmup_requests_for(scale) > cost.requests_for(scale) * 5
-    assert cost.cycles_to_warm(scale) == 10       # 20,000 at 2,000 per cycle
+    # The burst is a fixed per-cycle ceiling, so its lead over steady churn
+    # narrows as the fleet grows; what must stay true is that it is a burst.
+    assert cost.warmup_requests_for(scale) > cost.requests_for(scale)
+    assert cost.cycles_to_warm(scale) == 30       # 60,000 at 2,000 per cycle
     assert entry.load.requests_per_hour == pytest.approx(
         cost.requests_for(scale) * 12)
 
@@ -235,14 +281,14 @@ def test_a_declared_warmup_burst_shortens_the_cold_start_it_is_declared_for():
         _plan(targets=without_pxgrid), _entry(
             _plan(targets=without_pxgrid), "session_authorization"))
     plan = _plan(targets=without_pxgrid,
-                 budget={"mnt": {"requests_per_hour": 4000,
-                                 "warmup_requests_per_hour": 12000}})
+                 budget={"mnt": {"requests_per_hour": 12000,
+                                 "warmup_requests_per_hour": 36000}})
     burst = warmup_report(plan, _entry(plan, "session_authorization"))
 
     assert burst.available_per_hour > baseline.available_per_hour
     assert burst.seconds < baseline.seconds
     text = render_plan(plan)
-    assert "budget.mnt permits 12,000 req/h while any of them is filling" in text
+    assert "budget.mnt permits 36,000 req/h while any of them is filling" in text
 
 
 def test_the_enumeration_a_converging_provider_pays_every_cycle_is_counted():
@@ -264,15 +310,55 @@ def test_the_enumeration_a_converging_provider_pays_every_cycle_is_counted():
 
 
 def test_pooling_does_not_apply_when_members_choose_different_providers():
-    # pxGrid posture rides the session stream and costs nothing extra there, so
-    # the MnT fan-out is charged alone.
+    # The MnT fan-out is charged alone once posture leaves that pool.
     plan = _plan(datasets={
         "session_authorization": {"providers": ["mnt"]},
         "posture_current": {"providers": ["pxgrid"]}})
     authorization = _entry(plan, "session_authorization")
     posture = _entry(plan, "posture_current")
-    assert authorization.shared_with == () and posture.shared_with == ()
+    assert authorization.shared_with == ()
     assert posture.target == "pxgrid"
+
+
+def test_both_pxgrid_session_consumers_share_one_baseline():
+    # get_sessions re-baselines a snapshot that belongs to the transport, so
+    # whichever of the two runs first pays for it. Declaring it twice would
+    # double-count; declaring it once, on active_sessions only, let
+    # posture_current drive the most expensive pxGrid operation for free.
+    plan = _plan(datasets={
+        "active_sessions": {"providers": ["pxgrid"]},
+        "posture_current": {"providers": ["pxgrid"]}})
+    sessions = _entry(plan, "active_sessions")
+    posture = _entry(plan, "posture_current")
+    assert posture.shared_with == ("active_sessions",)
+    assert sessions.shared_with == ("posture_current",)
+    assert sessions.charged and not posture.charged
+
+
+def test_a_pooled_pxgrid_baseline_is_charged_at_the_shorter_cadence():
+    plan = _plan(datasets={
+        "active_sessions": {"providers": ["pxgrid"], "interval": 300},
+        "posture_current": {"providers": ["pxgrid"], "interval": 60}})
+    sessions = _entry(plan, "active_sessions")
+    posture = _entry(plan, "posture_current")
+    assert sessions.load.requests_per_hour == pytest.approx(3600 / 60)
+    assert posture.load.requests_per_hour == 0.0
+
+
+def test_a_pool_with_no_enabled_filler_promises_no_warm_up():
+    # posture_current only reads the cache session_authorization fills. With
+    # that dataset disabled the pool has no owner, and charging the reader for a
+    # fan-out it never issues promised a 2,000-request warm-up and a time to
+    # full coverage for a dataset that will never converge.
+    plan = _plan(datasets={
+        "session_authorization": {"enabled": False},
+        "posture_current": {"providers": ["mnt"]}})
+    posture = _entry(plan, "posture_current")
+    assert not posture.charged
+    assert posture.shared_with == ()
+    assert posture.load.requests_per_hour == pytest.approx(
+        3600.0 / posture.interval)
+    assert posture not in warming_entries(plan, "mnt")
 
 
 def test_target_totals_sum_only_the_datasets_actually_using_that_target():
@@ -406,12 +492,14 @@ def test_multi_source_datasets_declare_what_each_provider_can_supply():
 
 
 def test_the_default_profile_plans_within_budget_at_production_scale():
-    # "Out of the box" means an operator who sets no profile, at ~100k endpoints
-    # and ~5k NADs, gets a plan the exporter will actually start with.
+    # "Out of the box" means an operator who sets no profile, at ~90k endpoints,
+    # ~60k sessions and ~5k NADs, gets a plan the exporter will actually start
+    # with. The shipped example must declare the same fleet as the profile.
     config = Config.load(EXAMPLE_CONFIG, environ={
         "ISE_PASS": "x", "ISE_DATACONNECT_PASSWORD": "y"})
     assert config.profile == "production"
-    assert config.scale.endpoints == 100_000
+    assert config.scale.endpoints == 90_000
+    assert config.scale.sessions == 60_000
     assert config.scale.nads == 5_000
     plan = build_plan(config)
     assert plan.fits, render_plan(plan)
@@ -475,3 +563,70 @@ def test_a_cache_without_a_warmup_budget_cannot_claim_to_converge():
     with pytest.raises(ModelError, match="nothing makes it converge"):
         Provider(name="mnt", cost=Cost(target="mnt", requests=1),
                  coverage="converging")
+
+
+def test_a_budget_with_nothing_left_for_warming_does_not_report_the_best_case():
+    # share == 0 meant two different things: no ceiling to derive anything from,
+    # and a ceiling the steady state has already spent. Reported as the first,
+    # a budget set to exactly the planned figure printed ~2.5h to full coverage
+    # and no caveat, while the token bucket stretched it without bound.
+    without_pxgrid = {key: value for key, value in ALL_TARGETS.items()
+                      if key != "pxgrid"}
+    planned = next(target.load.requests_per_hour
+                   for target in _plan(targets=without_pxgrid).targets
+                   if target.target == "mnt")
+    plan = _plan(targets=without_pxgrid,
+                 budget={"mnt": {"requests_per_hour": round(planned)}})
+    report = warmup_report(plan, _entry(plan, "session_authorization"))
+
+    assert report.starved
+    assert report.throttled
+    assert report.seconds == float("inf")
+    text = render_plan(plan)
+    assert "does not finish filling" in text
+    assert "budget.mnt.warmup_requests_per_hour" in text
+
+
+def test_the_boundary_either_side_of_an_exhausted_budget_is_continuous():
+    without_pxgrid = {key: value for key, value in ALL_TARGETS.items()
+                      if key != "pxgrid"}
+    planned = next(target.load.requests_per_hour
+                   for target in _plan(targets=without_pxgrid).targets
+                   if target.target == "mnt")
+    for ceiling in (round(planned), round(planned) + 1):
+        plan = _plan(targets=without_pxgrid,
+                     budget={"mnt": {"requests_per_hour": ceiling}})
+        report = warmup_report(plan, _entry(plan, "session_authorization"))
+        assert report.throttled, ceiling
+    render_plan(plan)      # the infinite duration must still render
+
+
+def test_no_declared_ceiling_still_reports_the_unthrottled_cadence():
+    # The deliberate "nothing derivable" path: with no budget to pace against,
+    # the cadence is the only honest answer and must not read as starved.
+    without_pxgrid = {key: value for key, value in ALL_TARGETS.items()
+                      if key != "pxgrid"}
+    plan = _plan(targets=without_pxgrid,
+                 budget={"mnt": {"requests_per_hour": 0}})
+    report = warmup_report(plan, _entry(plan, "session_authorization"))
+
+    assert not report.starved
+    assert not report.throttled
+
+
+def test_a_cadence_no_reporting_window_can_cover_is_named_in_the_plan():
+    # nad_health at 24h against a 6-hour scan ceiling brands as dead every
+    # switch last seen more than six hours before the scan, and no window
+    # derived from the interval can cure it.
+    plan = _plan(datasets={"nad_health": {"interval": "24h"}})
+    text = render_plan(plan)
+
+    assert [entry.name for entry in uncoverable_windows(plan)] == ["nad_health"]
+    assert "Cadences no reporting window can cover" in text
+    assert "no reporting statement may scan more than 6h back" in text
+
+
+def test_a_cadence_within_the_window_ceiling_is_not_flagged():
+    plan = _plan(datasets={"nad_health": {"interval": "6h"}})
+    assert uncoverable_windows(plan) == ()
+    assert "Cadences no reporting window can cover" not in render_plan(plan)

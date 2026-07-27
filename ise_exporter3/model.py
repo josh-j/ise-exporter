@@ -151,6 +151,12 @@ class Cost:
     db_seconds_per_1k: float = 0.0
     streaming: bool = False
     shares: str = ""
+    # True when this provider only reads what a pool peer fetched and issues no
+    # fan-out of its own. The pool's cost belongs to whoever fills it, and a
+    # reader left owning the pool promises a warm-up nobody performs -- which is
+    # exactly what the plan said about posture_current with
+    # session_authorization disabled.
+    pool_reader: bool = False
 
     # A provider that caches per-entity detail has two different costs, and
     # reporting only one of them misleads in whichever direction you pick.
@@ -163,9 +169,18 @@ class Cost:
     #
     #   warmup_requests   per-cycle ceiling while the cache fills
     #   churn_fraction    share of `scales_with` needing a fetch once warm,
-    #                     per cycle at the dataset's own cadence
+    #                     per cycle of `churn_interval`
+    #   churn_interval    the cadence churn_fraction was measured at
+    #
+    # Turnover is a rate, not a per-cycle constant: run half as often and twice
+    # as much has turned over since the last look, so the hourly cost is flat
+    # rather than halved. Naming the cadence the fraction was measured at is
+    # what lets `load` say that. Without it a longer interval reported a saving
+    # the runtime could not deliver -- the cache simply ran with proportionally
+    # more misses -- and the plan is the one thing that must not quietly lie.
     warmup_requests: float = 0.0
     churn_fraction: float = 0.0
+    churn_interval: float = 0.0
     # Most detail caches need one request per entity. Device Admin policy-rule
     # coverage needs two (authentication and authorization), and pretending it
     # needs one makes both warm-up time and steady churn optimistic.
@@ -192,6 +207,13 @@ class Cost:
         if self.requests_per_entity != 1.0 and not self.scales_with:
             raise ModelError(
                 "cost requests_per_entity requires scales_with")
+        if self.pool_reader and not self.shares:
+            raise ModelError(
+                "cost pool_reader names no pool; set shares to the pool it reads")
+        if self.churn_fraction and self.churn_interval <= 0:
+            raise ModelError(
+                "cost churn_fraction needs churn_interval: a turnover share "
+                "means nothing without the cadence it was measured over")
         if self.db_seconds and self.target != "oracle":
             raise ModelError(
                 f"only the oracle target has db_seconds, not {self.target!r}")
@@ -218,7 +240,21 @@ class Cost:
         """
         return self.requests + self.requests_per_1k * scale.units_of(self.scales_with)
 
-    def requests_for(self, scale: Scale) -> float:
+    def churn_for(self, interval_seconds: int = 0) -> float:
+        """Share of the fleet needing a refetch after one cycle of ``interval``.
+
+        Capped at the whole fleet: past the point where a cycle outlives the
+        average entity everything has turned over, so a longer cadence stops
+        costing more per cycle and the hourly figure does start to fall.
+        """
+        if not self.churn_fraction:
+            return 0.0
+        if not interval_seconds or not self.churn_interval:
+            return self.churn_fraction
+        return min(
+            1.0, self.churn_fraction * interval_seconds / self.churn_interval)
+
+    def requests_for(self, scale: Scale, interval_seconds: int = 0) -> float:
         """Steady-state per-collection requests -- what you live with.
 
         For a converging provider the per-entity part is the churn, not the
@@ -229,7 +265,7 @@ class Cost:
             units = scale.units_of(self.scales_with) * 1000.0
             return (
                 self.fixed_requests_for(scale)
-                + units * self.churn_fraction * self.requests_per_entity
+                + units * self.churn_for(interval_seconds) * self.requests_per_entity
             )
         return self.fixed_requests_for(scale)
 
@@ -278,7 +314,8 @@ class Cost:
         cycles_per_hour = 3600.0 / max(1, int(interval_seconds))
         return Load(
             target=self.target,
-            requests_per_hour=self.requests_for(scale) * cycles_per_hour,
+            requests_per_hour=(
+                self.requests_for(scale, interval_seconds) * cycles_per_hour),
             db_seconds_per_hour=self.db_seconds_for(scale) * cycles_per_hour,
             streams=1 if self.streaming else 0,
         )
@@ -393,6 +430,12 @@ class Dataset:
     default_interval: int
     metrics: tuple = field(default=())
     options: tuple = field(default=())
+    # True when a collection answers about a bounded window of history rather
+    # than about current state. Such a dataset can only cover its own cadence up
+    # to ``limits.window_hours``: past that ceiling every collection leaves a
+    # permanent gap, which the plan has to say out loud. Declared rather than
+    # inferred so a window-scanned dataset added later cannot be missed.
+    windowed: bool = False
 
     def __post_init__(self):
         if not self.name:

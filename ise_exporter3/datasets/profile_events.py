@@ -56,7 +56,7 @@ def statements(hours, limits, schema=None):
 
 
 def fetch(ctx):
-    hours = reporting.window_hours(ctx.dataset.default_interval, ctx.limits)
+    hours = reporting.scan_window(ctx)
     schema = getattr(ctx.transport, "schema", None)
     results = ctx.transport.query_many(statements(hours, ctx.limits, schema))
 
@@ -78,6 +78,7 @@ DATASET = Dataset(
     name="profile_events",
     description="Endpoint profiling events by source and action",
     default_interval=21600,
+    windowed=True,
     metrics=_METRICS,
     providers=(
         Provider(

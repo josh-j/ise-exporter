@@ -263,7 +263,7 @@ def _publish_devices(ctx, gauge, breakdown, rows, directory, rollup, keep):
 
 
 def fetch(ctx):
-    hours = reporting.window_hours(ctx.dataset.default_interval, ctx.limits)
+    hours = reporting.scan_window(ctx)
     schema = getattr(ctx.transport, "schema", None)
     results = ctx.transport.query_many(statements(hours, ctx.limits, schema))
     rollup = ctx.option("device_rollup")
@@ -340,6 +340,7 @@ DATASET = Dataset(
     name="tacacs_activity",
     description="TACACS authentication, authorization, accounting, commands",
     default_interval=21600,
+    windowed=True,
     metrics=_METRICS,
     options=OPTIONS,
     providers=(

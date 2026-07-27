@@ -19,7 +19,7 @@ statement can be built without saying which ceiling it was built against.
 """
 from __future__ import annotations
 
-from . import telemetry
+from . import snapshots, telemetry
 from .labels import label
 from .parsing import finite
 
@@ -31,6 +31,20 @@ def window_hours(interval_seconds, limits):
     except (TypeError, ValueError):
         hours = 1
     return max(1, min(limits.window_hours, hours))
+
+
+def scan_window(ctx):
+    """Hours of history one collection must cover at its effective cadence.
+
+    Widened by the configured interval, never narrowed by it: lengthening a
+    cadence without lengthening the window publishes a fraction of the events as
+    if it were all of them, while shortening one must not shrink a window whose
+    length is the question being asked -- 70 minutes of quiet is not a dead
+    switch just because nad_health was set to run hourly.
+    """
+    interval = max(int(getattr(ctx, "interval", 0) or 0),
+                   int(ctx.dataset.default_interval))
+    return window_hours(interval, ctx.limits)
 
 
 def recent(column, hours, limits):
@@ -149,13 +163,36 @@ def publish_coverage(ctx, breakdown, returned, total):
     """
     returned, total = int(returned), max(int(total), int(returned))
     dataset = ctx.dataset.name
-    telemetry.topk_groups_returned.labels(
-        dataset=dataset, breakdown=breakdown).set(returned)
-    telemetry.topk_groups_total.labels(
-        dataset=dataset, breakdown=breakdown).set(total)
-    telemetry.topk_truncated.labels(
-        dataset=dataset, breakdown=breakdown).set(int(total > returned))
+    # Through the publication, not straight to the registry: coverage describes
+    # the rows this attempt is about to publish, so a discarded attempt must not
+    # leave it describing a snapshot that was rolled back.
+    ctx.set_shared(telemetry.topk_groups_returned, returned,
+                   dataset=dataset, breakdown=breakdown)
+    ctx.set_shared(telemetry.topk_groups_total, total,
+                   dataset=dataset, breakdown=breakdown)
+    ctx.set_shared(telemetry.topk_truncated, int(total > returned),
+                   dataset=dataset, breakdown=breakdown)
     return total > returned
+
+
+def forget_coverage(dataset_name):
+    """Drop one dataset's coverage series when it changes source.
+
+    The families are keyed on (dataset, breakdown) with no provider label, and a
+    fallback provider need not publish coverage at all -- endpoint_inventory's
+    ers and pxgrid providers do not. Left alone, the departed source's numbers
+    stay beside a breakdown of a different size and read as current.
+    """
+    with snapshots.snapshot_lock:
+        for family in (telemetry.topk_groups_returned, telemetry.topk_groups_total,
+                       telemetry.topk_truncated):
+            names = tuple(getattr(family, "_labelnames", ()))
+            if "dataset" not in names:
+                continue
+            index = names.index("dataset")
+            for key in [labels for labels in getattr(family, "_metrics", {})
+                        if labels[index] == dataset_name]:
+                family._metrics.pop(key, None)
 
 
 def publish_truncation(ctx, breakdown, rows):

@@ -32,6 +32,7 @@ from .rest import (
     HTTP_READ_CHUNK_BYTES,
     MAX_HTTP_RESPONSE_BYTES,
     ResponseTooLarge,
+    error_snippet,
     redact,
     split_timeout,
 )
@@ -64,6 +65,14 @@ def _safe_https_url(value, label):
         raise TransportError(
             "invalid_response", f"pxGrid {label} returned an unsafe URL")
     return str(value).rstrip("/")
+
+
+def _endpoint_identity(row):
+    for field in ("id", "mac", "macAddress"):
+        value = row.get(field)
+        if value:
+            return str(value)
+    return json.dumps(row, sort_keys=True, default=str)
 
 
 def _safe_wss_url(value):
@@ -117,6 +126,9 @@ class PxGridTransport(Transport):
         self._prepare_lock = threading.Lock()
         self._state_lock = threading.RLock()
         self._sync_lock = threading.Lock()
+        # Separate from _prepare_lock, which prepare() holds and is not
+        # reentrant: the stream is started from satisfies(), not from prepare().
+        self._stream_lock = threading.Lock()
         self._shutdown = None
         self._closed = threading.Event()
         self._connected = threading.Event()
@@ -138,6 +150,7 @@ class PxGridTransport(Transport):
         self._syncing = False
         self._buffer = []
         self._sequence = {}
+        self._awaiting_stream = False
 
     def _verify(self):
         if not self.settings.verify_tls:
@@ -238,8 +251,7 @@ class PxGridTransport(Transport):
                         allow_redirects=False)
                 status = int(response.status_code)
                 if not 200 <= status < 300:
-                    snippet = redact(response.raw.read(200, decode_content=True))
-                    response.close()
+                    snippet = error_snippet(response)
                     self._count(api, f"http_{status}")
                     self._error(api, "http_error", status)
                     if status == 401:
@@ -284,6 +296,24 @@ class PxGridTransport(Transport):
                 raise TransportError(
                     "connection_failed",
                     f"{urlsplit(url).hostname} could not be reached") from error
+            except (
+                requests.exceptions.ChunkedEncodingError,
+                requests.exceptions.ContentDecodingError,
+            ) as error:
+                # A body that dies in transit is a node problem, so classify it
+                # as a connection failure and let _query try the next provider.
+                self._count(api, "connection_error")
+                self._error(api, "connection_error")
+                raise TransportError(
+                    "connection_failed",
+                    f"{urlsplit(url).hostname} closed the response body early",
+                ) from error
+            except Exception as error:  # noqa: BLE001 - bounded failure vocabulary
+                logger.error(
+                    "pxGrid request failed for %s: %s", api, redact(str(error)))
+                self._count(api, "error")
+                self._error(api, "unknown")
+                raise TransportError("unexpected_error") from error
             finally:
                 telemetry.api_request_duration_seconds.labels(
                     target=self.target, api=api).observe(
@@ -430,7 +460,6 @@ class PxGridTransport(Transport):
                     logger.info(
                         "pxGrid %s provider %s failed (%s); trying another",
                         endpoint, peer, error.reason)
-            self._rest_services.pop(service, None)
         raise last or TransportError(
             "connection_failed", f"pxGrid {endpoint} had no reachable provider")
 
@@ -441,13 +470,29 @@ class PxGridTransport(Transport):
             self._validate_files()
             self._activate()
             self._discover()
-            if "capability:pxgrid_session_topic" in self._capabilities:
-                self._start_supervisor()
-        # Give the initial connect and baseline one request timeout. Endpoint
-        # collection remains usable even when pubsub is unavailable, so failure
-        # is returned by satisfies() rather than raised here.
-        if "capability:pxgrid_session_topic" in self._capabilities:
-            self._connected.wait(max(1, self.timeout * 2))
+
+    def _ensure_stream(self):
+        # Only a dataset that actually requires the session topic pays for the
+        # subscription and its getSessions baseline. An endpoint-only pxGrid
+        # deployment plans streams=0, so it must not hold one.
+        with self._stream_lock:
+            if self._supervisor is None:
+                self._awaiting_stream = True
+            self._start_supervisor()
+
+    def _await_stream(self):
+        # Only the first attempt pays for the initial connect and baseline, and
+        # only a dataset that needs the stream. Later outages are reported by
+        # satisfies() instead of parking the lane on a known failure.
+        if not self._awaiting_stream:
+            return
+        self._awaiting_stream = False
+        deadline = time.monotonic() + max(1, self.timeout * 2)
+        while not self._stopping() and not self._connected.is_set():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            self._connected.wait(min(0.5, remaining))
 
     def _validate_files(self):
         for label_name, path in (
@@ -475,6 +520,9 @@ class PxGridTransport(Transport):
             if requirement not in self._capabilities:
                 return False, "not_configured", (
                     f"ISE did not advertise {requirement.removeprefix('capability:')}")
+            if requirement == "capability:pxgrid_session_topic":
+                self._ensure_stream()
+                self._await_stream()
             if (
                 requirement == "capability:pxgrid_session_topic"
                 and not self._connected.is_set()
@@ -501,6 +549,9 @@ class PxGridTransport(Transport):
                 with self._state_lock:
                     self._syncing = True
                     self._buffer.clear()
+                    # A new subscription starts its own sequence; the previous
+                    # connection's counter is not comparable to it.
+                    self._sequence.clear()
                 ws = self._connect_ws()
                 receiver = threading.Thread(
                     target=self._receive, args=(ws,),
@@ -555,8 +606,10 @@ class PxGridTransport(Transport):
         if isinstance(error, TransportError):
             return error
         if isinstance(error, ssl.SSLError):
-            return TransportError("tls_failed", str(error))
-        text = str(error)
+            return TransportError("tls_failed", redact(str(error)))
+        # A rejected handshake carries the response headers and body, so the
+        # detail reaches a log line and a metric label only redacted.
+        text = redact(str(error))
         lower = text.lower()
         if "certificate" in lower or "ssl" in lower:
             return TransportError("tls_failed", text)
@@ -643,6 +696,9 @@ class PxGridTransport(Transport):
                 last = error
                 self._peer_secrets.pop(peer, None)
                 self._close_ws()
+        # Every advertised node failed, so the cached discovery may be stale;
+        # the next supervisor pass re-looks it up.
+        self._services.pop(PUBSUB_SERVICE, None)
         raise self._classify(last or RuntimeError("no pxGrid pubsub URL connected"))
 
     def _send(self, frame):
@@ -723,15 +779,17 @@ class PxGridTransport(Transport):
         return str(frame).split("\n\n", 1)[1].rstrip("\x00").strip()
 
     def _sequence_gap(self, payload):
-        if "sequence" not in payload:
+        if not isinstance(payload, dict) or "sequence" not in payload:
             return False
         try:
             current = int(payload["sequence"])
         except (TypeError, ValueError):
             return False
-        previous = self._sequence.get("session")
-        self._sequence["session"] = current
-        return current == 0 or (previous is not None and current != previous + 1)
+        with self._state_lock:
+            previous = self._sequence.get("session")
+            self._sequence["session"] = current
+        return previous is not None and (
+            current == 0 or current != previous + 1)
 
     @staticmethod
     def _session_events(payload):
@@ -840,7 +898,8 @@ class PxGridTransport(Transport):
             with self._state_lock:
                 return [dict(row) for row in self._endpoints]
 
-        rows, start = [], 0
+        rows, seen, start, pages = [], set(), 0, 0
+        max_pages = max(1, MAX_ENDPOINTS // max(1, ENDPOINT_PAGE_SIZE))
         while True:
             data = self._query(
                 ENDPOINT_SERVICE, "getEndpoints", {
@@ -856,13 +915,28 @@ class PxGridTransport(Transport):
             if any(not isinstance(row, dict) for row in page):
                 raise TransportError(
                     "invalid_response", "pxGrid getEndpoints contained a non-object")
-            rows.extend(page)
+            fresh = [row for row in page if _endpoint_identity(row) not in seen]
+            seen.update(_endpoint_identity(row) for row in fresh)
+            if page and not fresh:
+                logger.warning(
+                    "pxGrid getEndpoints repeated its page at startIndex=%d "
+                    "(%d rows)", start, len(page))
+                raise TransportError(
+                    "invalid_response",
+                    "pxGrid getEndpoints ignored startIndex; the same page "
+                    f"repeated at startIndex={start}")
+            rows.extend(fresh)
             if len(rows) > MAX_ENDPOINTS:
                 raise TransportError(
                     "response_too_large",
                     f"pxGrid endpoint directory exceeds {MAX_ENDPOINTS} records")
             if len(page) < ENDPOINT_PAGE_SIZE:
                 break
+            pages += 1
+            if pages >= max_pages:
+                raise TransportError(
+                    "response_too_large",
+                    f"pxGrid getEndpoints did not finish within {max_pages} pages")
             start += len(page)
         with self._state_lock:
             self._endpoints = [dict(row) for row in rows]

@@ -124,6 +124,8 @@ class Publication:
         self.limits = limits
         self.samples = 0
         self._writers = []
+        self._aux_families = []
+        self._aux_writers = []
 
     def set(self, family, value, /, **label_values):
         """Record one gauge write. The provider label is bound automatically.
@@ -135,6 +137,24 @@ class Publication:
             raise SnapshotError(
                 f"{getattr(family, '_name', family)!r} is not declared in this "
                 "dataset's metrics; add it to Dataset.metrics")
+        self._writers.append(self._record(family, value, label_values))
+
+    def aux_set(self, family, value, /, **label_values):
+        """Record one write to a family this dataset shares with others.
+
+        Coverage and truncation gauges describe a dataset's snapshot but are
+        keyed on (dataset, breakdown) in a family every dataset writes to, so
+        they cannot be declared in ``Dataset.metrics``: commit clears every
+        declared family, which would erase every other dataset's children. They
+        ride the transaction as extras instead -- backed up and restored on a
+        failed commit, and left untouched by discard, so a rolled-back attempt
+        keeps the last coverage that was actually published.
+        """
+        self._aux_families.append(family)
+        self._aux_writers.append(self._record(family, value, label_values))
+
+    def _record(self, family, value, label_values):
+        """Validate one gauge write and return the deferred writer for it."""
         names = tuple(getattr(family, "_labelnames", ()))
         if "provider" in names and "provider" not in label_values:
             label_values = {**label_values, "provider": self.provider}
@@ -146,13 +166,14 @@ class Publication:
         numeric = float(value)
         if not math.isfinite(numeric):
             raise SnapshotError(f"{family._name} value is not finite")
-        self._writers.append(
-            lambda: (family.labels(**label_values).set(numeric) if names
-                     else family.set(numeric)))
+        return (lambda: (family.labels(**label_values).set(numeric) if names
+                         else family.set(numeric)))
 
     def commit(self, extra_families=(), extra_writers=()):
         """Replace this dataset's families and its health metadata as one unit."""
-        extra_families = tuple(dict.fromkeys(extra_families))
+        extra_families = tuple(dict.fromkeys((*extra_families,
+                                              *self._aux_families)))
+        extra_writers = (*extra_writers, *self._aux_writers)
         everything = tuple(dict.fromkeys((*self.families, *extra_families)))
         with snapshot_lock:
             saved = _backup(everything)

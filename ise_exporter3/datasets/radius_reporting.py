@@ -224,7 +224,7 @@ def _publish_outcomes(ctx, rows, gauges):
 
 
 def fetch(ctx):
-    hours = reporting.window_hours(ctx.dataset.default_interval, ctx.limits)
+    hours = reporting.scan_window(ctx)
     schema = getattr(ctx.transport, "schema", None)
     results = ctx.transport.query_many(statements(hours, ctx.limits, schema))
     ctx.set(window_seconds, hours * 3600)
@@ -288,6 +288,7 @@ DATASET = Dataset(
     name="radius_reporting",
     description="RADIUS authentication outcomes, methods, policies, latency",
     default_interval=1800,
+    windowed=True,
     metrics=_METRICS,
     providers=(
         Provider(

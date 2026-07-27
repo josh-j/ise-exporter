@@ -13,6 +13,7 @@ of provider is exported.
 """
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 
 from . import datasets as registry
@@ -225,6 +226,22 @@ def warmup_share(plan, entry):
     return available / peers
 
 
+def warmup_ceiling(plan, entry):
+    """The requests/hour ceiling a warm-up is derived from, 0 when none exists.
+
+    ``warmup_share`` returns 0.0 for two very different situations -- no ceiling
+    to derive anything from, and a ceiling the steady state has already spent.
+    This is what tells them apart, because the second one means the cache never
+    finishes filling and must not be reported as the unthrottled best case.
+    """
+    if not entry.resolved or not entry.provider.cost.converges:
+        return 0.0
+    if entry.provider.cost.warmup_requests <= 0:
+        return 0.0
+    budget = plan.config.budget_for(entry.target)
+    return float(budget.warmup_requests_per_hour or budget.requests_per_hour)
+
+
 def warmup_interval(plan, entry):
     """The cadence a still-filling cache is revisited at, from the budget.
 
@@ -264,6 +281,7 @@ class WarmupReport:
     available_per_hour: float     # what the target's budget leaves for it
     seconds: float                # time to full coverage
     throttled: bool               # True when the budget sets the pace, not the cadence
+    starved: bool = False         # the ceiling is fully spent; it never finishes
 
     @property
     def paced(self):
@@ -289,12 +307,22 @@ def warmup_report(plan, entry):
     per_cycle = cost.warmup_requests_for(scale)
     rate = per_cycle * 3600.0 / max(1, interval)
     share = warmup_share(plan, entry)
+    # A ceiling the steady state has already eaten is maximally throttled, not
+    # unthrottled: reporting the best case at exactly the budget the operator is
+    # most likely to declare is how a cache that never fills reads as ~2.5h.
+    starved = warmup_ceiling(plan, entry) > 0 and share <= 0
     # A percent of slack, so floating-point noise does not read as throttling.
-    throttled = bool(share) and rate > share * 1.01
-    seconds = per_cycle * cycles / share * 3600.0 if throttled else cycles * interval
+    throttled = starved or (share > 0 and rate > share * 1.01)
+    if starved:
+        seconds = math.inf
+    elif throttled:
+        seconds = per_cycle * cycles / share * 3600.0
+    else:
+        seconds = cycles * interval
     return WarmupReport(
         interval=interval, cycles=cycles, requests_per_hour=rate,
-        available_per_hour=share, seconds=seconds, throttled=throttled)
+        available_per_hour=share, seconds=seconds, throttled=throttled,
+        starved=starved)
 
 
 def _select(dataset, dataset_config, config):
@@ -358,8 +386,30 @@ def _apply_cost_pools(selections, scale):
 
     for (target, _pool), members in pools.items():
         interval = min(member.interval for member in members)
-        heaviest = max(members, key=lambda m: m.provider.cost.magnitude_for(scale))
-        owner, names = members[0], [member.dataset.name for member in members]
+        names = [member.dataset.name for member in members]
+        fillers = [member for member in members
+                   if not member.provider.cost.pool_reader]
+        if not fillers:
+            # Nothing enabled fills the cache these members read. They pay only
+            # their own fixed enumeration and none of them converges: reporting
+            # a warm-up and a time to full coverage here describes work no
+            # dataset will ever do.
+            for member in members:
+                name = member.dataset.name
+                cost = member.provider.cost
+                loads[name] = Load(
+                    target=target,
+                    requests_per_hour=(cost.fixed_requests_for(scale)
+                                       * 3600.0 / max(1, member.interval)),
+                    db_seconds_per_hour=(cost.db_seconds_for(scale)
+                                         * 3600.0 / max(1, member.interval)),
+                    streams=1 if cost.streaming else 0)
+                shared_with[name] = tuple(other for other in names
+                                          if other != name)
+                charged[name] = False
+            continue
+        heaviest = max(fillers, key=lambda m: m.provider.cost.magnitude_for(scale))
+        owner = fillers[0]
         cost = heaviest.provider.cost
         if cost.converges:
             # The cache owner performs fixed enumeration plus per-entity churn
@@ -431,6 +481,20 @@ def build_plan(config):
     return Plan(config=config, entries=tuple(entries), targets=targets)
 
 
+def uncoverable_windows(plan):
+    """Enabled window-scanned datasets whose cadence outruns the scan ceiling.
+
+    A reporting statement may not look further back than ``limits.window_hours``,
+    so a longer interval leaves events that no collection ever counts. Nothing at
+    runtime can close that gap, which is exactly why the plan has to name it:
+    otherwise the cadence column promises coverage the exporter does not deliver.
+    """
+    ceiling = plan.config.limits.window_hours * 3600
+    return tuple(entry for entry in plan.enabled
+                 if entry.resolved and getattr(entry.dataset, "windowed", False)
+                 and entry.interval > ceiling)
+
+
 def _dataset_rows(plan):
     rows = []
     for entry in plan.entries:
@@ -495,6 +559,38 @@ def _bound_rows(plan):
     return rows
 
 
+def _turnover_lines(entry, scale):
+    """Say why a converging dataset's steady cost ignores its cadence.
+
+    Turnover is a rate, so halving the cadence doubles what has turned over and
+    the hourly figure stays flat. An operator who lengthens an interval and sees
+    no saving would otherwise read the plan as broken rather than as honest.
+    """
+    cost = entry.provider.cost
+    if not cost.churn_fraction or not cost.churn_interval:
+        return []
+    fixed = cost.fixed_requests_for(scale)
+    turnover = (scale.units_of(cost.scales_with) * 1000.0
+                * cost.churn_for(entry.interval) * cost.requests_per_entity)
+    if turnover <= fixed:
+        # Its per-cycle enumeration costs more than what turned over, so cadence
+        # really is the lever here and saying otherwise would be the same kind of
+        # lie in the opposite direction. network_devices walks 5,000 NADs every
+        # cycle to refetch five.
+        return []
+    entity = (cost.scales_with or "entity").rstrip("s")
+    lifetime = cost.churn_interval / cost.churn_fraction
+    if entry.interval >= lifetime:
+        return [f"      at {format_duration(entry.interval)} a cycle outlives "
+                f"the average {entity} (~{_approx_duration(lifetime)}), so each "
+                f"one refetches the whole active set and a longer cadence is "
+                f"the only thing that lowers this"]
+    return [f"      steady cost is turnover, not cadence: one refetch per "
+            f"{entity} per ~{_approx_duration(lifetime)}, so this stays near "
+            f"{entry.load.requests_per_hour:,.0f} req/h at any interval up to "
+            f"that"]
+
+
 def _approx_duration(seconds):
     """A duration to read, not to compute with.
 
@@ -503,12 +599,17 @@ def _approx_duration(seconds):
     number nobody converts in their head while deciding whether to declare a
     warm-up burst.
     """
+    if not math.isfinite(seconds):
+        # A warm-up with no budget left has no finishing time to approximate.
+        return "not at this ceiling"
     seconds = max(0, int(seconds))
     if seconds < 120:
         return f"{seconds}s"
     if seconds < 7200:
         return f"{seconds / 60:.0f}m"
-    return f"{seconds / 3600:.1f}h"
+    if seconds < 172800:
+        return f"{seconds / 3600:.1f}h"
+    return f"{seconds / 86400:.0f}d"
 
 
 def _render_table(headers, rows):
@@ -593,17 +694,35 @@ def render_plan(plan):
                 # coverage is that peer's timeline and it needs no budget of its
                 # own. Repeating the peer's advice here would read as two
                 # datasets each wanting 24,000 req/h.
-                peers = ", ".join(entry.shared_with) or "its pool peer"
+                peers = ", ".join(entry.shared_with)
                 out.append(
                     f"  {entry.name} ({entry.provider.name}): no requests of "
-                    f"its own; converges with {peers}")
+                    f"its own; converges with {peers}" if peers else
+                    f"  {entry.name} ({entry.provider.name}): no requests of "
+                    f"its own, and no enabled dataset fills the cache it reads, "
+                    f"so it will not converge at all")
                 continue
             out.append(
                 f"  {entry.name} ({entry.provider.name}): "
                 f"{report.requests_per_hour:,.0f} req/h while warming, "
                 f"{entry.load.requests_per_hour:,.0f} req/h once warm; "
                 f"full coverage in ~{_approx_duration(report.seconds)}")
-            if report.throttled:
+            out += _turnover_lines(entry, config.scale)
+            if report.starved:
+                declared = config.budget_for(entry.target).warmup_requests_per_hour
+                advice = (
+                    f"Raise budget.{entry.target}.warmup_requests_per_hour"
+                    if declared else
+                    f"Declare budget.{entry.target}.warmup_requests_per_hour")
+                planned = next(
+                    (target.load.requests_per_hour for target in plan.targets
+                     if target.target == entry.target), 0.0)
+                out.append(
+                    f"      the {entry.target} budget leaves nothing for warming "
+                    f"once the steady {planned:,.0f} req/h is paid, so this cache "
+                    f"does not finish filling. {advice}, or raise "
+                    f"budget.{entry.target}.requests_per_hour")
+            elif report.throttled:
                 # The honest version of what used to be printed here. Left
                 # unsaid, this line reads as a plan to spend 24,000 req/h
                 # against a 4,000 ceiling, which is what the budget refuses.
@@ -649,6 +768,18 @@ def render_plan(plan):
         for entry in caveats:
             out.append(f"  {entry.name} ({entry.provider.name}): "
                        f"{entry.provider.notes}")
+
+    uncoverable = uncoverable_windows(plan)
+    if uncoverable:
+        window = config.limits.window_hours
+        out += ["", "Cadences no reporting window can cover:"]
+        for entry in uncoverable:
+            out.append(
+                f"  {entry.name}: collected every "
+                f"{format_duration(entry.interval)} but no reporting statement "
+                f"may scan more than {window}h back, so events older than the "
+                f"window are never counted. Shorten "
+                f"datasets.{entry.name}.interval to {window}h or less")
 
     # The ceilings, before the caveats, because a truncated breakdown is usually
     # a ceiling doing its job and the operator should be able to see which one.

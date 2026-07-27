@@ -103,9 +103,9 @@ def fetch_mnt(ctx):
         psns[label(session.get("server"), "unknown")] += 1
         nads[(nad, location)] += 1
         owners[owner] += 1
-        mac = str(session.get("calling_station_id") or "").strip().upper()
+        mac = normalize_mac(session.get("calling_station_id"))
         if mac:
-            endpoints.add(mac.replace("-", ":"))
+            endpoints.add(mac)
 
     nad_directory.record_attribution(matched, unmatched)
 
@@ -130,8 +130,12 @@ DATASET = Dataset(
         Provider(
             name="pxgrid",
             # Persistent STOMP/WSS subscription plus a periodic getSessions
-            # re-poll for the bulk baseline the change feed does not replay.
-            cost=Cost(target="pxgrid", requests=1, streaming=True),
+            # re-poll for the bulk baseline the change feed does not replay. The
+            # snapshot belongs to the transport, so posture_current's pxgrid
+            # provider drives the same re-poll: pooled, and charged once at the
+            # shorter of the two cadences.
+            cost=Cost(target="pxgrid", requests=1, streaming=True,
+                      shares="pxgrid_sessions"),
             supplies=frozenset({"session", "endpoint", "posture_status", "mdm"}),
             requires=("capability:pxgrid_session_topic",),
             fetch=fetch_pxgrid,

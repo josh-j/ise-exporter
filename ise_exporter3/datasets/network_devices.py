@@ -21,6 +21,7 @@ Group strings look like ``Location#All Locations#Germany#Ramstein AB``. The
 category and the ``All X`` root are dropped; location keeps its remaining path
 (sites nest), while ops owner and device type take the leaf.
 """
+import time
 from collections import defaultdict
 
 from prometheus_client import Gauge
@@ -37,6 +38,10 @@ CACHE_TTL_SECONDS = 7 * 86400
 # Per-cycle warm-up ceiling. 500 paced ERS requests keep a cold start off the
 # PAN for long stretches; 5,000 NADs converge in ten cycles.
 WARMUP_FETCHES_PER_CYCLE = 500
+# Share of one cadence a warm-up pass may hold the pan lane for. The count alone
+# stopped bounding lane time once the request budget became blocking, and every
+# other pan dataset -- deployment, node health -- queues behind this one.
+WARMUP_LANE_FRACTION = 0.5
 
 total = Gauge("ise3_network_devices_total", "Configured network devices", ["provider"])
 by_ops_owner = Gauge(
@@ -101,10 +106,20 @@ def _groups_of(record):
 
 
 def warm(ctx, cache, devices):
-    """Fetch group detail for uncached devices, up to this cycle's budget."""
+    """Fetch group detail for uncached devices, up to this cycle's budget.
+
+    Bounded in wall-clock as well as in count: a blocking request budget turns a
+    500-request pass into minutes on the serialized pan lane, and what this pass
+    does not reach is deferred to the next one.
+    """
     outstanding = [device["id"] for device in devices
                    if cache.get(device["id"]) is None]
+    deadline = time.monotonic() + max(1.0, ctx.interval * WARMUP_LANE_FRACTION)
+    fetched = 0
     for device_id in outstanding[:WARMUP_FETCHES_PER_CYCLE]:
+        if time.monotonic() >= deadline:
+            break
+        fetched += 1
         try:
             raw = ctx.transport.get_ers(
                 f"/config/networkdevice/{device_id}", api="ers_device_detail")
@@ -121,7 +136,7 @@ def warm(ctx, cache, devices):
         # constant row regardless of how many groups ISE returns.
         cache.put(device_id, classify(groups) + (tuple(device_addresses(record)),))
         cache.count("fetched")
-    return max(0, len(outstanding) - WARMUP_FETCHES_PER_CYCLE)
+    return max(0, len(outstanding) - fetched)
 
 
 def fetch(ctx):
@@ -209,7 +224,7 @@ DATASET = Dataset(
             # changes on a configuration edit, not on a cadence.
             cost=Cost(target="pan", scales_with="nads", requests_per_1k=10,
                       warmup_requests=WARMUP_FETCHES_PER_CYCLE,
-                      churn_fraction=0.001),
+                      churn_fraction=0.001, churn_interval=21600),
             supplies=frozenset({"nad", "location", "ops_owner", "device_type"}),
             coverage="converging",
             fetch=fetch,

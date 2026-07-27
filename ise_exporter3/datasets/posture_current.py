@@ -191,6 +191,17 @@ def fetch_mnt(ctx):
         if detail["operating_system"]:
             systems[label(detail["operating_system"])].add(mac)
 
+    if not covered:
+        # Publishing here would clear every posture family and republish nothing
+        # under dataset_up=1: a compliance panel would read "no non-compliant
+        # endpoints" from a dataset that is not collecting. nad_health refuses
+        # for the same reason, and the previous snapshot survives instead.
+        ctx.fail("dependency_pending",
+                 "no cached session detail for any of the %d active MACs; "
+                 "session_authorization fills the mnt_session_detail cache and "
+                 "has not populated it yet (or is disabled), so posture cannot "
+                 "be distinguished from an empty estate" % len(macs))
+
     for (status, owner), members in statuses.items():
         ctx.set(endpoints_by_status, len(members), status=status, ops_owner=owner)
     for (policy, result), members in policies.items():
@@ -220,14 +231,20 @@ DATASET = Dataset(
             # the whole active set rather than sampling it.
             cost=Cost(target="mnt", requests=1, scales_with="sessions",
                       warmup_requests=2000, churn_fraction=0.01,
-                      shares="mnt_session_detail"),
+                      churn_interval=300,
+                      shares="mnt_session_detail", pool_reader=True),
             supplies=frozenset({"status", "policy_result", "os", "agent_version", "psn"}),
             coverage="converging",
             fetch=fetch_mnt,
         ),
         Provider(
             name="pxgrid",
-            cost=Cost(target="pxgrid", requests=0, streaming=True),
+            # get_sessions re-baselines the whole session snapshot once it is
+            # older than this dataset's interval, which is the same unpaged
+            # getSessions active_sessions declares. One shared snapshot, so one
+            # pooled charge at whichever member's cadence is shorter.
+            cost=Cost(target="pxgrid", requests=1, streaming=True,
+                      shares="pxgrid_sessions"),
             supplies=frozenset({"status", "mdm"}),
             requires=("capability:pxgrid_session_topic",),
             fetch=fetch_pxgrid,

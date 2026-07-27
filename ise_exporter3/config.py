@@ -84,8 +84,8 @@ _DATASET_FIELDS = frozenset({"enabled", "providers", "interval", "options"})
 # cadences: those belong to the dataset that knows what its data is worth.
 #
 # "production" is the default on purpose. The deployment this exporter is built
-# for is ~100,000 endpoints and ~5,000 NADs, and an operator who installs it
-# without choosing a profile must get something that works at that size. A
+# for is ~90,000 endpoints, ~60,000 concurrent sessions and ~5,000 NADs, and an
+# operator who installs it without choosing a profile must get that size. A
 # profile that under-declares the fleet makes every cost estimate optimistic,
 # which is the one direction the load model must not fail in.
 DEFAULT_PROFILE = "production"
@@ -102,14 +102,16 @@ PROFILES = MappingProxyType({
         },
     },
     "production": {
-        "scale": {"nads": 5_000, "endpoints": 100_000, "sessions": 20_000,
+        "scale": {"nads": 5_000, "endpoints": 90_000, "sessions": 60_000,
                   "accounts": 1_000, "policy_sets": 100},
         "budget": {
             "pan": {"requests_per_hour": 3_000},
-            # Sized for full per-endpoint coverage, not a sample: at 20k sessions
-            # and a five-minute cadence, keeping the detail cache converged costs
-            # roughly 2,400 requests an hour once warm.
-            "mnt": {"requests_per_hour": 4_000},
+            # Sized for full per-endpoint coverage, not a sample: session detail
+            # is one fetch per MAC cached for the session's life, so the steady
+            # cost is churn. At 60k sessions, 1% turnover per five-minute cycle
+            # is 600 fetches a cycle -- 7,200 an hour, plus the ActiveList reads.
+            # The ceiling keeps the same headroom over that as it always has.
+            "mnt": {"requests_per_hour": 12_000},
             "pxgrid": {"requests_per_hour": 200},
             # Full v2 workflow parity includes accounting, diagnostic, posture,
             # profiling, and correlated failure scans. Their declared steady

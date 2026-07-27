@@ -134,6 +134,7 @@ DATASET = Dataset(
                     WARMUP_POLICY_SETS_PER_CYCLE * REQUESTS_PER_POLICY_SET
                 ),
                 churn_fraction=0.001,
+                churn_interval=21600,
                 requests_per_entity=REQUESTS_PER_POLICY_SET,
             ),
             supplies=frozenset({"policy_set", "rule_count", "rule_type"}),

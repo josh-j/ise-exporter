@@ -14,13 +14,13 @@ from dataclasses import dataclass
 
 from . import telemetry
 from .labels import bounded_detail
-from .snapshots import Publication
+from .snapshots import Publication, snapshot_lock
 from .transports import FAILURE_EXPLANATIONS, TransportError
 
 
 logger = logging.getLogger(__name__)
 
-_HEALTH_FAMILIES = (
+HEALTH_FAMILIES = (
     telemetry.dataset_up,
     telemetry.dataset_fresh,
     telemetry.dataset_last_success_timestamp,
@@ -29,6 +29,58 @@ _HEALTH_FAMILIES = (
     telemetry.dataset_consecutive_failures,
     telemetry.dataset_collection_duration_seconds,
 )
+_HEALTH_FAMILIES = HEALTH_FAMILIES
+
+
+def _forget_children(family, dataset, provider):
+    """Drop one (dataset, provider) pair's children from a metric family."""
+    names = tuple(getattr(family, "_labelnames", ()))
+    if "dataset" not in names or "provider" not in names:
+        return
+    left, right = names.index("dataset"), names.index("provider")
+    for labels in [key for key in getattr(family, "_metrics", {})
+                   if key[left] == dataset and key[right] == provider]:
+        family._metrics.pop(labels, None)
+
+
+def _forget_failure(previous):
+    """Drop a recorded failure's children, if they are still present.
+
+    A provider step removes the departing source's health children, so the
+    record kept here can outlive them. Letting that raise would roll back the
+    very snapshot that notices the source is working again.
+    """
+    try:
+        telemetry.dataset_last_failure_info.remove(
+            previous["dataset"], previous["provider"], previous["reason"])
+    except KeyError:
+        pass
+    try:
+        telemetry.dataset_last_failure_detail_info.remove(
+            previous["dataset"], previous["provider"], previous["reason"],
+            previous["detail"])
+    except KeyError:
+        pass
+
+
+def forget_provider_health(dataset, provider, extra_families=()):
+    """Retire one (dataset, provider) pair's health series.
+
+    Called when a dataset changes source. ``up`` and ``fresh`` are zeroed rather
+    than removed, so an alert reads an explicit "this source is no longer
+    supplying" instead of a series that silently vanishes; everything else is
+    removed, because a timestamp or a duration from a source that is no longer
+    running is a fact with no owner. ``dataset_failures_total`` is deliberately
+    left alone: it is a Counter, and the failure history is exactly the forensic
+    record wanted after a step.
+    """
+    with snapshot_lock:
+        telemetry.dataset_up.labels(dataset=dataset, provider=provider).set(0)
+        telemetry.dataset_fresh.labels(dataset=dataset, provider=provider).set(0)
+        for family in (telemetry.dataset_last_success_timestamp,
+                       telemetry.dataset_collection_duration_seconds,
+                       *extra_families):
+            _forget_children(family, dataset, provider)
 
 
 def classify(error):
@@ -112,6 +164,16 @@ class FetchContext:
         with it at runtime for every row.
         """
         self._publication.set(family, value, **label_values)
+
+    def set_shared(self, family, value, /, **label_values):
+        """Record one write to a family shared across datasets.
+
+        For the coverage and truncation gauges: they describe this snapshot, so
+        they must not survive a discard describing rows that were rolled back,
+        but they live in a family every dataset writes to and so cannot be
+        declared in ``Dataset.metrics``. See Publication.aux_set.
+        """
+        self._publication.aux_set(family, value, **label_values)
 
     def fail(self, reason, detail=""):
         raise TransportError(reason, detail)
@@ -201,10 +263,7 @@ class Runner:
             telemetry.dataset_collection_duration_seconds.labels(
                 dataset=name, provider=provider_name).set(duration)
             if previous:
-                telemetry.dataset_last_failure_info.remove(
-                    name, provider_name, previous["reason"])
-                telemetry.dataset_last_failure_detail_info.remove(
-                    name, provider_name, previous["reason"], previous["detail"])
+                _forget_failure(previous)
 
         publication.commit(_HEALTH_FAMILIES, (writers,))
         # Published after the commit, because the count is a property of the
@@ -226,11 +285,10 @@ class Runner:
             telemetry.dataset_consecutive_failures.labels(dataset=name).set(count)
             telemetry.dataset_collection_duration_seconds.labels(
                 dataset=name, provider=provider_name).set(duration)
-            if previous and (previous["reason"], previous["detail"]) != (reason, bounded):
-                telemetry.dataset_last_failure_info.remove(
-                    name, provider_name, previous["reason"])
-                telemetry.dataset_last_failure_detail_info.remove(
-                    name, provider_name, previous["reason"], previous["detail"])
+            if previous and (
+                    previous["provider"], previous["reason"], previous["detail"]
+            ) != (provider_name, reason, bounded):
+                _forget_failure(previous)
             telemetry.dataset_last_failure_info.labels(
                 dataset=name, provider=provider_name, reason=reason).set(1)
             telemetry.dataset_last_failure_detail_info.labels(
@@ -240,7 +298,11 @@ class Runner:
         # The previous snapshot survives: a reporting failure must never be
         # published as a valid empty result.
         publication.discard(_HEALTH_FAMILIES, (writers,))
-        self.failures[name] = {"reason": reason, "detail": bounded, "count": count}
+        # The provider is part of the record: a recovery probe fails under the
+        # preferred source's label while the active source keeps collecting, and
+        # clearing that child under the wrong label raises inside the commit.
+        self.failures[name] = {"dataset": name, "provider": provider_name,
+                               "reason": reason, "detail": bounded, "count": count}
 
     def consecutive_failures(self, name):
         entry = self.failures.get(name)

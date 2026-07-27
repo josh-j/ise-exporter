@@ -57,8 +57,10 @@ logger = logging.getLogger(__name__)
 # fetch loop gets to re-check the deadline and the ceilings above.
 FETCH_BATCH_ROWS = 100
 
-# A statement may spend one timeout connecting and one executing, then repeat
-# both after the single permitted reconnect. A crash lease must reserve all four.
+# A statement may spend one timeout on the whole logon and one on the statement
+# itself (the session precondition is issued under the statement's own deadline),
+# then repeat both after the single permitted reconnect. A crash lease must
+# reserve all four.
 MAX_STATEMENT_TIMEOUT_PERIODS = 4
 # Hard safety floor between statements. Not configurable: this is a floor, not a
 # preference, and the duty cycle is the knob that actually shapes load.
@@ -158,7 +160,11 @@ _AUTH_FAILURE = (
     "INVALID CREDENTIAL", "INVALID USERNAME/PASSWORD",
 )
 _AUTHORIZATION_FAILURE = ("ORA-00942", "ORA-01031")
-_CONNECTION_FAILURE = ("ORA-12170", "ORA-12514", "ORA-12541", "DPY-6005")
+_CONNECTION_FAILURE = ("ORA-12170", "ORA-12514", "ORA-12541")
+# Thin-mode python-oracledb wraps every connect-path failure in DPY-6005 with
+# the real cause appended, TLS handshake failures included, so it only means
+# "host unreachable" once the certificate indicators have been ruled out.
+_WRAPPED_CONNECT_FAILURE = ("DPY-6005",)
 
 
 def publish_schema_contract(schema):
@@ -201,10 +207,12 @@ def classify_oracle_error(error):
         return "authorization_failed"
     if any(code in message for code in _CONNECTION_FAILURE):
         return "connection_failed"
-    if isinstance(error, TimeoutError) or "TIMEOUT" in message or "DPY-4011" in message:
-        return "timeout"
     if "CERTIFICATE" in message or "SSL" in message or "TLS" in message:
         return "tls_failed"
+    if any(code in message for code in _WRAPPED_CONNECT_FAILURE):
+        return "connection_failed"
+    if isinstance(error, TimeoutError) or "TIMEOUT" in message or "DPY-4011" in message:
+        return "timeout"
     return "invalid_response"
 
 
@@ -313,9 +321,16 @@ class DataConnectTransport(Transport):
             "Data Connect authentication")
 
         self._connection = None
+        self._session_prepared = False
         self._connect_failures = 0
         self._blocked_until = 0.0
         self._next_query_at = 0.0
+        # A deadline another process published that this query did not wait out
+        # (the catalog path). Releasing the gate must never publish less.
+        self._gate_floor = 0.0
+        self._catalog_failures = 0
+        self._schema_error = None
+        self._schema_retry_at = 0.0
         self._shutdown = None
         self._lock = threading.RLock()
         self._batch_active = False
@@ -336,6 +351,7 @@ class DataConnectTransport(Transport):
 
     def close(self):
         connection, self._connection = self._connection, None
+        self._session_prepared = False
         if connection is not None:
             try:
                 connection.close()
@@ -378,17 +394,8 @@ class DataConnectTransport(Transport):
 
         connection = None
         try:
-            connection = oracledb.connect(
-                user=self.user, password=self.password, host=self.host,
-                port=self.port, service_name=self.service, protocol="tcps",
-                ssl_context=self._ssl_context(), ssl_server_dn_match=self.verify,
-                tcp_connect_timeout=self.timeout)
+            connection = self._logon()
             connection.call_timeout = self.timeout * 1000
-            # A bounded aggregate can still consume disproportionate cluster
-            # resources if Oracle parallelises the view scan behind it. This is
-            # monitoring, never a batch workload.
-            with connection.cursor() as cursor:
-                cursor.execute("ALTER SESSION DISABLE PARALLEL QUERY", {})
         except Exception as error:
             if connection is not None:
                 try:
@@ -413,9 +420,58 @@ class DataConnectTransport(Transport):
                 "the Data Connect authentication guard could not record success"
             ) from error
         self._connection = connection
+        self._session_prepared = False
         self._connect_failures = 0
         self._blocked_until = 0.0
         return connection
+
+    def _logon(self):
+        """Bound the whole logon, not just the transport establishment.
+
+        ``tcp_connect_timeout`` only covers getting the socket up; the Oracle
+        negotiation and logon round trips after it have no deadline of their own,
+        and this runs on the serialised lane while the pacing gate flock is held.
+        """
+        outcome = {}
+        abandoned = []
+        settled = threading.Event()
+        guard = threading.Lock()
+
+        def attempt():
+            try:
+                connection = oracledb.connect(
+                    user=self.user, password=self.password, host=self.host,
+                    port=self.port, service_name=self.service, protocol="tcps",
+                    ssl_context=self._ssl_context(),
+                    ssl_server_dn_match=self.verify,
+                    tcp_connect_timeout=self.timeout)
+            except BaseException as error:      # noqa: BLE001 - reported below
+                outcome["error"] = error
+                settled.set()
+                return
+            with guard:
+                if abandoned:
+                    # Nobody is waiting any more. A session left open here would
+                    # accumulate on the appliance on every stalled attempt.
+                    try:
+                        connection.close()
+                    except Exception:       # noqa: BLE001
+                        pass
+                    return
+                outcome["connection"] = connection
+            settled.set()
+
+        # Daemon, not a pooled worker: a wedged logon must never join at exit.
+        threading.Thread(target=attempt, name="oracle-logon", daemon=True).start()
+        if not settled.wait(self.timeout):
+            with guard:
+                if not outcome:
+                    abandoned.append(True)
+                    raise TimeoutError(
+                        f"the Data Connect logon exceeded {self.timeout}s")
+        if "error" in outcome:
+            raise outcome["error"]
+        return outcome["connection"]
 
     # --- cross-process pacing gate ---------------------------------------
 
@@ -461,8 +517,12 @@ class DataConnectTransport(Transport):
                     "reason=shared_duty_cycle_cooldown", view, remaining)
                 self._wait(remaining)
 
-            self._write_lease(descriptor, self._crash_lease(adaptive), deadline
-                              if not adaptive else 0.0)
+            # A non-adaptive query does not wait the shared cooldown out, so the
+            # deadline it skipped has to survive both the lease it writes now and
+            # the one written when it releases the gate.
+            self._gate_floor = deadline if not adaptive else 0.0
+            self._write_lease(descriptor, self._crash_lease(adaptive),
+                              self._gate_floor)
             return descriptor
         except TransportError:
             if descriptor is not None:
@@ -494,11 +554,11 @@ class DataConnectTransport(Transport):
         os.fsync(descriptor)
 
     @classmethod
-    def _release_gate(cls, descriptor, cooldown):
+    def _release_gate(cls, descriptor, cooldown, floor=0.0):
         if descriptor is None:
             return
         try:
-            cls._write_lease(descriptor, cooldown)
+            cls._write_lease(descriptor, cooldown, floor)
         finally:
             fcntl.flock(descriptor, fcntl.LOCK_UN)
             os.close(descriptor)
@@ -543,7 +603,8 @@ class DataConnectTransport(Transport):
                 cooldown = self._cooldown(duration, adaptive)
                 self._next_query_at = time.monotonic() + cooldown
                 telemetry.dataconnect_query_cooldown_seconds.labels(view=view).set(cooldown)
-                self._release_gate(gate, cooldown)
+                floor, self._gate_floor = self._gate_floor, 0.0
+                self._release_gate(gate, cooldown, floor)
 
     def _cooldown(self, duration, adaptive=True):
         """The adaptive cooldown is what actually enforces the duty cycle."""
@@ -556,6 +617,7 @@ class DataConnectTransport(Transport):
                 connection = self.connect()
                 deadline = time.perf_counter() + self.timeout
                 with connection.cursor() as cursor:
+                    self._prepare_session(connection, cursor, deadline)
                     self._apply_timeout(connection, deadline)
                     cursor.execute(sql, parameters or {})
                     columns = [column.name.lower() for column in cursor.description]
@@ -610,6 +672,21 @@ class DataConnectTransport(Transport):
             raise TransportError(
                 "response_too_large",
                 f"result exceeded the {limits.result_bytes}-byte ceiling")
+
+    def _prepare_session(self, connection, cursor, deadline):
+        """Issue the session precondition once per connection.
+
+        A bounded aggregate can still consume disproportionate cluster resources
+        if Oracle parallelises the view scan behind it. This is monitoring, never
+        a batch workload. It runs on the statement's own deadline rather than in
+        ``connect``, so one attempt costs one connect period and one statement
+        period -- which is what ``MAX_STATEMENT_TIMEOUT_PERIODS`` reserves.
+        """
+        if self._session_prepared:
+            return
+        self._apply_timeout(connection, deadline)
+        cursor.execute("ALTER SESSION DISABLE PARALLEL QUERY", {})
+        self._session_prepared = True
 
     @staticmethod
     def _apply_timeout(connection, deadline):
@@ -715,8 +792,21 @@ class DataConnectTransport(Transport):
         return getattr(self, "_schema", None)
 
     def prepare(self):
-        if self.schema is None:
+        if self.schema is not None:
+            return
+        if self._schema_error is not None and time.monotonic() < self._schema_retry_at:
+            # Every dataset attempt calls prepare, so a dictionary scan that
+            # keeps failing would otherwise be re-issued back to back. Refuse
+            # from cache -- without touching Oracle -- until the cooldown the
+            # failed read earned has elapsed.
+            raise TransportError("schema_pending", self._schema_error.detail)
+        try:
             self.discover_schema()
+        except TransportError as error:
+            self._schema_error = error
+            self._schema_retry_at = self._next_query_at
+            raise
+        self._schema_error = None
 
     def satisfies(self, requirements):
         """Settle a provider's deferred view requirements against the catalog."""
@@ -754,6 +844,16 @@ class DataConnectTransport(Transport):
         with self._lock:
             self._catalog_active = True
             try:
-                return self._query(sql, parameters, adaptive=False)
+                # The exemption is for one cheap successful compatibility check.
+                # A dictionary scan that already failed once is charged the full
+                # duty amplification like any other statement, so a discovery
+                # that never succeeds cannot run unpaced forever.
+                rows = self._query(
+                    sql, parameters, adaptive=self._catalog_failures > 0)
+            except Exception:
+                self._catalog_failures += 1
+                raise
             finally:
                 self._catalog_active = False
+            self._catalog_failures = 0
+            return rows

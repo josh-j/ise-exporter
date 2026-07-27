@@ -880,6 +880,11 @@ class FakeCursor:
         return False
 
     def execute(self, sql, parameters=None):
+        if str(sql).upper().startswith("ALTER SESSION"):
+            self.description = None
+            self._rows = []
+            self._position = 0
+            return
         columns, rows, duration = self._connection.oracle.plan(sql, parameters)
         self.description = [Column(name) for name in columns]
         self._rows = rows

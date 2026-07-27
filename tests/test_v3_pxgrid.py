@@ -236,6 +236,140 @@ def test_endpoint_paging_is_bounded_and_shared_cache_avoids_a_second_read(monkey
     assert calls == [0, 2]
 
 
+def test_endpoint_paging_stops_when_the_server_ignores_start_index(monkeypatch):
+    import ise_exporter3.transports.pxgrid as pxgrid_transport
+
+    monkeypatch.setattr(pxgrid_transport, "ENDPOINT_PAGE_SIZE", 2)
+    transport = _state_transport()
+    calls = []
+
+    def query(self, _service, _endpoint, body, **_kwargs):
+        calls.append(body["startIndex"])
+        return {"endpoints": [{"id": "1"}, {"id": "2"}]}
+
+    transport._query = MethodType(query, transport)
+    try:
+        transport.get_endpoints(max_age=3600)
+        raise AssertionError("a repeated page must not be paged forever")
+    except TransportError as error:
+        assert error.reason == "invalid_response"
+
+    assert calls == [0, 2]
+
+
+class _PostTransport(PxGridTransport):
+    def __init__(self, response=None, error=None):
+        self.config = _config()
+        self.settings = self.config.target("pxgrid")
+        self.timeout = self.settings.request_timeout
+        self._request_lock = threading.RLock()
+        self._closed = threading.Event()
+        self._shutdown = None
+        self._guard = _AlwaysOpenGuard()
+        self.limiter = _NullLimiter()
+        self.session = _FakeSession(response, error)
+
+
+class _AlwaysOpenGuard:
+    def blocked(self, _now):
+        return False
+
+    def success(self):
+        pass
+
+
+class _NullLimiter:
+    def acquire(self, _api):
+        pass
+
+
+class _FakeSession:
+    def __init__(self, response, error):
+        self._response = response
+        self._error = error
+
+    def post(self, *_args, **_kwargs):
+        if self._error is not None:
+            raise self._error
+        return self._response
+
+
+class _FakeResponse:
+    def __init__(self, status, *, chunks=(), raises=None):
+        self.status_code = status
+        self.headers = {}
+        self._chunks = chunks
+        self._raises = raises
+        self.closed = False
+
+    def iter_content(self, chunk_size=None):
+        for chunk in self._chunks:
+            yield chunk
+        if self._raises is not None:
+            raise self._raises
+
+    def close(self):
+        self.closed = True
+
+
+def _error_count(api, kind):
+    value = REGISTRY.get_sample_value(
+        "ise3_api_errors_total",
+        {"target": "pxgrid", "api": api, "error_type": kind, "http_code": "0"})
+    return value or 0.0
+
+
+def test_a_broken_error_body_still_classifies_the_http_failure():
+    response = _FakeResponse(502, raises=RuntimeError("stream reset"))
+    transport = _PostTransport(response)
+
+    try:
+        transport._post(
+            "https://ise01.ise.lab/rest/getEndpoints", {},
+            api="pxgrid_get_endpoints")
+        raise AssertionError("HTTP 502 must raise")
+    except TransportError as error:
+        assert error.reason == "http_error"
+
+    assert response.closed
+    assert REGISTRY.get_sample_value(
+        "ise3_api_requests_total",
+        {"target": "pxgrid", "api": "pxgrid_get_endpoints", "status": "http_502"})
+
+
+def test_a_body_that_dies_in_transit_is_a_connection_failure():
+    import requests
+
+    before = _error_count("pxgrid_get_sessions", "connection_error")
+    transport = _PostTransport(_FakeResponse(
+        200, raises=requests.exceptions.ChunkedEncodingError("truncated")))
+
+    try:
+        transport._post(
+            "https://ise01.ise.lab/rest/getSessions", {},
+            api="pxgrid_get_sessions")
+        raise AssertionError("a truncated body must raise")
+    except TransportError as error:
+        assert error.reason == "connection_failed"
+
+    assert _error_count("pxgrid_get_sessions", "connection_error") == before + 1
+
+
+def test_an_unclassified_request_failure_becomes_unexpected_error():
+    before = _error_count("pxgrid_serviceloookup", "unknown")
+    transport = _PostTransport(error=RuntimeError("adapter exploded"))
+
+    try:
+        transport._post(
+            "https://ise01.ise.lab/rest/getSessions", {},
+            api="pxgrid_serviceloookup")
+        raise AssertionError("an unclassified failure must raise")
+    except TransportError as error:
+        assert error.reason == "unexpected_error"
+
+    assert _error_count("pxgrid_serviceloookup", "unknown") == before + 1
+
+
 class _DatasetTransport(Transport):
     target = "pxgrid"
 
@@ -297,3 +431,89 @@ def test_sequence_gap_forces_a_reconciled_resnapshot():
     # A sequence reset means the same thing: the non-replayable interval is
     # uncertain and must be replaced from getSessions.
     assert transport._sequence_gap({"sequence": 0})
+
+
+def test_a_reconnect_re_anchors_the_session_sequence():
+    transport = _state_transport()
+    assert not transport._sequence_gap({"sequence": 10})
+    transport._sequence.clear()
+    assert not transport._sequence_gap({"sequence": 4001})
+    assert transport._sequence_gap({"sequence": 4003})
+
+
+def test_a_non_container_frame_is_not_a_sequence_gap():
+    transport = _state_transport()
+    for payload in (None, 0, True, "sequence"):
+        assert not transport._sequence_gap(payload)
+
+
+def test_rest_failover_reissues_a_rotated_access_secret():
+    transport = object.__new__(PxGridTransport)
+    transport.settings = _config().target("pxgrid")
+    transport._services = {}
+    transport._rest_services = {}
+    transport._peer_secrets = {}
+    transport._activated = True
+    secrets = []
+
+    def control(self, operation, body=None):
+        if operation == "ServiceLookup":
+            return {"services": [{
+                "nodeName": "peer-1",
+                "properties": {"restBaseUrl": "https://ise01.ise.lab/rest"},
+            }]}
+        secrets.append(body["peerNodeName"])
+        return {"secret": f"secret-{len(secrets)}"}
+
+    def post(self, _url, _body, **_kwargs):
+        raise TransportError("authentication_failed")
+
+    transport._control = MethodType(control, transport)
+    transport._post = MethodType(post, transport)
+
+    try:
+        transport._query(
+            SESSION_SERVICE, "getSessions", {}, api="pxgrid_get_sessions")
+    except TransportError as error:
+        assert error.reason == "authentication_failed"
+
+    assert secrets == ["peer-1", "peer-1"]
+
+
+def _demand_transport():
+    """Enough of a transport to exercise prepare/satisfies without a network."""
+    transport = object.__new__(PxGridTransport)
+    transport._prepare_lock = threading.Lock()
+    transport._stream_lock = threading.Lock()
+    transport._supervisor = None
+    transport._awaiting_stream = False
+    transport._discovered = True
+    transport._services = {}
+    transport._rest_services = {}
+    transport._capabilities = {"capability:pxgrid_session_topic",
+                               "capability:pxgrid_endpoints"}
+    transport._connected = threading.Event()
+    transport._connected.set()
+    transport.timeout = 1
+    transport._stopping = MethodType(lambda self: False, transport)
+    transport._validate_files = MethodType(lambda self: None, transport)
+    transport._activate = MethodType(lambda self: None, transport)
+    transport._start_supervisor = MethodType(
+        lambda self: setattr(self, "_supervisor", "started"), transport)
+    return transport
+
+
+def test_the_session_stream_is_started_by_demand_not_by_advertisement():
+    # An endpoint-only deployment plans streams=0 for pxgrid. Subscribing anyway
+    # holds the whole session map, re-baselines getSessions on every reconnect
+    # against the token bucket the operator sized from that plan, and publishes
+    # a second session count next to the one MnT supplies.
+    transport = _demand_transport()
+    transport.prepare()
+    assert transport._supervisor is None
+
+    assert transport.satisfies(("capability:pxgrid_endpoints",))[0]
+    assert transport._supervisor is None
+
+    assert transport.satisfies(("capability:pxgrid_session_topic",))[0]
+    assert transport._supervisor == "started"
