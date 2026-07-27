@@ -205,7 +205,7 @@ class Cost:
         """True when this provider caches and its coverage reaches the fleet."""
         return bool(self.warmup_requests or self.churn_fraction)
 
-    def _fixed_requests_for(self, scale: Scale) -> float:
+    def fixed_requests_for(self, scale: Scale) -> float:
         """What one collection costs before any per-entity work.
 
         A converging provider still pays this every cycle, warm or cold:
@@ -228,10 +228,10 @@ class Cost:
         if self.converges:
             units = scale.units_of(self.scales_with) * 1000.0
             return (
-                self._fixed_requests_for(scale)
+                self.fixed_requests_for(scale)
                 + units * self.churn_fraction * self.requests_per_entity
             )
-        return self._fixed_requests_for(scale)
+        return self.fixed_requests_for(scale)
 
     def warmup_requests_for(self, scale: Scale) -> float:
         """Per-collection requests while the cache is still filling.
@@ -250,7 +250,7 @@ class Cost:
             * self.requests_per_entity
         )
         return (
-            self._fixed_requests_for(scale)
+            self.fixed_requests_for(scale)
             + min(self.warmup_requests, requests)
         )
 

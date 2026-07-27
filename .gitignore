@@ -9,4 +9,5 @@ dist/
 test-results/
 docs/
 tests/*
+!tests/test_v3_plan.py
 !tests/test_v3_pxgrid.py

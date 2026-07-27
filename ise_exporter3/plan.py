@@ -330,10 +330,17 @@ def _apply_cost_pools(selections, scale):
 
     Two datasets fed by one fan-out (MnT active sessions and MnT current posture
     both come out of the same per-MAC detail walk) would otherwise each declare
-    the full request budget and double the reported MnT load. The pool runs at
-    the shortest cadence any member asks for and is sized by the member that
-    needs the most from it; the first member carries the charge and the rest
-    report zero with a pointer to their peer.
+    the full request budget and double the reported MnT load. A non-converging
+    pool, such as pxGrid getEndpoints, runs the whole shared operation at the
+    shortest cadence any member asks for.
+
+    A converging pool is different. Its first member owns the per-entity cache
+    fill and churn; a read-only peer may run more frequently, but between owner
+    runs it pays only the fixed enumeration request. Charging the detail churn
+    at the peer's shorter cadence made lengthening ``session_authorization``
+    appear to save nothing even though runtime really does fetch new details
+    less often. The first member still carries the combined pool charge and the
+    rest report zero with a pointer to their peer.
     """
     loads, shared_with, charged = {}, {}, {}
     pools = {}
@@ -353,7 +360,23 @@ def _apply_cost_pools(selections, scale):
         interval = min(member.interval for member in members)
         heaviest = max(members, key=lambda m: m.provider.cost.magnitude_for(scale))
         owner, names = members[0], [member.dataset.name for member in members]
-        loads[owner.dataset.name] = heaviest.provider.cost.load(interval, scale)
+        cost = heaviest.provider.cost
+        if cost.converges:
+            # The cache owner performs fixed enumeration plus per-entity churn
+            # at its own configured cadence. Faster read-only peers can require
+            # extra enumerations, but cannot cause detail fetches themselves.
+            owner_load = cost.load(owner.interval, scale)
+            owner_cycles = 3600.0 / max(1, owner.interval)
+            pool_cycles = 3600.0 / max(1, interval)
+            extra_cycles = max(0.0, pool_cycles - owner_cycles)
+            loads[owner.dataset.name] = owner_load + Load(
+                target=target,
+                requests_per_hour=(
+                    cost.fixed_requests_for(scale) * extra_cycles),
+                db_seconds_per_hour=cost.db_seconds_for(scale) * extra_cycles,
+            )
+        else:
+            loads[owner.dataset.name] = cost.load(interval, scale)
         for member in members:
             name = member.dataset.name
             shared_with[name] = tuple(other for other in names if other != name)
