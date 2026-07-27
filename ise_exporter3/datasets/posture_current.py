@@ -20,7 +20,7 @@ from prometheus_client import Gauge
 from .. import detail_cache, nad_directory
 from ..labels import label
 from ..model import Cost, Dataset, Provider
-from .session_authorization import CACHE, active_list, active_macs
+from .session_authorization import CACHE, active_list, active_macs, normalize_mac
 
 
 endpoints_by_status = Gauge(
@@ -39,8 +39,20 @@ by_agent_version = Gauge(
 by_os = Gauge(
     "ise3_posture_endpoints_by_os", "Distinct endpoints per operating system",
     ["provider", "os"])
+by_psn = Gauge(
+    "ise3_posture_endpoints_by_psn",
+    "Distinct active endpoints by serving PSN and posture status",
+    ["provider", "psn", "status"])
+field_coverage = Gauge(
+    "ise3_session_detail_field_coverage",
+    "Fraction of cached active-session details carrying each Secure Client "
+    "and authentication field",
+    ["provider", "field"])
 
-_METRICS = (endpoints_by_status, policy_results, by_agent_version, by_os)
+_METRICS = (
+    endpoints_by_status, policy_results, by_agent_version, by_os, by_psn,
+    field_coverage,
+)
 
 # ISE spells the same posture verdict several ways across fields and releases.
 _CANONICAL_STATUS = {
@@ -93,13 +105,22 @@ def fetch_mnt(ctx):
     cache = detail_cache.shared(CACHE)
     # Shared with session_authorization: one active-list read per tick, not two.
     listing = active_list(ctx)
-    macs = active_macs(listing.get("sessions") or [])
+    sessions = listing.get("sessions") or []
+    macs = active_macs(sessions)
     if not macs:
         return
 
+    serving_psns = defaultdict(set)
+    for session in sessions:
+        mac = normalize_mac(session.get("calling_station_id"))
+        if mac:
+            serving_psns[mac].add(label(session.get("server"), "unknown"))
+
     directory = nad_directory.shared()
     statuses, policies = defaultdict(set), defaultdict(set)
-    agents, systems = defaultdict(set), defaultdict(set)
+    agents, systems, psns = defaultdict(set), defaultdict(set), defaultdict(set)
+    fields = defaultdict(int)
+    covered = 0
 
     # Read-only over the cache session_authorization fills. This dataset issues
     # no detail requests of its own, which is why the two share a cost pool.
@@ -107,8 +128,21 @@ def fetch_mnt(ctx):
         detail = cache.get(mac)
         if not detail:
             continue
+        covered += 1
+        for field in (
+            "posture_status",
+            "posture_report",
+            "agent_version",
+            "operating_system",
+            "step_latency",
+            "total_authentication_latency",
+        ):
+            fields[field] += int(bool(detail[field]))
         owner = label(directory.ops_owner(detail["nas_ip"], detail["nad"]))
-        statuses[(canonical_status(detail["posture_status"]), owner)].add(mac)
+        status = canonical_status(detail["posture_status"])
+        statuses[(status, owner)].add(mac)
+        for psn in serving_psns.get(mac, ("unknown",)):
+            psns[(psn, status)].add(mac)
 
         for policy, result in parse_posture_report(detail["posture_report"]):
             policies[(label(policy), label(result))].add(mac)
@@ -126,6 +160,11 @@ def fetch_mnt(ctx):
         ctx.set(by_agent_version, len(members), agent_version=agent)
     for system, members in systems.items():
         ctx.set(by_os, len(members), os=system)
+    for (psn, status), members in psns.items():
+        ctx.set(by_psn, len(members), psn=psn, status=status)
+    if covered:
+        for field, populated in fields.items():
+            ctx.set(field_coverage, populated / covered, field=field)
 
 
 DATASET = Dataset(

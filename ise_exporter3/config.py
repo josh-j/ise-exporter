@@ -5,7 +5,7 @@ config hard ranges, client-side clamps and collector helpers, so no one could
 read a config and say what it would do. Here a config answers five questions:
 
     profile   how big is this deployment, and what is it allowed to spend
-    scale     how many NADs / endpoints / sessions (makes the plan predictive)
+    scale     how many NADs / endpoints / sessions / Device Admin entities
     targets   which ISE personas can be reached, and as whom
     budget    the ceiling per target
     limits    the ceilings on what one statement, batch and snapshot may return
@@ -92,7 +92,7 @@ DEFAULT_PROFILE = "production"
 PROFILES = MappingProxyType({
     "lab": {
         "scale": {"nads": 200, "endpoints": 5_000, "sessions": 1_000,
-                  "accounts": 50},
+                  "accounts": 50, "policy_sets": 20},
         "budget": {
             "pan": {"requests_per_hour": 600},
             "mnt": {"requests_per_hour": 600},
@@ -102,7 +102,7 @@ PROFILES = MappingProxyType({
     },
     "production": {
         "scale": {"nads": 5_000, "endpoints": 100_000, "sessions": 20_000,
-                  "accounts": 1_000},
+                  "accounts": 1_000, "policy_sets": 100},
         "budget": {
             "pan": {"requests_per_hour": 3_000},
             # Sized for full per-endpoint coverage, not a sample: at 20k sessions
@@ -110,7 +110,11 @@ PROFILES = MappingProxyType({
             # roughly 2,400 requests an hour once warm.
             "mnt": {"requests_per_hour": 4_000},
             "pxgrid": {"requests_per_hour": 200},
-            "oracle": {"duty_cycle_percent": 2.0},
+            # Full v2 workflow parity includes accounting, diagnostic, posture,
+            # profiling, and correlated failure scans. Their declared steady
+            # load is ~2.64%, so 3% preserves the operational cadences with
+            # explicit headroom instead of lowering a cost estimate to fit.
+            "oracle": {"duty_cycle_percent": 3.0},
         },
     },
 })

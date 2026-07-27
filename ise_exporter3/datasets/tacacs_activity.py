@@ -60,8 +60,23 @@ commands = Gauge(
 active_accounts = Gauge(
     "ise3_tacacs_active_accounts", "Distinct accounts with TACACS activity",
     ["provider"])
+authorization_details = Gauge(
+    "ise3_tacacs_authorization_details",
+    "TACACS authorization outcomes by account, device, policy, shell profile, "
+    "and matched command set",
+    [
+        "provider", "username", "device", "policy", "shell_profile",
+        "command_set", "status",
+    ])
+account_last_seen = Gauge(
+    "ise3_tacacs_account_last_seen_timestamp",
+    "Latest TACACS evidence timestamp by account and event type",
+    ["provider", "username", "event_type"])
 
-_METRICS = (authentications, authorizations, commands, active_accounts)
+_METRICS = (
+    authentications, authorizations, commands, active_accounts,
+    authorization_details, account_last_seen,
+)
 
 AUTHENTICATION_VIEW = "tacacs_authentication_last_two_days"
 AUTHORIZATION_VIEW = "tacacs_authorization_last_two_days"
@@ -83,11 +98,13 @@ COMMAND_DIMENSIONS = IDENTITY_DIMENSIONS + (
 # Status as a measure pair, so it adds to the row count instead of multiplying it.
 OUTCOME_MEASURES = (
     "SUM(CASE WHEN UPPER(NVL(status, '')) LIKE 'PASS%' THEN 1 ELSE 0 END) AS passed, "
-    "SUM(CASE WHEN UPPER(NVL(status, '')) LIKE 'PASS%' THEN 0 ELSE 1 END) AS failed"
+    "SUM(CASE WHEN UPPER(NVL(status, '')) LIKE 'PASS%' THEN 0 ELSE 1 END) AS failed, "
+    "MAX(epoch_time) AS last_seen"
 )
+COMMAND_MEASURES = "COUNT(*) AS events, MAX(epoch_time) AS last_seen"
 
-# Series per device across the three statements: passed and failed for both
-# authentications and authorizations, plus one accounting series.
+# Series per device across the three marginal statements: passed and failed for
+# both authentications and authorizations, plus one accounting series.
 SERIES_PER_DEVICE = 5
 
 
@@ -138,8 +155,29 @@ def _epoch_bound(hours, limits):
             f"* 86400 - {hours * 3600}")
 
 
-def statements(hours, limits):
+def _optional(schema, view, column):
+    columns = None if schema is None else schema.get(view.upper())
+    if columns is None or column.upper() in columns:
+        return f"NVL({column}, 'unknown')"
+    return "'unknown'"
+
+
+def statements(hours, limits, schema=None):
     bound = _epoch_bound(hours, limits)
+    detail_columns = {
+        name: _optional(schema, AUTHORIZATION_VIEW, column)
+        for name, column in (
+            ("username", "username"),
+            ("device", "device_name"),
+            ("policy", "authorization_policy"),
+            ("shell_profile", "shell_profile"),
+            ("command_set", "matched_command_set"),
+        )
+    }
+    detail_select = ", ".join(
+        f"{expression} AS {name}"
+        for name, expression in detail_columns.items())
+    detail_group = ", ".join(detail_columns.values())
     return {
         "authentications": reporting.marginals(
             AUTHENTICATION_VIEW, bound, IDENTITY_DIMENSIONS, OUTCOME_MEASURES,
@@ -148,7 +186,17 @@ def statements(hours, limits):
             AUTHORIZATION_VIEW, bound, IDENTITY_DIMENSIONS, OUTCOME_MEASURES,
             limits=limits),
         "commands": reporting.marginals(
-            ACCOUNTING_VIEW, bound, COMMAND_DIMENSIONS, limits=limits),
+            ACCOUNTING_VIEW, bound, COMMAND_DIMENSIONS, COMMAND_MEASURES,
+            limits=limits),
+        "authorization_details": f"""
+            SELECT {detail_select}, {OUTCOME_MEASURES},
+                   COUNT(*) OVER () AS group_total
+            FROM {AUTHORIZATION_VIEW}
+            WHERE {bound}
+            GROUP BY {detail_group}
+            ORDER BY failed DESC, passed DESC, username, device
+            FETCH FIRST {reporting.group_limit(limits)} ROWS ONLY
+        """,
     }
 
 
@@ -216,11 +264,13 @@ def _publish_devices(ctx, gauge, breakdown, rows, directory, rollup, keep):
 
 def fetch(ctx):
     hours = reporting.window_hours(ctx.dataset.default_interval, ctx.limits)
-    results = ctx.transport.query_many(statements(hours, ctx.limits))
+    schema = getattr(ctx.transport, "schema", None)
+    results = ctx.transport.query_many(statements(hours, ctx.limits, schema))
     rollup = ctx.option("device_rollup")
     keep = ctx.option("top_devices")
     directory = nad_directory.shared()
     accounts = set()
+    latest = {}
 
     for key, gauge in (("authentications", authentications),
                        ("authorizations", authorizations),
@@ -242,9 +292,47 @@ def fetch(ctx):
                 (value,) = reporting.group(row, "value")
                 if dimension == "username":
                     accounts.add(value)
+                    seen = finite(row.get("last_seen"))
+                    if seen:
+                        latest[(value, key)] = max(
+                            latest.get((value, key), 0.0), seen)
                 passed, failed = _outcome_of(row)
                 _publish(ctx, gauge, dimension, value, passed, failed)
 
+    details = results.get("authorization_details", [])
+    reporting.publish_truncation(ctx, "authorization_details", details)
+    for row in details:
+        username, device, policy, shell_profile, command_set = reporting.group(
+            row, "username", "device", "policy", "shell_profile", "command_set")
+        passed, failed = _outcome_of(row)
+        ctx.set(
+            authorization_details,
+            passed,
+            username=username,
+            device=device,
+            policy=policy,
+            shell_profile=shell_profile,
+            command_set=command_set,
+            status="passed",
+        )
+        ctx.set(
+            authorization_details,
+            failed,
+            username=username,
+            device=device,
+            policy=policy,
+            shell_profile=shell_profile,
+            command_set=command_set,
+            status="failed",
+        )
+
+    for (username, event_type), timestamp in latest.items():
+        ctx.set(
+            account_last_seen,
+            timestamp,
+            username=username,
+            event_type=event_type,
+        )
     ctx.set(active_accounts, len(accounts))
 
 
@@ -259,8 +347,13 @@ DATASET = Dataset(
             name="dataconnect",
             cost=Cost(target="oracle", db_seconds=6.0),
             supplies=frozenset({
-                "username", "device", "ops_owner", "command_family", "status"}),
-            requires=("view:TACACS_AUTHENTICATION", "view:TACACS_ACCOUNTING"),
+                "username", "device", "ops_owner", "command_family", "status",
+                "policy", "shell_profile", "command_set", "last_seen"}),
+            requires=(
+                "view:TACACS_AUTHENTICATION_LAST_TWO_DAYS",
+                "view:TACACS_AUTHORIZATION_LAST_TWO_DAYS",
+                "view:TACACS_ACCOUNTING_LAST_TWO_DAYS",
+            ),
             fetch=fetch,
         ),
     ),

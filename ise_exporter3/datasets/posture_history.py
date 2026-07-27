@@ -40,16 +40,36 @@ by_agent_version = Gauge(
 by_os = Gauge(
     "ise3_posture_assessments_by_os", "Distinct endpoints assessed, per OS",
     ["provider", "os"])
+by_psn = Gauge(
+    "ise3_posture_assessments_by_psn",
+    "Distinct endpoints assessed by serving PSN and posture status",
+    ["provider", "psn", "status"])
 failed_conditions = Gauge(
     "ise3_posture_failed_conditions",
     "Distinct endpoints failing a posture condition. Endpoints, not condition "
     "hits: an endpoint failing three conditions counts once in each",
     ["provider", "condition"])
+eligible_total = Gauge(
+    "ise3_posture_eligible_endpoints_total",
+    "Endpoints currently eligible for posture assessment",
+    ["provider"])
+eligible_recent = Gauge(
+    "ise3_posture_eligible_recently_assessed_total",
+    "Eligible endpoints assessed inside the reporting window",
+    ["provider"])
+eligible_without_recent = Gauge(
+    "ise3_posture_eligible_without_recent_assessment_total",
+    "Eligible endpoints without an assessment inside the reporting window",
+    ["provider"])
 
-_METRICS = (assessments, by_policy, by_agent_version, by_os, failed_conditions)
+_METRICS = (
+    assessments, by_policy, by_agent_version, by_os, by_psn,
+    failed_conditions, eligible_total, eligible_recent, eligible_without_recent,
+)
 
 ENDPOINT_VIEW = "posture_assessment_by_endpoint"
 CONDITION_VIEW = "posture_assessment_by_condition"
+INVENTORY_VIEW = "endpoints_data"
 
 # Column names verified against the live 3.3 P11 catalogue. The two posture
 # views disagree with each other: the endpoint view keys on
@@ -85,6 +105,18 @@ def statements(hours, limits):
             ORDER BY policy, status
             FETCH FIRST {reporting.group_limit(limits)} ROWS ONLY
         """,
+        "psn_status": f"""
+            SELECT NVL(ise_node, 'unknown') AS psn,
+                   NVL(posture_status, 'Unknown') AS status,
+                   COUNT(DISTINCT endpoint_mac_address) AS endpoints,
+                   COUNT(*) OVER () AS group_total
+            FROM {ENDPOINT_VIEW}
+            WHERE {endpoint_recent}
+            GROUP BY NVL(ise_node, 'unknown'),
+                     NVL(posture_status, 'Unknown')
+            ORDER BY psn, status
+            FETCH FIRST {reporting.group_limit(limits)} ROWS ONLY
+        """,
         "endpoint_marginals": reporting.marginals(
             ENDPOINT_VIEW, endpoint_recent, ENDPOINT_DIMENSIONS, ENDPOINT_MEASURE,
             limits=limits),
@@ -92,6 +124,30 @@ def statements(hours, limits):
             CONDITION_VIEW,
             f"{condition_recent} AND NVL(condition_status, 'Failed') = 'Failed'",
             CONDITION_DIMENSIONS, CONDITION_MEASURE, limits=limits),
+        "eligibility": f"""
+            WITH eligible AS (
+                SELECT DISTINCT UPPER(REPLACE(REPLACE(mac_address, ':', ''), '-', ''))
+                                AS endpoint_mac
+                FROM {INVENTORY_VIEW}
+                WHERE NVL(posture_applicable, 0) = 1
+                  AND mac_address IS NOT NULL
+            ),
+            recently_assessed AS (
+                SELECT DISTINCT UPPER(REPLACE(REPLACE(endpoint_mac_address, ':', ''), '-', ''))
+                                AS endpoint_mac
+                FROM {ENDPOINT_VIEW}
+                WHERE {endpoint_recent}
+                  AND endpoint_mac_address IS NOT NULL
+            )
+            SELECT COUNT(*) AS eligible,
+                   SUM(CASE WHEN recently_assessed.endpoint_mac IS NOT NULL
+                            THEN 1 ELSE 0 END) AS assessed,
+                   SUM(CASE WHEN recently_assessed.endpoint_mac IS NULL
+                            THEN 1 ELSE 0 END) AS without_recent
+            FROM eligible
+            LEFT JOIN recently_assessed
+              ON recently_assessed.endpoint_mac = eligible.endpoint_mac
+        """,
     }
 
 
@@ -122,11 +178,27 @@ def fetch(ctx):
             (value,) = reporting.group(row, "value")
             ctx.set(gauge, finite(row.get("endpoints")), **{label_name: value})
 
+    psn_pairs = results.get("psn_status", [])
+    reporting.publish_truncation(ctx, "psn_status", psn_pairs)
+    for row in psn_pairs:
+        psn, status = reporting.group(row, "psn", "status")
+        ctx.set(
+            by_psn,
+            finite(row.get("endpoints")),
+            psn=psn,
+            status=status,
+        )
+
     conditions = results.get("condition_marginals", [])
     reporting.publish_truncation(ctx, "condition_marginals", conditions)
     for row in conditions:
         (value,) = reporting.group(row, "value")
         ctx.set(failed_conditions, finite(row.get("endpoints")), condition=value)
+
+    for row in results.get("eligibility", []):
+        ctx.set(eligible_total, finite(row.get("eligible")))
+        ctx.set(eligible_recent, finite(row.get("assessed")))
+        ctx.set(eligible_without_recent, finite(row.get("without_recent")))
 
 
 DATASET = Dataset(
@@ -137,10 +209,14 @@ DATASET = Dataset(
     providers=(
         Provider(
             name="dataconnect",
-            cost=Cost(target="oracle", db_seconds=10.0),
+            cost=Cost(target="oracle", db_seconds=12.0),
             supplies=frozenset({
-                "status", "policy", "condition", "os", "agent_version"}),
-            requires=("view:POSTURE_ASSESSMENT_BY_ENDPOINT",),
+                "status", "policy", "condition", "os", "agent_version", "psn",
+                "eligibility"}),
+            requires=(
+                "view:POSTURE_ASSESSMENT_BY_ENDPOINT",
+                "view:ENDPOINTS_DATA",
+            ),
             fetch=fetch,
         ),
     ),

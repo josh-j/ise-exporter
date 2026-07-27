@@ -1,9 +1,25 @@
 {
   "annotations": {},
-  "description": "Which source supplies each dataset, when it changed, and why. Sources differ in meaning, so a dataset running on a fallback may be answering a narrower question than its preferred source would.",
+  "description": "Which source supplies each dataset, when it changed, and why. A fallback may answer a narrower question than the preferred source.",
   "editable": true,
   "fiscalYearStartMonth": 0,
   "graphTooltip": 1,
+  "links": [
+    {
+      "asDropdown": true,
+      "icon": "",
+      "includeVars": true,
+      "keepTime": true,
+      "tags": [
+        "ise-exporter3"
+      ],
+      "targetBlank": false,
+      "title": "ISE Exporter 3 dashboards",
+      "tooltip": "",
+      "type": "dashboards",
+      "url": ""
+    }
+  ],
   "panels": [
     {
       "collapsed": false,
@@ -23,7 +39,7 @@
         "type": "prometheus",
         "uid": "${prometheus}"
       },
-      "description": "The source currently supplying each dataset. A dataset with a row here is being collected; one that vanished has no usable source at all, which the Collection row explains.",
+      "description": "The provider currently supplying each dataset; a missing row means no provider is usable.",
       "fieldConfig": {
         "defaults": {},
         "overrides": []
@@ -38,9 +54,9 @@
       "repeatDirection": "h",
       "targets": [
         {
-          "expr": "ise3_dataset_provider_active == 1",
+          "expr": "ise3_dataset_provider_active{instance=~\"$deployment\"} == 1",
           "instant": true,
-          "legendFormat": "{{dataset}} / {{provider}}",
+          "legendFormat": "{{dataset}} \u00b7 {{provider}}",
           "range": false,
           "refId": "A"
         }
@@ -55,7 +71,7 @@
         "type": "prometheus",
         "uid": "${prometheus}"
       },
-      "description": "Non-zero means a dataset fell back. This is the signal v1 never had: it swapped sources silently, so a panel changed meaning with nothing to show for it.",
+      "description": "Non-zero means a dataset fell back, making a change in data semantics visible rather than silent.",
       "fieldConfig": {
         "defaults": {
           "custom": {
@@ -89,18 +105,18 @@
       "repeatDirection": "h",
       "targets": [
         {
-          "expr": "sum(ise3_dataset_provider_degraded)",
+          "expr": "sum(ise3_dataset_provider_degraded{instance=~\"$deployment\"})",
           "instant": false,
           "legendFormat": "degraded",
           "range": true,
           "refId": "A"
         },
         {
-          "expr": "ise3_dataset_provider_degraded == 1",
+          "expr": "ise3_dataset_provider_degraded{instance=~\"$deployment\"} == 1",
           "instant": false,
           "legendFormat": "{{dataset}}",
           "range": true,
-          "refId": "A"
+          "refId": "B"
         }
       ],
       "title": "Datasets not on their preferred source",
@@ -126,7 +142,7 @@
         "type": "prometheus",
         "uid": "${prometheus}"
       },
-      "description": "The bounded reason recorded when a dataset stepped to another source, and the source it stepped to.",
+      "description": "Bounded reason recorded when a dataset stepped to a different provider.",
       "fieldConfig": {
         "defaults": {},
         "overrides": []
@@ -141,9 +157,9 @@
       "repeatDirection": "h",
       "targets": [
         {
-          "expr": "ise3_dataset_provider_reason_info == 1",
+          "expr": "ise3_dataset_provider_reason_info{instance=~\"$deployment\"} == 1",
           "instant": true,
-          "legendFormat": "{{dataset}} {{provider}} {{reason}}",
+          "legendFormat": "{{dataset}} \u00b7 {{provider}} \u00b7 {{reason}}",
           "range": false,
           "refId": "A"
         }
@@ -158,7 +174,7 @@
         "type": "prometheus",
         "uid": "${prometheus}"
       },
-      "description": "Sources an operator listed that this build cannot run: not implemented, target not configured, or a required reporting view the account cannot see.",
+      "description": "Configured sources this build cannot run because a target, capability, or reporting view is unavailable.",
       "fieldConfig": {
         "defaults": {},
         "overrides": []
@@ -173,9 +189,9 @@
       "repeatDirection": "h",
       "targets": [
         {
-          "expr": "ise3_dataset_provider_available == 0",
+          "expr": "ise3_dataset_provider_available{instance=~\"$deployment\"} == 0",
           "instant": true,
-          "legendFormat": "{{dataset}} / {{provider}}",
+          "legendFormat": "{{dataset}} \u00b7 {{provider}}",
           "range": false,
           "refId": "A"
         }
@@ -203,13 +219,13 @@
         "type": "prometheus",
         "uid": "${prometheus}"
       },
-      "description": "up is the last attempt; fresh means the snapshot is inside two cadences. A dataset that is up but not fresh is collecting more slowly than it claims.",
+      "description": "Last-attempt success and freshness for each active dataset provider.",
       "fieldConfig": {
         "defaults": {},
         "overrides": []
       },
       "gridPos": {
-        "h": 9,
+        "h": 8,
         "w": 12,
         "x": 0,
         "y": 20
@@ -218,16 +234,16 @@
       "repeatDirection": "h",
       "targets": [
         {
-          "expr": "ise3_dataset_up",
+          "expr": "ise3_dataset_up{instance=~\"$deployment\"}",
           "instant": true,
-          "legendFormat": "{{dataset}} up",
+          "legendFormat": "{{dataset}} \u00b7 {{provider}} up",
           "range": false,
           "refId": "A"
         },
         {
-          "expr": "ise3_dataset_fresh",
+          "expr": "ise3_dataset_fresh{instance=~\"$deployment\"}",
           "instant": true,
-          "legendFormat": "{{dataset}} fresh",
+          "legendFormat": "{{dataset}} \u00b7 {{provider}} fresh",
           "range": false,
           "refId": "B"
         }
@@ -242,13 +258,13 @@
         "type": "prometheus",
         "uid": "${prometheus}"
       },
-      "description": "One bounded operator explanation per failing dataset. Empty is the healthy state.",
+      "description": "One bounded operator explanation per failing dataset; empty is the healthy state.",
       "fieldConfig": {
         "defaults": {},
         "overrides": []
       },
       "gridPos": {
-        "h": 9,
+        "h": 8,
         "w": 12,
         "x": 12,
         "y": 20
@@ -257,9 +273,9 @@
       "repeatDirection": "h",
       "targets": [
         {
-          "expr": "ise3_dataset_last_failure_detail_info == 1",
+          "expr": "ise3_dataset_last_failure_detail_info{instance=~\"$deployment\"} == 1",
           "instant": true,
-          "legendFormat": "{{dataset}} {{reason}}",
+          "legendFormat": "{{dataset}} \u00b7 {{reason}} \u00b7 {{detail}}",
           "range": false,
           "refId": "A"
         }
@@ -292,6 +308,25 @@
         "query": "prometheus",
         "skipUrlSync": false,
         "type": "datasource"
+      },
+      {
+        "allValue": ".*",
+        "auto": false,
+        "auto_count": 30,
+        "auto_min": "10s",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${prometheus}"
+        },
+        "hide": 0,
+        "id": "00000000-0000-0000-0000-000000000000",
+        "includeAll": true,
+        "label": "Deployment",
+        "multi": true,
+        "name": "deployment",
+        "query": "label_values(ise3_dataset_enabled, instance)",
+        "skipUrlSync": false,
+        "type": "query"
       }
     ]
   },

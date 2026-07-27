@@ -1,0 +1,638 @@
+{
+  "annotations": {},
+  "description": "Deployment, session, inventory, certificate, backup, licensing, and software posture at a glance. Every value is gated on fresh data.",
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "links": [
+    {
+      "asDropdown": true,
+      "icon": "",
+      "includeVars": true,
+      "keepTime": true,
+      "tags": [
+        "ise-exporter3"
+      ],
+      "targetBlank": false,
+      "title": "ISE Exporter 3 dashboards",
+      "tooltip": "",
+      "type": "dashboards",
+      "url": ""
+    }
+  ],
+  "panels": [
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "id": 0,
+      "panels": [],
+      "title": "Platform status",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${prometheus}"
+      },
+      "description": "Enabled datasets whose currently selected provider completed successfully and remains fresh.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 8,
+        "x": 0,
+        "y": 1
+      },
+      "options": null,
+      "repeatDirection": "h",
+      "targets": [
+        {
+          "expr": "sum((ise3_dataset_up{instance=~\"$deployment\"} == 1) and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\"} == 1))",
+          "instant": true,
+          "legendFormat": "ready",
+          "range": false,
+          "refId": "A"
+        }
+      ],
+      "title": "Ready datasets",
+      "transformations": [],
+      "transparent": false,
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${prometheus}"
+      },
+      "description": "Datasets running on a lower-preference provider. The Sources dashboard explains every fallback.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 8,
+        "x": 8,
+        "y": 1
+      },
+      "options": null,
+      "repeatDirection": "h",
+      "targets": [
+        {
+          "expr": "sum(ise3_dataset_provider_degraded{instance=~\"$deployment\"} > 0)",
+          "instant": true,
+          "legendFormat": "degraded",
+          "range": false,
+          "refId": "A"
+        }
+      ],
+      "title": "Degraded datasets",
+      "transformations": [],
+      "transparent": false,
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${prometheus}"
+      },
+      "description": "Current RADIUS sessions from the active provider; the provider label preserves source semantics.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 8,
+        "x": 16,
+        "y": 1
+      },
+      "options": null,
+      "repeatDirection": "h",
+      "targets": [
+        {
+          "expr": "sum((ise3_active_sessions_total{instance=~\"$deployment\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"active_sessions\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"active_sessions\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"active_sessions\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"active_sessions\"} == 1))) == 1)))",
+          "instant": true,
+          "legendFormat": "sessions",
+          "range": false,
+          "refId": "A"
+        }
+      ],
+      "title": "Active sessions",
+      "transformations": [],
+      "transparent": false,
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${prometheus}"
+      },
+      "description": "Connected deployment capacity by assigned ISE role, including distributed and standalone deployments.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 6
+      },
+      "options": {
+        "displayMode": "gradient",
+        "minVizHeight": 10,
+        "minVizWidth": 0,
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": []
+        },
+        "showUnfilled": true,
+        "valueMode": "color"
+      },
+      "repeatDirection": "h",
+      "targets": [
+        {
+          "expr": "sort_desc(sum by (role) ((ise3_deployment_nodes{instance=~\"$deployment\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"deployment\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"deployment\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"deployment\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"deployment\"} == 1))) == 1))))",
+          "instant": true,
+          "legendFormat": "{{role}}",
+          "range": false,
+          "refId": "A"
+        }
+      ],
+      "title": "Deployment nodes by role",
+      "transformations": [],
+      "transparent": false,
+      "type": "bargauge"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${prometheus}"
+      },
+      "description": "Current state, role, and service assignment for every ISE node in the selected deployments.",
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 6
+      },
+      "options": null,
+      "repeatDirection": "h",
+      "targets": [
+        {
+          "expr": "(ise3_deployment_node_state{instance=~\"$deployment\",state=~\".*\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"deployment\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"deployment\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"deployment\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"deployment\"} == 1))) == 1)) == 1",
+          "instant": true,
+          "legendFormat": "{{node}} \u00b7 {{roles}} \u00b7 {{state}}",
+          "range": false,
+          "refId": "A"
+        }
+      ],
+      "title": "Deployment node status",
+      "transformations": [],
+      "transparent": false,
+      "type": "table"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${prometheus}"
+      },
+      "description": "Whether administrative high availability is enabled for each selected ISE deployment.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 12,
+        "x": 0,
+        "y": 14
+      },
+      "options": null,
+      "repeatDirection": "h",
+      "targets": [
+        {
+          "expr": "ise3_deployment_pan_ha_enabled{instance=~\"$deployment\"}",
+          "instant": true,
+          "legendFormat": "{{instance}}",
+          "range": false,
+          "refId": "A"
+        }
+      ],
+      "title": "PAN HA enabled",
+      "transformations": [],
+      "transparent": false,
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${prometheus}"
+      },
+      "description": "Authoritative endpoint and configured network-device totals from their currently selected providers.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 12,
+        "x": 12,
+        "y": 14
+      },
+      "options": null,
+      "repeatDirection": "h",
+      "targets": [
+        {
+          "expr": "sum((ise3_endpoints_total{instance=~\"$deployment\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"endpoint_inventory\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"endpoint_inventory\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"endpoint_inventory\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"endpoint_inventory\"} == 1))) == 1)))",
+          "instant": true,
+          "legendFormat": "endpoints",
+          "range": false,
+          "refId": "A"
+        },
+        {
+          "expr": "sum((ise3_network_devices_total{instance=~\"$deployment\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"network_devices\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"network_devices\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"network_devices\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"network_devices\"} == 1))) == 1)))",
+          "instant": true,
+          "legendFormat": "network devices",
+          "range": false,
+          "refId": "B"
+        }
+      ],
+      "title": "Endpoint and NAD inventory",
+      "transformations": [],
+      "transparent": false,
+      "type": "stat"
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 19
+      },
+      "id": 0,
+      "panels": [],
+      "title": "Certificates, backup, and software",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${prometheus}"
+      },
+      "description": "Expired and soon-to-expire certificate counts across all scanned deployment nodes.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 8,
+        "x": 0,
+        "y": 20
+      },
+      "options": null,
+      "repeatDirection": "h",
+      "targets": [
+        {
+          "expr": "sum((ise3_certificates_expired{instance=~\"$deployment\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"certificates\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"certificates\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"certificates\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"certificates\"} == 1))) == 1)))",
+          "instant": true,
+          "legendFormat": "expired",
+          "range": false,
+          "refId": "A"
+        },
+        {
+          "expr": "sum((ise3_certificates_expiring_soon{instance=~\"$deployment\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"certificates\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"certificates\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"certificates\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"certificates\"} == 1))) == 1)))",
+          "instant": true,
+          "legendFormat": "expiring soon",
+          "range": false,
+          "refId": "B"
+        }
+      ],
+      "title": "Certificate findings",
+      "transformations": [],
+      "transparent": false,
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${prometheus}"
+      },
+      "description": "Whether backup is configured and the reported age of the latest successful backup.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "h"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 8,
+        "x": 8,
+        "y": 20
+      },
+      "options": null,
+      "repeatDirection": "h",
+      "targets": [
+        {
+          "expr": "ise3_backup_configured{instance=~\"$deployment\"}",
+          "instant": true,
+          "legendFormat": "configured",
+          "range": false,
+          "refId": "A"
+        },
+        {
+          "expr": "ise3_backup_age_hours{instance=~\"$deployment\"}",
+          "instant": true,
+          "legendFormat": "age",
+          "range": false,
+          "refId": "B"
+        }
+      ],
+      "title": "Backup state",
+      "transformations": [],
+      "transparent": false,
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${prometheus}"
+      },
+      "description": "Installed patch level and whether the appliance version is supported by this exporter build.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 8,
+        "x": 16,
+        "y": 20
+      },
+      "options": null,
+      "repeatDirection": "h",
+      "targets": [
+        {
+          "expr": "ise3_patch_level{instance=~\"$deployment\"}",
+          "instant": true,
+          "legendFormat": "patch",
+          "range": false,
+          "refId": "A"
+        },
+        {
+          "expr": "ise3_version_supported{instance=~\"$deployment\"}",
+          "instant": true,
+          "legendFormat": "{{version}} supported",
+          "range": false,
+          "refId": "B"
+        }
+      ],
+      "title": "Patch and version support",
+      "transformations": [],
+      "transparent": false,
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${prometheus}"
+      },
+      "description": "Soonest certificate expiry by node, store, usage, and certificate identity for renewal planning.",
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 25
+      },
+      "options": null,
+      "repeatDirection": "h",
+      "targets": [
+        {
+          "expr": "sort((ise3_certificate_expiry_days{instance=~\"$deployment\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"certificates\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"certificates\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"certificates\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"certificates\"} == 1))) == 1)))",
+          "instant": true,
+          "legendFormat": "{{node}} \u00b7 {{store}} \u00b7 {{certificate}}",
+          "range": false,
+          "refId": "A"
+        }
+      ],
+      "title": "Certificate expiry",
+      "transformations": [],
+      "transparent": false,
+      "type": "table"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${prometheus}"
+      },
+      "description": "The installed-state record for each known patch number on the selected deployments.",
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 25
+      },
+      "options": null,
+      "repeatDirection": "h",
+      "targets": [
+        {
+          "expr": "ise3_patch_installed{instance=~\"$deployment\"}",
+          "instant": true,
+          "legendFormat": "patch {{patch_number}}",
+          "range": false,
+          "refId": "A"
+        }
+      ],
+      "title": "Installed patches",
+      "transformations": [],
+      "transparent": false,
+      "type": "table"
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 33
+      },
+      "id": 0,
+      "panels": [],
+      "title": "Licensing",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${prometheus}"
+      },
+      "description": "Current consumption by license tier, preserving each deployment as a separate series.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 34
+      },
+      "options": {
+        "displayMode": "gradient",
+        "minVizHeight": 10,
+        "minVizWidth": 0,
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": []
+        },
+        "showUnfilled": true,
+        "valueMode": "color"
+      },
+      "repeatDirection": "h",
+      "targets": [
+        {
+          "expr": "sort_desc(sum by (tier) ((ise3_license_consumption{instance=~\"$deployment\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"licensing\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"licensing\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"licensing\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"licensing\"} == 1))) == 1))))",
+          "instant": true,
+          "legendFormat": "{{tier}}",
+          "range": false,
+          "refId": "A"
+        }
+      ],
+      "title": "License consumption",
+      "transformations": [],
+      "transparent": false,
+      "type": "bargauge"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${prometheus}"
+      },
+      "description": "Enabled and compliance state for every reported license tier in the selected deployments.",
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 34
+      },
+      "options": null,
+      "repeatDirection": "h",
+      "targets": [
+        {
+          "expr": "ise3_license_enabled{instance=~\"$deployment\"}",
+          "instant": true,
+          "legendFormat": "{{tier}} enabled",
+          "range": false,
+          "refId": "A"
+        },
+        {
+          "expr": "ise3_license_compliant{instance=~\"$deployment\"}",
+          "instant": true,
+          "legendFormat": "{{tier}} compliant",
+          "range": false,
+          "refId": "B"
+        }
+      ],
+      "title": "License enabled and compliant",
+      "transformations": [],
+      "transparent": false,
+      "type": "table"
+    }
+  ],
+  "refresh": "5m",
+  "schemaVersion": 36,
+  "style": "dark",
+  "tags": [
+    "ise",
+    "ise-exporter3"
+  ],
+  "templating": {
+    "list": [
+      {
+        "auto": false,
+        "auto_count": 30,
+        "auto_min": "10s",
+        "hide": 0,
+        "id": "00000000-0000-0000-0000-000000000000",
+        "includeAll": false,
+        "label": "Prometheus",
+        "multi": false,
+        "name": "prometheus",
+        "query": "prometheus",
+        "skipUrlSync": false,
+        "type": "datasource"
+      },
+      {
+        "allValue": ".*",
+        "auto": false,
+        "auto_count": 30,
+        "auto_min": "10s",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${prometheus}"
+        },
+        "hide": 0,
+        "id": "00000000-0000-0000-0000-000000000000",
+        "includeAll": true,
+        "label": "Deployment",
+        "multi": true,
+        "name": "deployment",
+        "query": "label_values(ise3_dataset_enabled, instance)",
+        "skipUrlSync": false,
+        "type": "query"
+      }
+    ]
+  },
+  "time": {
+    "from": "now-6h",
+    "to": "now"
+  },
+  "timezone": "browser",
+  "title": "ISE 3 \u2014 Overview",
+  "uid": "ise3-overview"
+}

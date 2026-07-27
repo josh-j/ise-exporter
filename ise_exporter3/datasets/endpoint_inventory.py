@@ -33,9 +33,13 @@ posture_applicable = Gauge(
 unprofiled = Gauge(
     "ise3_endpoints_unprofiled",
     "Endpoints with no useful endpoint policy", ["provider"])
+field_coverage = Gauge(
+    "ise3_endpoint_inventory_field_coverage",
+    "Fraction of endpoint rows carrying each operational inventory field",
+    ["provider", "field"])
 
 _METRICS = (endpoints_total, by_profile, by_identity_group, posture_applicable,
-            unprofiled)
+            unprofiled, field_coverage)
 
 VIEW = "endpoints_data"
 
@@ -63,7 +67,13 @@ def statements(limits):
                    SUM(CASE WHEN TRIM(endpoint_policy) IS NULL
                              OR LOWER(TRIM(endpoint_policy))
                                 IN ('unknown', 'none', 'missing')
-                            THEN 1 ELSE 0 END) AS unprofiled
+                            THEN 1 ELSE 0 END) AS unprofiled,
+                   SUM(CASE WHEN TRIM(endpoint_policy) IS NOT NULL
+                            THEN 1 ELSE 0 END) AS profile_present,
+                   SUM(CASE WHEN TRIM(identity_group_id) IS NOT NULL
+                            THEN 1 ELSE 0 END) AS identity_group_present,
+                   SUM(CASE WHEN posture_applicable IS NOT NULL
+                            THEN 1 ELSE 0 END) AS posture_applicable_present
             FROM {VIEW}
         """,
         # Marginals rather than two capped top-K statements: complete, one
@@ -82,6 +92,17 @@ def fetch(ctx):
         ctx.set(unprofiled, finite(row.get("unprofiled")))
         ctx.set(posture_applicable, finite(row.get("posture_yes")), applicable="yes")
         ctx.set(posture_applicable, finite(row.get("posture_no")), applicable="no")
+        total = finite(row.get("endpoints"))
+        for field, column in (
+            ("profile", "profile_present"),
+            ("identity_group", "identity_group_present"),
+            ("posture_applicable", "posture_applicable_present"),
+        ):
+            ctx.set(
+                field_coverage,
+                finite(row.get(column)) / total if total else 1.0,
+                field=field,
+            )
 
     rows = results.get("marginals", [])
     reporting.publish_truncation(ctx, "marginals", rows)

@@ -1,0 +1,2050 @@
+{
+  "annotations": {},
+  "description": "RADIUS outcomes, latency, errors, active sessions, and the live authorization decisions needed to troubleshoot access failures.",
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "links": [
+    {
+      "asDropdown": true,
+      "icon": "",
+      "includeVars": true,
+      "keepTime": true,
+      "tags": [
+        "ise-exporter3"
+      ],
+      "targetBlank": false,
+      "title": "ISE Exporter 3 dashboards",
+      "tooltip": "",
+      "type": "dashboards",
+      "url": ""
+    }
+  ],
+  "panels": [
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "id": 0,
+      "panels": [],
+      "title": "Outcome and volume",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${prometheus}"
+      },
+      "description": "Freshness of reporting, accounting, error, live-session, and session-authorization datasets used below.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 8,
+        "x": 0,
+        "y": 1
+      },
+      "options": null,
+      "repeatDirection": "h",
+      "targets": [
+        {
+          "expr": "((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"radius_reporting\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"radius_reporting\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"radius_reporting\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"radius_reporting\"} == 1))) == 1)",
+          "instant": true,
+          "legendFormat": "reporting",
+          "range": false,
+          "refId": "A"
+        },
+        {
+          "expr": "((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"radius_errors\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"radius_errors\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"radius_errors\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"radius_errors\"} == 1))) == 1)",
+          "instant": true,
+          "legendFormat": "errors",
+          "range": false,
+          "refId": "B"
+        },
+        {
+          "expr": "((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"active_sessions\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"active_sessions\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"active_sessions\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"active_sessions\"} == 1))) == 1)",
+          "instant": true,
+          "legendFormat": "sessions",
+          "range": false,
+          "refId": "C"
+        },
+        {
+          "expr": "((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"session_authorization\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"session_authorization\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"session_authorization\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"session_authorization\"} == 1))) == 1)",
+          "instant": true,
+          "legendFormat": "authorization",
+          "range": false,
+          "refId": "D"
+        },
+        {
+          "expr": "((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"radius_accounting\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"radius_accounting\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"radius_accounting\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"radius_accounting\"} == 1))) == 1)",
+          "instant": true,
+          "legendFormat": "accounting",
+          "range": false,
+          "refId": "E"
+        }
+      ],
+      "title": "Dataset readiness",
+      "transformations": [],
+      "transparent": false,
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${prometheus}"
+      },
+      "description": "Passed authentications divided by all authentication outcomes in the current reporting window.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 8,
+        "x": 8,
+        "y": 1
+      },
+      "options": null,
+      "repeatDirection": "h",
+      "targets": [
+        {
+          "expr": "sum((ise3_radius_authentications{instance=~\"$deployment\",status=\"passed\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"radius_reporting\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"radius_reporting\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"radius_reporting\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"radius_reporting\"} == 1))) == 1))) / clamp_min(sum((ise3_radius_authentications{instance=~\"$deployment\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"radius_reporting\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"radius_reporting\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"radius_reporting\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"radius_reporting\"} == 1))) == 1))), 1)",
+          "instant": true,
+          "legendFormat": "pass rate",
+          "range": false,
+          "refId": "A"
+        }
+      ],
+      "title": "Pass rate",
+      "transformations": [],
+      "transparent": false,
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${prometheus}"
+      },
+      "description": "Seconds since the most recent successful authentication, accounting, and error snapshots.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 8,
+        "x": 16,
+        "y": 1
+      },
+      "options": null,
+      "repeatDirection": "h",
+      "targets": [
+        {
+          "expr": "time() - ise3_dataset_last_success_timestamp{instance=~\"$deployment\",dataset=\"radius_reporting\"}",
+          "instant": true,
+          "legendFormat": "authentication",
+          "range": false,
+          "refId": "A"
+        },
+        {
+          "expr": "time() - ise3_dataset_last_success_timestamp{instance=~\"$deployment\",dataset=\"radius_accounting\"}",
+          "instant": true,
+          "legendFormat": "accounting",
+          "range": false,
+          "refId": "B"
+        },
+        {
+          "expr": "time() - ise3_dataset_last_success_timestamp{instance=~\"$deployment\",dataset=\"radius_errors\"}",
+          "instant": true,
+          "legendFormat": "errors",
+          "range": false,
+          "refId": "C"
+        }
+      ],
+      "title": "Collection age",
+      "transformations": [],
+      "transparent": false,
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${prometheus}"
+      },
+      "description": "Exact failed-authentication total for the reporting window, independent of dimensional breakdowns.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 8,
+        "x": 0,
+        "y": 6
+      },
+      "options": null,
+      "repeatDirection": "h",
+      "targets": [
+        {
+          "expr": "sum((ise3_radius_authentications{instance=~\"$deployment\",status=\"failed\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"radius_reporting\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"radius_reporting\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"radius_reporting\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"radius_reporting\"} == 1))) == 1)))",
+          "instant": true,
+          "legendFormat": "failed",
+          "range": false,
+          "refId": "A"
+        }
+      ],
+      "title": "Failed authentications",
+      "transformations": [],
+      "transparent": false,
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${prometheus}"
+      },
+      "description": "Authentication attempts divided by distinct authenticating endpoints in the same exact reporting window; values above one identify repeated attempts.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 8,
+        "x": 8,
+        "y": 6
+      },
+      "options": null,
+      "repeatDirection": "h",
+      "targets": [
+        {
+          "expr": "sum((ise3_radius_authentications{instance=~\"$deployment\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"radius_reporting\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"radius_reporting\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"radius_reporting\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"radius_reporting\"} == 1))) == 1))) / clamp_min(sum((ise3_radius_distinct_endpoints_total{instance=~\"$deployment\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"radius_reporting\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"radius_reporting\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"radius_reporting\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"radius_reporting\"} == 1))) == 1))), 1)",
+          "instant": true,
+          "legendFormat": "attempts per endpoint",
+          "range": false,
+          "refId": "A"
+        }
+      ],
+      "title": "Repeat authentication intensity",
+      "transformations": [],
+      "transparent": false,
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${prometheus}"
+      },
+      "description": "Passed and failed authentication totals over time; these are window gauges rather than event counters.",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "fillOpacity": 0
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 16,
+        "y": 6
+      },
+      "options": {
+        "legend": {
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": false
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "asc"
+        }
+      },
+      "repeatDirection": "h",
+      "targets": [
+        {
+          "expr": "(ise3_radius_authentications{instance=~\"$deployment\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"radius_reporting\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"radius_reporting\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"radius_reporting\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"radius_reporting\"} == 1))) == 1))",
+          "instant": false,
+          "legendFormat": "{{status}}",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "title": "Authentication outcome",
+      "transformations": [],
+      "transparent": false,
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${prometheus}"
+      },
+      "description": "Current session count and distinct endpoints holding sessions from the active live-session provider.",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "fillOpacity": 0
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 14
+      },
+      "options": {
+        "legend": {
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": false
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "asc"
+        }
+      },
+      "repeatDirection": "h",
+      "targets": [
+        {
+          "expr": "(ise3_active_sessions_total{instance=~\"$deployment\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"active_sessions\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"active_sessions\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"active_sessions\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"active_sessions\"} == 1))) == 1))",
+          "instant": false,
+          "legendFormat": "{{provider}} sessions",
+          "range": true,
+          "refId": "A"
+        },
+        {
+          "expr": "(ise3_active_session_endpoints{instance=~\"$deployment\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"active_sessions\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"active_sessions\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"active_sessions\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"active_sessions\"} == 1))) == 1))",
+          "instant": false,
+          "legendFormat": "{{provider}} endpoints",
+          "range": true,
+          "refId": "B"
+        }
+      ],
+      "title": "Active sessions and endpoints",
+      "transformations": [],
+      "transparent": false,
+      "type": "timeseries"
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 22
+      },
+      "id": 0,
+      "panels": [],
+      "title": "Authentication dimensions",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${prometheus}"
+      },
+      "description": "Complete authentication-method marginal split by outcome for the current reporting window.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 23
+      },
+      "options": {
+        "displayMode": "gradient",
+        "minVizHeight": 10,
+        "minVizWidth": 0,
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": []
+        },
+        "showUnfilled": true,
+        "valueMode": "color"
+      },
+      "repeatDirection": "h",
+      "targets": [
+        {
+          "expr": "sort_desc(sum by (method,status) ((ise3_radius_authentications_by_method{instance=~\"$deployment\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"radius_reporting\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"radius_reporting\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"radius_reporting\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"radius_reporting\"} == 1))) == 1))))",
+          "instant": true,
+          "legendFormat": "{{method}} \u00b7 {{status}}",
+          "range": false,
+          "refId": "A"
+        }
+      ],
+      "title": "Authentication methods",
+      "transformations": [],
+      "transparent": false,
+      "type": "bargauge"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${prometheus}"
+      },
+      "description": "Complete protocol marginal split by outcome without a top-K tail that could hide quiet protocols.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 23
+      },
+      "options": {
+        "displayMode": "gradient",
+        "minVizHeight": 10,
+        "minVizWidth": 0,
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": []
+        },
+        "showUnfilled": true,
+        "valueMode": "color"
+      },
+      "repeatDirection": "h",
+      "targets": [
+        {
+          "expr": "sort_desc(sum by (protocol,status) ((ise3_radius_authentications_by_protocol{instance=~\"$deployment\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"radius_reporting\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"radius_reporting\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"radius_reporting\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"radius_reporting\"} == 1))) == 1))))",
+          "instant": true,
+          "legendFormat": "{{protocol}} \u00b7 {{status}}",
+          "range": false,
+          "refId": "A"
+        }
+      ],
+      "title": "Authentication protocols",
+      "transformations": [],
+      "transparent": false,
+      "type": "bargauge"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${prometheus}"
+      },
+      "description": "Matched authorization-policy volume by outcome from the raw authentication reporting view.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 31
+      },
+      "options": {
+        "displayMode": "gradient",
+        "minVizHeight": 10,
+        "minVizWidth": 0,
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": []
+        },
+        "showUnfilled": true,
+        "valueMode": "color"
+      },
+      "repeatDirection": "h",
+      "targets": [
+        {
+          "expr": "sort_desc(sum by (policy,status) ((ise3_radius_authentications_by_policy{instance=~\"$deployment\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"radius_reporting\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"radius_reporting\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"radius_reporting\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"radius_reporting\"} == 1))) == 1))))",
+          "instant": true,
+          "legendFormat": "{{policy}} \u00b7 {{status}}",
+          "range": false,
+          "refId": "A"
+        }
+      ],
+      "title": "Authorization policies",
+      "transformations": [],
+      "transparent": false,
+      "type": "bargauge"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${prometheus}"
+      },
+      "description": "Authentication volume by policy service node and outcome, scoped by the selected PSN variable.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 31
+      },
+      "options": {
+        "displayMode": "gradient",
+        "minVizHeight": 10,
+        "minVizWidth": 0,
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": []
+        },
+        "showUnfilled": true,
+        "valueMode": "color"
+      },
+      "repeatDirection": "h",
+      "targets": [
+        {
+          "expr": "sort_desc(sum by (psn,status) ((ise3_radius_authentications_by_psn{instance=~\"$deployment\",psn=~\"$psn\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"radius_reporting\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"radius_reporting\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"radius_reporting\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"radius_reporting\"} == 1))) == 1))))",
+          "instant": true,
+          "legendFormat": "{{psn}} \u00b7 {{status}}",
+          "range": false,
+          "refId": "A"
+        }
+      ],
+      "title": "Authentication by PSN",
+      "transformations": [],
+      "transparent": false,
+      "type": "bargauge"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${prometheus}"
+      },
+      "description": "Rolling-window authentication volume divided by the exact represented window, preserving passed and failed outcomes per selected PSN.",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "fillOpacity": 0
+          },
+          "unit": "reqps"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 39
+      },
+      "options": {
+        "legend": {
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": false
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "asc"
+        }
+      },
+      "repeatDirection": "h",
+      "targets": [
+        {
+          "expr": "(ise3_radius_authentications_by_psn{instance=~\"$deployment\",psn=~\"$psn\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"radius_reporting\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"radius_reporting\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"radius_reporting\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"radius_reporting\"} == 1))) == 1)) / on(instance,provider) group_left ise3_radius_reporting_window_seconds{instance=~\"$deployment\"}",
+          "instant": false,
+          "legendFormat": "{{psn}} \u00b7 {{status}}",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "title": "Authentication rate per PSN",
+      "transformations": [],
+      "transparent": false,
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${prometheus}"
+      },
+      "description": "Complete per-NAD authentication volume by outcome; quiet devices are retained rather than top-K capped.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 39
+      },
+      "options": {
+        "displayMode": "gradient",
+        "minVizHeight": 10,
+        "minVizWidth": 0,
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": []
+        },
+        "showUnfilled": true,
+        "valueMode": "color"
+      },
+      "repeatDirection": "h",
+      "targets": [
+        {
+          "expr": "sort_desc(sum by (nad,status) ((ise3_radius_authentications_by_nad{instance=~\"$deployment\",nad=~\"$nad\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"radius_reporting\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"radius_reporting\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"radius_reporting\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"radius_reporting\"} == 1))) == 1))))",
+          "instant": true,
+          "legendFormat": "{{nad}} \u00b7 {{status}}",
+          "range": false,
+          "refId": "A"
+        }
+      ],
+      "title": "Authentication by network device",
+      "transformations": [],
+      "transparent": false,
+      "type": "bargauge"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${prometheus}"
+      },
+      "description": "Mean trusted authentication latency per PSN beside the fraction of samples whose latency was usable.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 47
+      },
+      "options": {
+        "displayMode": "gradient",
+        "minVizHeight": 10,
+        "minVizWidth": 0,
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": []
+        },
+        "showUnfilled": true,
+        "valueMode": "color"
+      },
+      "repeatDirection": "h",
+      "targets": [
+        {
+          "expr": "ise3_radius_authentication_latency_seconds{instance=~\"$deployment\",psn=~\"$psn\"}",
+          "instant": true,
+          "legendFormat": "{{psn}} latency",
+          "range": false,
+          "refId": "A"
+        },
+        {
+          "expr": "ise3_radius_authentication_latency_coverage{instance=~\"$deployment\",psn=~\"$psn\"}",
+          "instant": true,
+          "legendFormat": "{{psn}} coverage",
+          "range": false,
+          "refId": "B"
+        }
+      ],
+      "title": "Authentication latency by PSN",
+      "transformations": [],
+      "transparent": false,
+      "type": "bargauge"
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 55
+      },
+      "id": 0,
+      "panels": [],
+      "title": "Accounting",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${prometheus}"
+      },
+      "description": "Exact accounting start, stop, and other event totals for the current reporting window.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 24,
+        "x": 0,
+        "y": 56
+      },
+      "options": null,
+      "repeatDirection": "h",
+      "targets": [
+        {
+          "expr": "sum((ise3_radius_accounting_events{instance=~\"$deployment\",dimension=\"total\",event_type=\"starts\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"radius_accounting\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"radius_accounting\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"radius_accounting\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"radius_accounting\"} == 1))) == 1)))",
+          "instant": true,
+          "legendFormat": "starts",
+          "range": false,
+          "refId": "A"
+        },
+        {
+          "expr": "sum((ise3_radius_accounting_events{instance=~\"$deployment\",dimension=\"total\",event_type=\"stops\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"radius_accounting\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"radius_accounting\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"radius_accounting\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"radius_accounting\"} == 1))) == 1)))",
+          "instant": true,
+          "legendFormat": "stops",
+          "range": false,
+          "refId": "B"
+        },
+        {
+          "expr": "sum((ise3_radius_accounting_events{instance=~\"$deployment\",dimension=\"total\",event_type=\"other\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"radius_accounting\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"radius_accounting\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"radius_accounting\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"radius_accounting\"} == 1))) == 1)))",
+          "instant": true,
+          "legendFormat": "other",
+          "range": false,
+          "refId": "C"
+        }
+      ],
+      "title": "Accounting starts and stops",
+      "transformations": [],
+      "transparent": false,
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${prometheus}"
+      },
+      "description": "Start and stop accounting volume per selected NAD; the complete marginal retains quiet devices.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 61
+      },
+      "options": {
+        "displayMode": "gradient",
+        "minVizHeight": 10,
+        "minVizWidth": 0,
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": []
+        },
+        "showUnfilled": true,
+        "valueMode": "color"
+      },
+      "repeatDirection": "h",
+      "targets": [
+        {
+          "expr": "sort_desc(sum by (value,event_type) ((ise3_radius_accounting_events{instance=~\"$deployment\",dimension=\"nad\",value=~\"$nad\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"radius_accounting\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"radius_accounting\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"radius_accounting\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"radius_accounting\"} == 1))) == 1))))",
+          "instant": true,
+          "legendFormat": "{{value}} \u00b7 {{event_type}}",
+          "range": false,
+          "refId": "A"
+        }
+      ],
+      "title": "Accounting events by network device",
+      "transformations": [],
+      "transparent": false,
+      "type": "bargauge"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${prometheus}"
+      },
+      "description": "Mean and maximum completed-session duration per selected NAD, with zero-duration records excluded.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 61
+      },
+      "options": {
+        "displayMode": "gradient",
+        "minVizHeight": 10,
+        "minVizWidth": 0,
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": []
+        },
+        "showUnfilled": true,
+        "valueMode": "color"
+      },
+      "repeatDirection": "h",
+      "targets": [
+        {
+          "expr": "sort_desc((ise3_radius_accounting_session_duration_seconds{instance=~\"$deployment\",dimension=\"nad\",value=~\"$nad\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"radius_accounting\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"radius_accounting\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"radius_accounting\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"radius_accounting\"} == 1))) == 1)))",
+          "instant": true,
+          "legendFormat": "{{value}} \u00b7 {{statistic}}",
+          "range": false,
+          "refId": "A"
+        }
+      ],
+      "title": "Accounting session duration",
+      "transformations": [],
+      "transparent": false,
+      "type": "bargauge"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${prometheus}"
+      },
+      "description": "Start and stop accounting-window volume over time for each selected policy service node.",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "fillOpacity": 0
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 69
+      },
+      "options": {
+        "legend": {
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": false
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "asc"
+        }
+      },
+      "repeatDirection": "h",
+      "targets": [
+        {
+          "expr": "(ise3_radius_accounting_events{instance=~\"$deployment\",dimension=\"psn\",value=~\"$psn\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"radius_accounting\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"radius_accounting\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"radius_accounting\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"radius_accounting\"} == 1))) == 1))",
+          "instant": false,
+          "legendFormat": "{{value}} \u00b7 {{event_type}}",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "title": "Accounting events by PSN",
+      "transformations": [],
+      "transparent": false,
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${prometheus}"
+      },
+      "description": "Rolling-window accounting events divided by the exact represented window for each selected PSN and event type.",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "fillOpacity": 0
+          },
+          "unit": "eps"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 69
+      },
+      "options": {
+        "legend": {
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": false
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "asc"
+        }
+      },
+      "repeatDirection": "h",
+      "targets": [
+        {
+          "expr": "(ise3_radius_accounting_events{instance=~\"$deployment\",dimension=\"psn\",value=~\"$psn\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"radius_accounting\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"radius_accounting\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"radius_accounting\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"radius_accounting\"} == 1))) == 1)) / on(instance,provider) group_left ise3_radius_accounting_window_seconds{instance=~\"$deployment\"}",
+          "instant": false,
+          "legendFormat": "{{value}} \u00b7 {{event_type}}",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "title": "Accounting event rate per PSN",
+      "transformations": [],
+      "transparent": false,
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${prometheus}"
+      },
+      "description": "Fraction of accounting records with a usable positive session duration for each NAD.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 77
+      },
+      "options": {
+        "displayMode": "gradient",
+        "minVizHeight": 10,
+        "minVizWidth": 0,
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": []
+        },
+        "showUnfilled": true,
+        "valueMode": "color"
+      },
+      "repeatDirection": "h",
+      "targets": [
+        {
+          "expr": "sort_desc((ise3_radius_accounting_duration_coverage{instance=~\"$deployment\",dimension=\"nad\",value=~\"$nad\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"radius_accounting\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"radius_accounting\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"radius_accounting\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"radius_accounting\"} == 1))) == 1)))",
+          "instant": true,
+          "legendFormat": "{{value}}",
+          "range": false,
+          "refId": "A"
+        }
+      ],
+      "title": "Accounting duration coverage",
+      "transformations": [],
+      "transparent": false,
+      "type": "bargauge"
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 85
+      },
+      "id": 0,
+      "panels": [],
+      "title": "Failure isolation",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${prometheus}"
+      },
+      "description": "Exact number of error-view rows in the current reporting window from the selected provider.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 12,
+        "x": 0,
+        "y": 86
+      },
+      "options": null,
+      "repeatDirection": "h",
+      "targets": [
+        {
+          "expr": "sum((ise3_radius_errors_total{instance=~\"$deployment\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"radius_errors\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"radius_errors\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"radius_errors\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"radius_errors\"} == 1))) == 1)))",
+          "instant": true,
+          "legendFormat": "errors",
+          "range": false,
+          "refId": "A"
+        }
+      ],
+      "title": "RADIUS errors",
+      "transformations": [],
+      "transparent": false,
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${prometheus}"
+      },
+      "description": "RADIUS error events carrying ISE message codes associated with certificate validation, trust, or public-key infrastructure failures.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 12,
+        "x": 12,
+        "y": 86
+      },
+      "options": null,
+      "repeatDirection": "h",
+      "targets": [
+        {
+          "expr": "sum((ise3_radius_errors_by_message_code{instance=~\"$deployment\",message_code=~\"12300|12321|12500|12501|12511|12625|22056\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"radius_errors\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"radius_errors\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"radius_errors\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"radius_errors\"} == 1))) == 1)))",
+          "instant": true,
+          "legendFormat": "PKI errors",
+          "range": false,
+          "refId": "A"
+        }
+      ],
+      "title": "Certificate and PKI errors",
+      "transformations": [],
+      "transparent": false,
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${prometheus}"
+      },
+      "description": "ISE message-code distribution for the current error window, sorted from most to least frequent.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 91
+      },
+      "options": {
+        "displayMode": "gradient",
+        "minVizHeight": 10,
+        "minVizWidth": 0,
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": []
+        },
+        "showUnfilled": true,
+        "valueMode": "color"
+      },
+      "repeatDirection": "h",
+      "targets": [
+        {
+          "expr": "sort_desc(sum by (message_code) ((ise3_radius_errors_by_message_code{instance=~\"$deployment\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"radius_errors\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"radius_errors\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"radius_errors\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"radius_errors\"} == 1))) == 1))))",
+          "instant": true,
+          "legendFormat": "{{message_code}}",
+          "range": false,
+          "refId": "A"
+        }
+      ],
+      "title": "Top error codes",
+      "transformations": [],
+      "transparent": false,
+      "type": "bargauge"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${prometheus}"
+      },
+      "description": "Historical failed authentications classified into bounded operational causes from ISE failure text.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 91
+      },
+      "options": {
+        "displayMode": "gradient",
+        "minVizHeight": 10,
+        "minVizWidth": 0,
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": []
+        },
+        "showUnfilled": true,
+        "valueMode": "color"
+      },
+      "repeatDirection": "h",
+      "targets": [
+        {
+          "expr": "sort_desc((ise3_radius_failure_summary{instance=~\"$deployment\",dimension=\"failure_class\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"radius_reporting\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"radius_reporting\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"radius_reporting\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"radius_reporting\"} == 1))) == 1)))",
+          "instant": true,
+          "legendFormat": "{{value}}",
+          "range": false,
+          "refId": "A"
+        }
+      ],
+      "title": "Failure classes",
+      "transformations": [],
+      "transparent": false,
+      "type": "bargauge"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${prometheus}"
+      },
+      "description": "Historical failed authentications by authorization profile, identity store/group, device type, and security group. These are marginals and are not additive across dimensions.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 99
+      },
+      "options": {
+        "displayMode": "gradient",
+        "minVizHeight": 10,
+        "minVizWidth": 0,
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": []
+        },
+        "showUnfilled": true,
+        "valueMode": "color"
+      },
+      "repeatDirection": "h",
+      "targets": [
+        {
+          "expr": "sort_desc((ise3_radius_failure_summary{instance=~\"$deployment\",dimension=~\"authorization_profile|identity_store|identity_group|device_type|security_group\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"radius_reporting\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"radius_reporting\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"radius_reporting\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"radius_reporting\"} == 1))) == 1)))",
+          "instant": true,
+          "legendFormat": "{{dimension}} \u00b7 {{value}}",
+          "range": false,
+          "refId": "A"
+        }
+      ],
+      "title": "Failed authorization and identity summary",
+      "transformations": [],
+      "transparent": false,
+      "type": "bargauge"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${prometheus}"
+      },
+      "description": "Network devices represented in the RADIUS error view, including low-volume devices rather than only top-K.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 99
+      },
+      "options": {
+        "displayMode": "gradient",
+        "minVizHeight": 10,
+        "minVizWidth": 0,
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": []
+        },
+        "showUnfilled": true,
+        "valueMode": "color"
+      },
+      "repeatDirection": "h",
+      "targets": [
+        {
+          "expr": "sort_desc(sum by (nad) ((ise3_radius_errors_by_nad{instance=~\"$deployment\",nad=~\"$nad\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"radius_errors\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"radius_errors\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"radius_errors\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"radius_errors\"} == 1))) == 1))))",
+          "instant": true,
+          "legendFormat": "{{nad}}",
+          "range": false,
+          "refId": "A"
+        }
+      ],
+      "title": "Failing network devices",
+      "transformations": [],
+      "transparent": false,
+      "type": "bargauge"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${prometheus}"
+      },
+      "description": "Authentication methods represented in RADIUS errors, which separates protocol issues from device issues.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 107
+      },
+      "options": {
+        "displayMode": "gradient",
+        "minVizHeight": 10,
+        "minVizWidth": 0,
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": []
+        },
+        "showUnfilled": true,
+        "valueMode": "color"
+      },
+      "repeatDirection": "h",
+      "targets": [
+        {
+          "expr": "sort_desc(sum by (method) ((ise3_radius_errors_by_method{instance=~\"$deployment\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"radius_errors\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"radius_errors\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"radius_errors\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"radius_errors\"} == 1))) == 1))))",
+          "instant": true,
+          "legendFormat": "{{method}}",
+          "range": false,
+          "refId": "A"
+        }
+      ],
+      "title": "Failure methods",
+      "transformations": [],
+      "transparent": false,
+      "type": "bargauge"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${prometheus}"
+      },
+      "description": "The deliberately bounded NAD-by-method failure correlation. Unlike separate marginals, this retains which method failed at which network device.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 107
+      },
+      "options": {
+        "displayMode": "gradient",
+        "minVizHeight": 10,
+        "minVizWidth": 0,
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": []
+        },
+        "showUnfilled": true,
+        "valueMode": "color"
+      },
+      "repeatDirection": "h",
+      "targets": [
+        {
+          "expr": "sort_desc((ise3_radius_failures_by_nad_method{instance=~\"$deployment\",nad=~\"$nad\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"radius_reporting\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"radius_reporting\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"radius_reporting\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"radius_reporting\"} == 1))) == 1)))",
+          "instant": true,
+          "legendFormat": "{{nad}} \u00b7 {{method}}",
+          "range": false,
+          "refId": "A"
+        }
+      ],
+      "title": "Authentication methods at failing NADs",
+      "transformations": [],
+      "transparent": false,
+      "type": "bargauge"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${prometheus}"
+      },
+      "description": "Published versus existing NAD-by-method failure groups, making the troubleshooting bound explicit.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 12,
+        "x": 0,
+        "y": 115
+      },
+      "options": null,
+      "repeatDirection": "h",
+      "targets": [
+        {
+          "expr": "ise3_topk_groups_returned{instance=~\"$deployment\",dataset=\"radius_reporting\",breakdown=\"failure_context\"}",
+          "instant": true,
+          "legendFormat": "published",
+          "range": false,
+          "refId": "A"
+        },
+        {
+          "expr": "ise3_topk_groups_total{instance=~\"$deployment\",dataset=\"radius_reporting\",breakdown=\"failure_context\"}",
+          "instant": true,
+          "legendFormat": "total",
+          "range": false,
+          "refId": "B"
+        },
+        {
+          "expr": "ise3_topk_truncated{instance=~\"$deployment\",dataset=\"radius_reporting\",breakdown=\"failure_context\"}",
+          "instant": true,
+          "legendFormat": "truncated",
+          "range": false,
+          "refId": "C"
+        }
+      ],
+      "title": "Failure-context coverage",
+      "transformations": [],
+      "transparent": false,
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${prometheus}"
+      },
+      "description": "RADIUS error volume by policy service node for the currently selected PSN scope.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 115
+      },
+      "options": {
+        "displayMode": "gradient",
+        "minVizHeight": 10,
+        "minVizWidth": 0,
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": []
+        },
+        "showUnfilled": true,
+        "valueMode": "color"
+      },
+      "repeatDirection": "h",
+      "targets": [
+        {
+          "expr": "sort_desc(sum by (psn) ((ise3_radius_errors_by_psn{instance=~\"$deployment\",psn=~\"$psn\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"radius_errors\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"radius_errors\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"radius_errors\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"radius_errors\"} == 1))) == 1))))",
+          "instant": true,
+          "legendFormat": "{{psn}}",
+          "range": false,
+          "refId": "A"
+        }
+      ],
+      "title": "Errors by PSN",
+      "transformations": [],
+      "transparent": false,
+      "type": "bargauge"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${prometheus}"
+      },
+      "description": "RADIUS error volume joined to authoritative NAD location assignments for operational routing.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 123
+      },
+      "options": {
+        "displayMode": "gradient",
+        "minVizHeight": 10,
+        "minVizWidth": 0,
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": []
+        },
+        "showUnfilled": true,
+        "valueMode": "color"
+      },
+      "repeatDirection": "h",
+      "targets": [
+        {
+          "expr": "sort_desc(sum by (location) (((ise3_radius_errors_by_nad{instance=~\"$deployment\",nad=~\"$nad\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"radius_errors\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"radius_errors\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"radius_errors\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"radius_errors\"} == 1))) == 1))) * on(instance,nad) group_left(location) (ise3_network_device_assignment{instance=~\"$deployment\",nad=~\"$nad\",ops_owner=~\"$ops_owner\"})))",
+          "instant": true,
+          "legendFormat": "{{location}}",
+          "range": false,
+          "refId": "A"
+        }
+      ],
+      "title": "Failure locations",
+      "transformations": [],
+      "transparent": false,
+      "type": "bargauge"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${prometheus}"
+      },
+      "description": "RADIUS error volume joined to the operations group responsible for each network device.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 123
+      },
+      "options": {
+        "displayMode": "gradient",
+        "minVizHeight": 10,
+        "minVizWidth": 0,
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": []
+        },
+        "showUnfilled": true,
+        "valueMode": "color"
+      },
+      "repeatDirection": "h",
+      "targets": [
+        {
+          "expr": "sort_desc(sum by (ops_owner) (((ise3_radius_errors_by_nad{instance=~\"$deployment\",nad=~\"$nad\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"radius_errors\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"radius_errors\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"radius_errors\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"radius_errors\"} == 1))) == 1))) * on(instance,nad) group_left(ops_owner) (ise3_network_device_assignment{instance=~\"$deployment\",nad=~\"$nad\",ops_owner=~\"$ops_owner\"})))",
+          "instant": true,
+          "legendFormat": "{{ops_owner}}",
+          "range": false,
+          "refId": "A"
+        }
+      ],
+      "title": "Errors by ops owner",
+      "transformations": [],
+      "transparent": false,
+      "type": "bargauge"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${prometheus}"
+      },
+      "description": "Per-NAD error evidence enriched with location and ops owner so each failure can be routed directly.",
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 131
+      },
+      "options": null,
+      "repeatDirection": "h",
+      "targets": [
+        {
+          "expr": "sort_desc(((ise3_radius_errors_by_nad{instance=~\"$deployment\",nad=~\"$nad\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"radius_errors\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"radius_errors\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"radius_errors\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"radius_errors\"} == 1))) == 1))) * on(instance,nad) group_left(location,ops_owner) (ise3_network_device_assignment{instance=~\"$deployment\",nad=~\"$nad\",ops_owner=~\"$ops_owner\"}))",
+          "instant": true,
+          "legendFormat": "{{nad}} \u00b7 {{location}} \u00b7 {{ops_owner}}",
+          "range": false,
+          "refId": "A"
+        }
+      ],
+      "title": "RADIUS failure work queue",
+      "transformations": [],
+      "transparent": false,
+      "type": "table"
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 139
+      },
+      "id": 0,
+      "panels": [],
+      "title": "Live authorization decisions",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${prometheus}"
+      },
+      "description": "Distinct active endpoints by authentication status and operational owner from MnT session detail.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 140
+      },
+      "options": {
+        "displayMode": "gradient",
+        "minVizHeight": 10,
+        "minVizWidth": 0,
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": []
+        },
+        "showUnfilled": true,
+        "valueMode": "color"
+      },
+      "repeatDirection": "h",
+      "targets": [
+        {
+          "expr": "sort_desc(sum by (ops_owner,status) ((ise3_session_status_endpoints{instance=~\"$deployment\",ops_owner=~\"$ops_owner\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"session_authorization\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"session_authorization\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"session_authorization\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"session_authorization\"} == 1))) == 1))))",
+          "instant": true,
+          "legendFormat": "{{ops_owner}} \u00b7 {{status}}",
+          "range": false,
+          "refId": "A"
+        }
+      ],
+      "title": "Current endpoint status by ops owner",
+      "transformations": [],
+      "transparent": false,
+      "type": "bargauge"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${prometheus}"
+      },
+      "description": "Distinct active endpoints by ISE failure reason code and owning operations group.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 140
+      },
+      "options": {
+        "displayMode": "gradient",
+        "minVizHeight": 10,
+        "minVizWidth": 0,
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": []
+        },
+        "showUnfilled": true,
+        "valueMode": "color"
+      },
+      "repeatDirection": "h",
+      "targets": [
+        {
+          "expr": "sort_desc(sum by (reason_code,ops_owner) ((ise3_session_failure_reason_endpoints{instance=~\"$deployment\",ops_owner=~\"$ops_owner\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"session_authorization\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"session_authorization\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"session_authorization\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"session_authorization\"} == 1))) == 1))))",
+          "instant": true,
+          "legendFormat": "{{reason_code}} \u00b7 {{ops_owner}}",
+          "range": false,
+          "refId": "A"
+        }
+      ],
+      "title": "Failure reasons by ops owner",
+      "transformations": [],
+      "transparent": false,
+      "type": "bargauge"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${prometheus}"
+      },
+      "description": "Selected profile, matched rule, and matched policy set retained only for failed active endpoints and grouped by the responsible operations owner.",
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 148
+      },
+      "options": null,
+      "repeatDirection": "h",
+      "targets": [
+        {
+          "expr": "(ise3_session_failed_authz_profile_endpoints{instance=~\"$deployment\",ops_owner=~\"$ops_owner\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"session_authorization\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"session_authorization\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"session_authorization\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"session_authorization\"} == 1))) == 1))",
+          "instant": true,
+          "legendFormat": "{{ops_owner}} \u00b7 profile {{authz_profile}}",
+          "range": false,
+          "refId": "A"
+        },
+        {
+          "expr": "(ise3_session_failed_authz_rule_endpoints{instance=~\"$deployment\",ops_owner=~\"$ops_owner\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"session_authorization\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"session_authorization\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"session_authorization\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"session_authorization\"} == 1))) == 1))",
+          "instant": true,
+          "legendFormat": "{{ops_owner}} \u00b7 rule {{authz_rule}}",
+          "range": false,
+          "refId": "B"
+        },
+        {
+          "expr": "(ise3_session_failed_policy_set_endpoints{instance=~\"$deployment\",ops_owner=~\"$ops_owner\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"session_authorization\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"session_authorization\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"session_authorization\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"session_authorization\"} == 1))) == 1))",
+          "instant": true,
+          "legendFormat": "{{ops_owner}} \u00b7 policy set {{policy_set}}",
+          "range": false,
+          "refId": "C"
+        }
+      ],
+      "title": "Failed authorization and policy context",
+      "transformations": [],
+      "transparent": false,
+      "type": "table"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${prometheus}"
+      },
+      "description": "Methods currently used by distinct active endpoints, grouped by the owner responsible for their NAD.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 148
+      },
+      "options": {
+        "displayMode": "gradient",
+        "minVizHeight": 10,
+        "minVizWidth": 0,
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": []
+        },
+        "showUnfilled": true,
+        "valueMode": "color"
+      },
+      "repeatDirection": "h",
+      "targets": [
+        {
+          "expr": "sort_desc(sum by (method,ops_owner) ((ise3_session_auth_method_endpoints{instance=~\"$deployment\",ops_owner=~\"$ops_owner\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"session_authorization\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"session_authorization\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"session_authorization\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"session_authorization\"} == 1))) == 1))))",
+          "instant": true,
+          "legendFormat": "{{method}} \u00b7 {{ops_owner}}",
+          "range": false,
+          "refId": "A"
+        }
+      ],
+      "title": "Live authentication methods",
+      "transformations": [],
+      "transparent": false,
+      "type": "bargauge"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${prometheus}"
+      },
+      "description": "Authorization profiles selected for active endpoints, grouped by operational owner.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 156
+      },
+      "options": {
+        "displayMode": "gradient",
+        "minVizHeight": 10,
+        "minVizWidth": 0,
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": []
+        },
+        "showUnfilled": true,
+        "valueMode": "color"
+      },
+      "repeatDirection": "h",
+      "targets": [
+        {
+          "expr": "sort_desc(sum by (authz_profile,ops_owner) ((ise3_session_authz_profile_endpoints{instance=~\"$deployment\",ops_owner=~\"$ops_owner\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"session_authorization\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"session_authorization\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"session_authorization\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"session_authorization\"} == 1))) == 1))))",
+          "instant": true,
+          "legendFormat": "{{authz_profile}} \u00b7 {{ops_owner}}",
+          "range": false,
+          "refId": "A"
+        }
+      ],
+      "title": "Selected authorization profiles",
+      "transformations": [],
+      "transparent": false,
+      "type": "bargauge"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${prometheus}"
+      },
+      "description": "Ground-truth matched rules for active sessions, used to distinguish open-mode from closed-mode behavior.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 156
+      },
+      "options": {
+        "displayMode": "gradient",
+        "minVizHeight": 10,
+        "minVizWidth": 0,
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": []
+        },
+        "showUnfilled": true,
+        "valueMode": "color"
+      },
+      "repeatDirection": "h",
+      "targets": [
+        {
+          "expr": "sort_desc(sum by (authz_rule,ops_owner) ((ise3_session_authz_rule_endpoints{instance=~\"$deployment\",ops_owner=~\"$ops_owner\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"session_authorization\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"session_authorization\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"session_authorization\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"session_authorization\"} == 1))) == 1))))",
+          "instant": true,
+          "legendFormat": "{{authz_rule}} \u00b7 {{ops_owner}}",
+          "range": false,
+          "refId": "A"
+        }
+      ],
+      "title": "Matched authorization rules",
+      "transformations": [],
+      "transparent": false,
+      "type": "bargauge"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${prometheus}"
+      },
+      "description": "Policy sets matched by active endpoints per operations owner, parsed from the live authorization decision.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 164
+      },
+      "options": {
+        "displayMode": "gradient",
+        "minVizHeight": 10,
+        "minVizWidth": 0,
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": []
+        },
+        "showUnfilled": true,
+        "valueMode": "color"
+      },
+      "repeatDirection": "h",
+      "targets": [
+        {
+          "expr": "sort_desc(sum by (policy_set,ops_owner) ((ise3_session_policy_set_endpoints{instance=~\"$deployment\",ops_owner=~\"$ops_owner\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"session_authorization\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"session_authorization\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"session_authorization\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"session_authorization\"} == 1))) == 1))))",
+          "instant": true,
+          "legendFormat": "{{policy_set}} \u00b7 {{ops_owner}}",
+          "range": false,
+          "refId": "A"
+        }
+      ],
+      "title": "Matched policy sets",
+      "transformations": [],
+      "transparent": false,
+      "type": "bargauge"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${prometheus}"
+      },
+      "description": "Per-switch policy-set evidence for finding NADs still operating under an unintended access mode.",
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 164
+      },
+      "options": null,
+      "repeatDirection": "h",
+      "targets": [
+        {
+          "expr": "sort_desc((ise3_session_policy_set_endpoints_by_nad{instance=~\"$deployment\",nad=~\"$nad\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"session_authorization\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"session_authorization\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"session_authorization\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"session_authorization\"} == 1))) == 1)))",
+          "instant": true,
+          "legendFormat": "{{nad}} \u00b7 {{policy_set}}",
+          "range": false,
+          "refId": "A"
+        }
+      ],
+      "title": "Policy sets by network device",
+      "transformations": [],
+      "transparent": false,
+      "type": "table"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${prometheus}"
+      },
+      "description": "Published versus available NAD groups for the bounded per-policy-set switch breakdown.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 172
+      },
+      "options": null,
+      "repeatDirection": "h",
+      "targets": [
+        {
+          "expr": "ise3_topk_groups_returned{instance=~\"$deployment\",dataset=\"session_authorization\",breakdown=~\".*nad.*\"}",
+          "instant": true,
+          "legendFormat": "published",
+          "range": false,
+          "refId": "A"
+        },
+        {
+          "expr": "ise3_topk_groups_total{instance=~\"$deployment\",dataset=\"session_authorization\",breakdown=~\".*nad.*\"}",
+          "instant": true,
+          "legendFormat": "total",
+          "range": false,
+          "refId": "B"
+        }
+      ],
+      "title": "Policy-set NAD coverage",
+      "transformations": [],
+      "transparent": false,
+      "type": "stat"
+    }
+  ],
+  "refresh": "5m",
+  "schemaVersion": 36,
+  "style": "dark",
+  "tags": [
+    "ise",
+    "ise-exporter3"
+  ],
+  "templating": {
+    "list": [
+      {
+        "auto": false,
+        "auto_count": 30,
+        "auto_min": "10s",
+        "hide": 0,
+        "id": "00000000-0000-0000-0000-000000000000",
+        "includeAll": false,
+        "label": "Prometheus",
+        "multi": false,
+        "name": "prometheus",
+        "query": "prometheus",
+        "skipUrlSync": false,
+        "type": "datasource"
+      },
+      {
+        "allValue": ".*",
+        "auto": false,
+        "auto_count": 30,
+        "auto_min": "10s",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${prometheus}"
+        },
+        "hide": 0,
+        "id": "00000000-0000-0000-0000-000000000000",
+        "includeAll": true,
+        "label": "Deployment",
+        "multi": true,
+        "name": "deployment",
+        "query": "label_values(ise3_dataset_enabled, instance)",
+        "skipUrlSync": false,
+        "type": "query"
+      },
+      {
+        "allValue": ".*",
+        "auto": false,
+        "auto_count": 30,
+        "auto_min": "10s",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${prometheus}"
+        },
+        "hide": 0,
+        "id": "00000000-0000-0000-0000-000000000000",
+        "includeAll": true,
+        "label": "PSN",
+        "multi": true,
+        "name": "psn",
+        "query": "label_values(ise3_radius_authentications_by_psn{instance=~\"$deployment\"}, psn)",
+        "skipUrlSync": false,
+        "type": "query"
+      },
+      {
+        "allValue": ".*",
+        "auto": false,
+        "auto_count": 30,
+        "auto_min": "10s",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${prometheus}"
+        },
+        "hide": 0,
+        "id": "00000000-0000-0000-0000-000000000000",
+        "includeAll": true,
+        "label": "Network device",
+        "multi": true,
+        "name": "nad",
+        "query": "label_values(ise3_radius_authentications_by_nad{instance=~\"$deployment\"}, nad)",
+        "skipUrlSync": false,
+        "type": "query"
+      },
+      {
+        "allValue": ".*",
+        "auto": false,
+        "auto_count": 30,
+        "auto_min": "10s",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${prometheus}"
+        },
+        "hide": 0,
+        "id": "00000000-0000-0000-0000-000000000000",
+        "includeAll": true,
+        "label": "Ops owner",
+        "multi": true,
+        "name": "ops_owner",
+        "query": "label_values(ise3_session_status_endpoints{instance=~\"$deployment\"}, ops_owner)",
+        "skipUrlSync": false,
+        "type": "query"
+      }
+    ]
+  },
+  "time": {
+    "from": "now-6h",
+    "to": "now"
+  },
+  "timezone": "browser",
+  "title": "ISE 3 \u2014 Access Troubleshooting",
+  "uid": "ise3-access"
+}

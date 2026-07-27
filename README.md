@@ -61,7 +61,7 @@ commented and is what CI plans against.
 | Section | What it decides |
 |---|---|
 | `profile` | `production` (~100k endpoints / 5k NADs) or `lab`; everything below overrides it |
-| `[scale]` | how many NADs / endpoints / sessions / accounts, so the plan is predictive for your estate |
+| `[scale]` | how many NADs / endpoints / sessions / Device Admin accounts and policy sets, so the plan is predictive for your estate |
 | `[targets]` | which ISE personas are reachable, and as whom |
 | `[budget]` | the ceiling per target — requests/hour for REST, duty cycle for Data Connect |
 | `[limits]` | what one statement, batch and snapshot may return; derived from `[scale]`, shown so it can be read |
@@ -78,9 +78,9 @@ and a value that is legal but unwise warns at start.
 
 | Plane | Datasets |
 |---|---|
-| PAN (ERS / OpenAPI) | `deployment`, `network_devices`, `certificates`, `licensing`, `backup`, `patches`, `tacacs_config` |
+| PAN (ERS / OpenAPI) | `deployment`, `network_devices`, `certificates`, `licensing`, `backup`, `patches`, `tacacs_config`, `tacacs_policy_rules` |
 | MnT | `active_sessions`, `session_authorization`, `posture_current` |
-| Data Connect | `endpoint_inventory`, `psn_performance`, `radius_reporting`, `radius_errors`, `posture_history`, `nad_health`, `tacacs_activity`, `source_freshness` |
+| Data Connect | `endpoint_inventory`, `profile_events`, `psn_performance`, `radius_reporting`, `radius_accounting`, `radius_errors`, `posture_history`, `nad_health`, `tacacs_activity`, `source_freshness` |
 | pxGrid | `endpoint_attributes` (declared, not yet built) |
 
 Metrics are prefixed `ise3_`. `provider` is a label on the data itself, because
@@ -116,6 +116,12 @@ shell entry points.
 pip install -e '.[dashboards]'
 python tools/build_dashboards3.py --out dashboards3
 ```
+
+The generated set includes the eight v2 operator workflows—overview, access,
+endpoints and NADs, exporter health, PAN/MnT, PSN, Secure Client/posture, and
+TACACS—plus v3's provider-source and declared-versus-measured-load dashboards.
+Every workflow is deployment-aware and contract-tested against the metric
+registry; see `dashboards3/README.md` for the capability map.
 
 ## Simulating production scale
 

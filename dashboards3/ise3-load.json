@@ -1,9 +1,25 @@
 {
   "annotations": {},
-  "description": "Planned load comes from each provider's declared cost; measured load is counted as requests actually leave. Drift between them means a cost declaration is wrong \u2014 the one defect this design cannot catch by construction.",
+  "description": "Planned load from provider declarations beside measured requests and database time, target ceilings, enforced pacing, and scheduler queues.",
   "editable": true,
   "fiscalYearStartMonth": 0,
   "graphTooltip": 1,
+  "links": [
+    {
+      "asDropdown": true,
+      "icon": "",
+      "includeVars": true,
+      "keepTime": true,
+      "tags": [
+        "ise-exporter3"
+      ],
+      "targetBlank": false,
+      "title": "ISE Exporter 3 dashboards",
+      "tooltip": "",
+      "type": "dashboards",
+      "url": ""
+    }
+  ],
   "panels": [
     {
       "collapsed": false,
@@ -23,7 +39,7 @@
         "type": "prometheus",
         "uid": "${prometheus}"
       },
-      "description": "Planned load as a fraction of the declared ceiling, per target. Above 1 means the exporter refuses to start unless enforce_budget is off.",
+      "description": "Planned load as a fraction of each declared target ceiling; above one is over budget.",
       "fieldConfig": {
         "defaults": {
           "unit": "percentunit"
@@ -40,7 +56,7 @@
       "repeatDirection": "h",
       "targets": [
         {
-          "expr": "ise3_load_budget_utilisation",
+          "expr": "ise3_load_budget_utilisation{instance=~\"$deployment\"}",
           "instant": true,
           "legendFormat": "{{target}}",
           "range": false,
@@ -57,7 +73,7 @@
         "type": "prometheus",
         "uid": "${prometheus}"
       },
-      "description": "Two lines per target. They should track. A measured line above planned means a provider costs more than it declares; below means the exporter is being throttled short of its cadence.",
+      "description": "Declared request cost beside the measured rate actually leaving the exporter.",
       "fieldConfig": {
         "defaults": {
           "custom": {
@@ -68,7 +84,7 @@
         "overrides": []
       },
       "gridPos": {
-        "h": 9,
+        "h": 8,
         "w": 12,
         "x": 0,
         "y": 6
@@ -91,14 +107,14 @@
       "repeatDirection": "h",
       "targets": [
         {
-          "expr": "ise3_load_planned_requests_per_hour",
+          "expr": "ise3_load_planned_requests_per_hour{instance=~\"$deployment\"}",
           "instant": false,
           "legendFormat": "{{target}} planned",
           "range": true,
           "refId": "A"
         },
         {
-          "expr": "rate(ise3_load_measured_requests_total[15m]) * 3600",
+          "expr": "rate(ise3_load_measured_requests_total{instance=~\"$deployment\"}[15m]) * 3600",
           "instant": false,
           "legendFormat": "{{target}} measured",
           "range": true,
@@ -115,7 +131,7 @@
         "type": "prometheus",
         "uid": "${prometheus}"
       },
-      "description": "The declared budget. Zero means no ceiling was declared, which the exporter warns about at startup.",
+      "description": "Configured request ceiling beside the rate currently enforced by the token bucket.",
       "fieldConfig": {
         "defaults": {
           "custom": {
@@ -126,7 +142,7 @@
         "overrides": []
       },
       "gridPos": {
-        "h": 9,
+        "h": 8,
         "w": 12,
         "x": 12,
         "y": 6
@@ -149,14 +165,21 @@
       "repeatDirection": "h",
       "targets": [
         {
-          "expr": "ise3_load_budget_requests_per_hour",
+          "expr": "ise3_load_budget_requests_per_hour{instance=~\"$deployment\"}",
           "instant": false,
-          "legendFormat": "{{target}} budget",
+          "legendFormat": "{{target}} ceiling",
           "range": true,
           "refId": "A"
+        },
+        {
+          "expr": "ise3_budget_enforced_requests_per_hour{instance=~\"$deployment\"}",
+          "instant": false,
+          "legendFormat": "{{target}} enforced",
+          "range": true,
+          "refId": "B"
         }
       ],
-      "title": "Request ceiling per target",
+      "title": "Request ceiling and enforcement",
       "transformations": [],
       "transparent": false,
       "type": "timeseries"
@@ -167,7 +190,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 15
+        "y": 14
       },
       "id": 0,
       "panels": [],
@@ -179,7 +202,7 @@
         "type": "prometheus",
         "uid": "${prometheus}"
       },
-      "description": "The share of wall-clock time spent inside an Oracle statement. This is the one budget expressed in time rather than requests, and the adaptive cooldown is what enforces it.",
+      "description": "Planned wall-clock share in Oracle beside measured statement time and the enforced ceiling.",
       "fieldConfig": {
         "defaults": {
           "custom": {
@@ -190,10 +213,10 @@
         "overrides": []
       },
       "gridPos": {
-        "h": 9,
+        "h": 8,
         "w": 12,
         "x": 0,
-        "y": 16
+        "y": 15
       },
       "options": {
         "legend": {
@@ -213,21 +236,21 @@
       "repeatDirection": "h",
       "targets": [
         {
-          "expr": "ise3_load_planned_duty_cycle_percent{target='oracle'}",
+          "expr": "ise3_load_planned_duty_cycle_percent{instance=~\"$deployment\",target=\"oracle\"}",
           "instant": false,
           "legendFormat": "planned",
           "range": true,
           "refId": "A"
         },
         {
-          "expr": "rate(ise3_load_measured_db_seconds_total{target='oracle'}[15m]) * 100",
+          "expr": "rate(ise3_load_measured_db_seconds_total{instance=~\"$deployment\",target=\"oracle\"}[15m]) * 100",
           "instant": false,
           "legendFormat": "measured",
           "range": true,
           "refId": "B"
         },
         {
-          "expr": "ise3_dataconnect_effective_duty_cycle_percent",
+          "expr": "ise3_dataconnect_effective_duty_cycle_percent{instance=~\"$deployment\"}",
           "instant": false,
           "legendFormat": "ceiling",
           "range": true,
@@ -244,7 +267,7 @@
         "type": "prometheus",
         "uid": "${prometheus}"
       },
-      "description": "After each statement every Data Connect dataset waits this long. At a low duty cycle one slow statement can freeze reporting for far longer than any configured cadence \u2014 which is what made v2's cadences fictional at scale.",
+      "description": "Global wait after each statement, which is how the configured duty-cycle budget is enforced.",
       "fieldConfig": {
         "defaults": {
           "custom": {
@@ -255,10 +278,10 @@
         "overrides": []
       },
       "gridPos": {
-        "h": 9,
+        "h": 8,
         "w": 12,
         "x": 12,
-        "y": 16
+        "y": 15
       },
       "options": {
         "legend": {
@@ -278,14 +301,14 @@
       "repeatDirection": "h",
       "targets": [
         {
-          "expr": "ise3_dataconnect_query_cooldown_seconds",
+          "expr": "ise3_dataconnect_query_cooldown_seconds{instance=~\"$deployment\"}",
           "instant": false,
           "legendFormat": "{{view}}",
           "range": true,
           "refId": "A"
         }
       ],
-      "title": "Cooldown imposed on all reporting datasets",
+      "title": "Cooldown imposed on reporting datasets",
       "transformations": [],
       "transparent": false,
       "type": "timeseries"
@@ -296,11 +319,11 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 25
+        "y": 23
       },
       "id": 0,
       "panels": [],
-      "title": "Statement cost",
+      "title": "Statement cost and scheduler",
       "type": "row"
     },
     {
@@ -308,7 +331,7 @@
         "type": "prometheus",
         "uid": "${prometheus}"
       },
-      "description": "What each reporting view actually costs Oracle. This is the input to the cooldown, so a view that slows down throttles every other reporting dataset with it.",
+      "description": "Latest successful statement duration for every reporting view.",
       "fieldConfig": {
         "defaults": {
           "custom": {
@@ -322,7 +345,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 26
+        "y": 24
       },
       "options": {
         "legend": {
@@ -342,7 +365,7 @@
       "repeatDirection": "h",
       "targets": [
         {
-          "expr": "ise3_dataconnect_query_last_duration_seconds{result='success'}",
+          "expr": "ise3_dataconnect_query_last_duration_seconds{instance=~\"$deployment\",result=\"success\"}",
           "instant": false,
           "legendFormat": "{{view}}",
           "range": true,
@@ -359,7 +382,7 @@
         "type": "prometheus",
         "uid": "${prometheus}"
       },
-      "description": "Aggregation happens in the database. A view trending toward the 6000-row statement ceiling is returning rows, not aggregates.",
+      "description": "Rows returned by each reporting statement after database-side aggregation.",
       "fieldConfig": {
         "defaults": {
           "custom": {
@@ -373,7 +396,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 26
+        "y": 24
       },
       "options": {
         "legend": {
@@ -393,7 +416,7 @@
       "repeatDirection": "h",
       "targets": [
         {
-          "expr": "ise3_dataconnect_query_rows",
+          "expr": "ise3_dataconnect_query_rows{instance=~\"$deployment\"}",
           "instant": false,
           "legendFormat": "{{view}}",
           "range": true,
@@ -406,24 +429,11 @@
       "type": "timeseries"
     },
     {
-      "collapsed": false,
-      "gridPos": {
-        "h": 1,
-        "w": 24,
-        "x": 0,
-        "y": 34
-      },
-      "id": 0,
-      "panels": [],
-      "title": "Scheduler",
-      "type": "row"
-    },
-    {
       "datasource": {
         "type": "prometheus",
         "uid": "${prometheus}"
       },
-      "description": "Datasets waiting on a target's lane. Sustained depth means collection is slower than the configured cadence.",
+      "description": "Datasets waiting on each serialized target lane; sustained depth means cadence is not achievable.",
       "fieldConfig": {
         "defaults": {
           "custom": {
@@ -437,7 +447,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 35
+        "y": 32
       },
       "options": {
         "legend": {
@@ -457,7 +467,7 @@
       "repeatDirection": "h",
       "targets": [
         {
-          "expr": "ise3_lane_queue_depth",
+          "expr": "ise3_lane_queue_depth{instance=~\"$deployment\"}",
           "instant": false,
           "legendFormat": "{{target}}",
           "range": true,
@@ -474,7 +484,7 @@
         "type": "prometheus",
         "uid": "${prometheus}"
       },
-      "description": "How long each dataset takes, labelled by the source that produced it.",
+      "description": "Latest collection duration by dataset and active provider.",
       "fieldConfig": {
         "defaults": {
           "custom": {
@@ -488,7 +498,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 35
+        "y": 32
       },
       "options": {
         "legend": {
@@ -508,9 +518,9 @@
       "repeatDirection": "h",
       "targets": [
         {
-          "expr": "ise3_dataset_collection_duration_seconds",
+          "expr": "ise3_dataset_collection_duration_seconds{instance=~\"$deployment\"}",
           "instant": false,
-          "legendFormat": "{{dataset}} / {{provider}}",
+          "legendFormat": "{{dataset}} \u00b7 {{provider}}",
           "range": true,
           "refId": "A"
         }
@@ -543,6 +553,25 @@
         "query": "prometheus",
         "skipUrlSync": false,
         "type": "datasource"
+      },
+      {
+        "allValue": ".*",
+        "auto": false,
+        "auto_count": 30,
+        "auto_min": "10s",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${prometheus}"
+        },
+        "hide": 0,
+        "id": "00000000-0000-0000-0000-000000000000",
+        "includeAll": true,
+        "label": "Deployment",
+        "multi": true,
+        "name": "deployment",
+        "query": "label_values(ise3_dataset_enabled, instance)",
+        "skipUrlSync": false,
+        "type": "query"
       }
     ]
   },
@@ -551,6 +580,6 @@
     "to": "now"
   },
   "timezone": "browser",
-  "title": "ISE Exporter 3 \u2014 Load and budget",
+  "title": "ISE Exporter 3 \u2014 Load and Budget",
   "uid": "ise3-load"
 }

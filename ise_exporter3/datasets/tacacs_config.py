@@ -41,9 +41,13 @@ account_hygiene = Gauge(
     ["provider", "username", "risk"])
 policy_sets = Gauge(
     "ise3_tacacs_policy_sets", "Device Admin policy sets", ["provider"])
+policy_objects = Gauge(
+    "ise3_tacacs_policy_objects",
+    "Configured Device Administration objects by type",
+    ["provider", "object_type"])
 
 _METRICS = (accounts_total, accounts_classified, account_enabled,
-            account_hygiene, policy_sets)
+            account_hygiene, policy_sets, policy_objects)
 
 
 def hygiene_risks(detail):
@@ -125,6 +129,23 @@ def fetch(ctx):
         "/policy/device-admin/policy-set", api="pan_policy_sets")
     if isinstance(sets, list):
         ctx.set(policy_sets, len(sets))
+        ctx.set(policy_objects, len(sets), object_type="policy_sets")
+
+    for object_type, path, api in (
+        (
+            "command_sets",
+            "/policy/device-admin/command-sets",
+            "pan_command_sets",
+        ),
+        (
+            "shell_profiles",
+            "/policy/device-admin/shell-profiles",
+            "pan_shell_profiles",
+        ),
+    ):
+        objects = ctx.transport.get_openapi(path, api=api)
+        if isinstance(objects, list):
+            ctx.set(policy_objects, len(objects), object_type=object_type)
 
 
 DATASET = Dataset(
@@ -140,7 +161,8 @@ DATASET = Dataset(
             cost=Cost(target="pan", requests=25, scales_with="accounts",
                       warmup_requests=WARMUP_FETCHES_PER_CYCLE,
                       churn_fraction=0.0005),
-            supplies=frozenset({"account", "policy_set", "rule_count", "hygiene"}),
+            supplies=frozenset({
+                "account", "policy_set", "policy_object", "rule_count", "hygiene"}),
             coverage="converging",
             fetch=fetch,
         ),

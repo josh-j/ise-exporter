@@ -23,7 +23,9 @@ TARGETS = ("pan", "mnt", "oracle", "pxgrid")
 # Fleet dimensions a cost may scale with. Declared once in config's [scale] so a
 # plan is predictive for the deployment it will actually run against, rather than
 # for whatever size the author had in mind.
-SCALE_DIMENSIONS = ("nads", "endpoints", "sessions", "accounts")
+SCALE_DIMENSIONS = (
+    "nads", "endpoints", "sessions", "accounts", "policy_sets",
+)
 
 
 class ModelError(ValueError):
@@ -54,6 +56,9 @@ class Scale:
     # the TACACS configuration sweep and a wrong dimension there made that cache
     # believe it needed fifty cycles to warm when it needs ten.
     accounts: int = 200
+    # Device Administration policy sets. Rule inventory needs two OpenAPI reads
+    # per set, so this remains separate from internal accounts in the load model.
+    policy_sets: int = 100
 
     def __post_init__(self):
         for dimension in SCALE_DIMENSIONS:
@@ -135,6 +140,10 @@ class Cost:
     #                     per cycle at the dataset's own cadence
     warmup_requests: float = 0.0
     churn_fraction: float = 0.0
+    # Most detail caches need one request per entity. Device Admin policy-rule
+    # coverage needs two (authentication and authorization), and pretending it
+    # needs one makes both warm-up time and steady churn optimistic.
+    requests_per_entity: float = 1.0
 
     def __post_init__(self):
         if self.target not in TARGETS:
@@ -152,6 +161,11 @@ class Cost:
         if scaled and not self.scales_with:
             raise ModelError(
                 "cost declares a per-1k component without scales_with")
+        if self.requests_per_entity <= 0:
+            raise ModelError("cost requests_per_entity must be positive")
+        if self.requests_per_entity != 1.0 and not self.scales_with:
+            raise ModelError(
+                "cost requests_per_entity requires scales_with")
         if self.db_seconds and self.target != "oracle":
             raise ModelError(
                 f"only the oracle target has db_seconds, not {self.target!r}")
@@ -187,7 +201,10 @@ class Cost:
         """
         if self.converges:
             units = scale.units_of(self.scales_with) * 1000.0
-            return self._fixed_requests_for(scale) + units * self.churn_fraction
+            return (
+                self._fixed_requests_for(scale)
+                + units * self.churn_fraction * self.requests_per_entity
+            )
         return self._fixed_requests_for(scale)
 
     def warmup_requests_for(self, scale: Scale) -> float:
@@ -201,15 +218,26 @@ class Cost:
         """
         if not self.converges:
             return self.requests_for(scale)
-        units = scale.units_of(self.scales_with) * 1000.0
-        return self._fixed_requests_for(scale) + min(self.warmup_requests, units)
+        requests = (
+            scale.units_of(self.scales_with)
+            * 1000.0
+            * self.requests_per_entity
+        )
+        return (
+            self._fixed_requests_for(scale)
+            + min(self.warmup_requests, requests)
+        )
 
     def cycles_to_warm(self, scale: Scale) -> int:
         """Collections needed before coverage reaches the whole active set."""
         if not self.converges or self.warmup_requests <= 0:
             return 0
-        units = scale.units_of(self.scales_with) * 1000.0
-        return max(1, math.ceil(units / self.warmup_requests))
+        requests = (
+            scale.units_of(self.scales_with)
+            * 1000.0
+            * self.requests_per_entity
+        )
+        return max(1, math.ceil(requests / self.warmup_requests))
 
     def db_seconds_for(self, scale: Scale) -> float:
         return self.db_seconds + self.db_seconds_per_1k * scale.units_of(self.scales_with)

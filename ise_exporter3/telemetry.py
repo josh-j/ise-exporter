@@ -16,6 +16,15 @@ from prometheus_client import Counter, Gauge, Histogram
 exporter_build_info = Gauge(
     "ise3_exporter_build_info", "Exporter version and compatibility target",
     ["version", "target_ise_release"])
+dataconnect_schema_view_available = Gauge(
+    "ise3_dataconnect_schema_view_available",
+    "Expected Data Connect reporting view is visible to the configured account",
+    ["view"])
+dataconnect_schema_column_available = Gauge(
+    "ise3_dataconnect_schema_column_available",
+    "Expected Data Connect column is visible; requirement distinguishes core "
+    "from optional dashboard capability",
+    ["view", "column", "requirement"])
 
 # --- dataset health ---
 dataset_enabled = Gauge(

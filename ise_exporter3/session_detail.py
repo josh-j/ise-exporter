@@ -41,6 +41,14 @@ _POSTURE_STATUS_FIELDS = (
 _POSTURE_REPORT_FIELDS = ("posture_report", "PostureReport")
 _AGENT_FIELDS = ("posture_agent_version", "PostureAgentVersion", "agent_version")
 _OS_FIELDS = ("operating_system", "os_type", "endpoint_operating_system")
+_EXECUTION_STEP_FIELDS = ("execution_steps", "ExecutionSteps", "Steps")
+_STEP_LATENCY_FIELDS = ("step_latency", "StepLatency")
+_TOTAL_LATENCY_FIELDS = (
+    "total_authen_latency",
+    "TotalAuthenLatency",
+    "total_authentication_latency",
+    "TotalAuthenticationLatency",
+)
 
 # Parsed out of other_attr_string rather than read from a column of their own.
 POLICY_SET_ATTRIBUTE = "ISEPolicySetName"
@@ -99,4 +107,7 @@ def project(record):
         "posture_report": first(record, _POSTURE_REPORT_FIELDS),
         "agent_version": first(record, _AGENT_FIELDS),
         "operating_system": first(record, _OS_FIELDS),
+        "execution_steps": first(record, _EXECUTION_STEP_FIELDS),
+        "step_latency": first(record, _STEP_LATENCY_FIELDS),
+        "total_authentication_latency": first(record, _TOTAL_LATENCY_FIELDS),
     }

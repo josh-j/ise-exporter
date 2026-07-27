@@ -31,6 +31,7 @@ enforce_budget = true
 [scale]
 nads = 5000
 accounts = 1000
+policy_sets = 100
 endpoints = 100000
 sessions = 20000
 
@@ -111,8 +112,9 @@ pxgrid.requests_per_hour = 200
 # Oracle takes no warm-up burst: it is budgeted as a duty cycle, and no Data
 # Connect provider caches per-entity detail. Declaring one is a config error.
 # Oracle is budgeted as a duty cycle: the share of wall-clock time the exporter
-# may keep a Data Connect statement running. 2% is the large-estate default.
-oracle.duty_cycle_percent = 2.0
+# may keep a Data Connect statement running. The complete dashboard-parity set
+# declares ~2.64% at production scale, so 3% is the large-estate default.
+oracle.duty_cycle_percent = 3.0
 
 # ---------------------------------------------------------------------------
 # Limits: what one statement, one batch and one snapshot may return.
@@ -185,7 +187,18 @@ interval = "6h"
 providers = ["dataconnect", "ers"]
 interval = "6h"
 
+[datasets.profile_events]
+# Historical profiling source/action changes, distinct from the current endpoint
+# inventory snapshot above.
+interval = "6h"
+
 [datasets.radius_reporting]
+interval = "30m"
+
+[datasets.radius_accounting]
+# Accounting is event history, not the current-session directory. It supplies
+# start/stop volume, per-NAD and per-PSN accounting, and completed-session
+# duration without changing what `active_sessions` means.
 interval = "30m"
 
 [datasets.nad_health]
@@ -193,7 +206,11 @@ interval = "6h"
 
 # The two settings below are what `plan` talked us out of. At the tempting
 # psn_performance = "5m" and source_freshness = "30m", the oracle target lands at
-# 2.44% duty against a 2.0% ceiling -- psn_performance alone is 1.0% of it. That
+# 2.44% duty against the old 2.0% ceiling -- psn_performance alone is 1.0% of it.
+# The shipped 3.0% ceiling now also honestly funds converging policy-rule
+# inventory without weakening those operational cadences. This example retains
+# the original explanation because it documents why the tempting values below
+# are still rejected.
 # is the v2 failure mode in miniature: cadences that read as operational in the
 # config but are throttled to fiction at runtime. Slowing the PSN rollup to 10m
 # and demoting the freshness probe to 6h brings the plan to ~1.7% and makes every
@@ -227,6 +244,8 @@ top_devices = 200
 # Example of turning something off: TACACS costs a large ERS walk plus a
 # reporting scan, and is dead weight if Device Administration is not in use.
 # [datasets.tacacs_config]
+# enabled = false
+# [datasets.tacacs_policy_rules]
 # enabled = false
 # [datasets.tacacs_activity]
 # enabled = false

@@ -87,6 +87,68 @@ _VIEWS = (
     "system_summary", "endpoints_data",
 )
 
+# Runtime schema visibility for every optional capability a dashboard can lose
+# without making its whole dataset unusable. Keeping this bounded expected set
+# avoids exporting arbitrary catalogue contents as Prometheus labels.
+SCHEMA_COLUMN_CONTRACTS = {
+    "KEY_PERFORMANCE_METRICS": {
+        "required": ("ISE_NODE", "LOGGED_TIME"),
+        "optional": (
+            "RADIUS_REQUESTS_HR", "LOGGED_TO_MNT_HR", "NOISE_HR",
+            "SUPPRESSION_HR", "AVG_LOAD", "AVG_LATENCY_PER_REQ", "AVG_TPS",
+        ),
+    },
+    "SYSTEM_SUMMARY": {
+        "required": ("ISE_NODE", "TIMESTAMP"),
+        "optional": (
+            "CPU_UTILIZATION", "MEMORY_UTILIZATION", "DISKSPACE_ROOT",
+            "DISKSPACE_BOOT", "DISKSPACE_OPT", "DISKSPACE_TMP",
+        ),
+    },
+    "AAA_DIAGNOSTICS_VIEW": {
+        "required": ("ISE_NODE", "TIMESTAMP"),
+        "optional": ("MESSAGE_SEVERITY", "CATEGORY", "MESSAGE_CODE"),
+    },
+    "SYSTEM_DIAGNOSTICS_VIEW": {
+        "required": ("ISE_NODE", "TIMESTAMP"),
+        "optional": ("MESSAGE_SEVERITY", "CATEGORY", "MESSAGE_CODE"),
+    },
+    "RADIUS_ACCOUNTING": {
+        "required": ("TIMESTAMP",),
+        "optional": (
+            "ACCT_STATUS_TYPE", "ACCT_SESSION_TIME", "DEVICE_NAME", "ISE_NODE",
+            "AUTHORIZATION_POLICY",
+        ),
+    },
+    "RADIUS_AUTHENTICATION_SUMMARY": {
+        "required": ("TIMESTAMP", "PASSED_COUNT", "FAILED_COUNT"),
+        "optional": (
+            "CALLING_STATION_ID", "FAILURE_REASON", "AUTHORIZATION_PROFILES",
+            "LOCATION", "IDENTITY_STORE", "IDENTITY_GROUP", "DEVICE_TYPE",
+            "SECURITY_GROUP",
+        ),
+    },
+    "RADIUS_AUTHENTICATIONS": {
+        "required": ("TIMESTAMP",),
+        "optional": (
+            "FAILED", "DEVICE_NAME", "AUTHENTICATION_METHOD",
+            "AUTHENTICATION_PROTOCOL", "AUTHORIZATION_RULE", "ISE_NODE",
+            "RESPONSE_TIME",
+        ),
+    },
+    "PROFILED_ENDPOINTS_SUMMARY": {
+        "required": ("TIMESTAMP",),
+        "optional": ("SOURCE", "ENDPOINT_ACTION_NAME"),
+    },
+    "TACACS_AUTHORIZATION_LAST_TWO_DAYS": {
+        "required": ("EPOCH_TIME",),
+        "optional": (
+            "USERNAME", "DEVICE_NAME", "STATUS", "AUTHORIZATION_POLICY",
+            "SHELL_PROFILE", "MATCHED_COMMAND_SET",
+        ),
+    },
+}
+
 _RETRYABLE_DISCONNECT = (
     "ORA-02399", "ORA-03113", "ORA-03114", "ORA-03135",
     "DPY-1001", "DPY-4010", "DPY-4011",
@@ -97,6 +159,22 @@ _AUTH_FAILURE = (
 )
 _AUTHORIZATION_FAILURE = ("ORA-00942", "ORA-01031")
 _CONNECTION_FAILURE = ("ORA-12170", "ORA-12514", "ORA-12541", "DPY-6005")
+
+
+def publish_schema_contract(schema):
+    """Expose bounded required/optional capability gaps from one catalogue."""
+    schema = schema or {}
+    for view, contract in SCHEMA_COLUMN_CONTRACTS.items():
+        columns = schema.get(view, set())
+        telemetry.dataconnect_schema_view_available.labels(view=view).set(
+            int(view in schema))
+        for requirement in ("required", "optional"):
+            for column in contract[requirement]:
+                telemetry.dataconnect_schema_column_available.labels(
+                    view=view,
+                    column=column,
+                    requirement=requirement,
+                ).set(int(column in columns))
 
 
 def view_of(sql):
@@ -628,6 +706,7 @@ class DataConnectTransport(Transport):
             if table and column:
                 schema.setdefault(table, set()).add(column)
         self._schema = schema
+        publish_schema_contract(schema)
         logger.info("discovered %d Data Connect reporting views", len(schema))
         return schema
 

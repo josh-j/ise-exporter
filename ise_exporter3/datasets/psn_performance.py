@@ -46,11 +46,21 @@ memory_percent = Gauge(
 disk_percent = Gauge(
     "ise3_node_disk_utilization_percent", "Node filesystem utilisation",
     ["provider", "node", "filesystem"])
+diagnostic_events = Gauge(
+    "ise3_psn_diagnostic_events",
+    "Bounded diagnostic work queue by source, node, severity, category, and "
+    "message code",
+    ["provider", "source", "node", "severity", "category", "message_code"])
+diagnostic_events_total = Gauge(
+    "ise3_psn_diagnostic_events_total",
+    "Diagnostic events in the reporting window by source",
+    ["provider", "source"])
 
 _METRICS = (
     radius_requests_per_hour, mnt_logs_per_hour, noise_per_hour,
     suppression_per_hour, load_percent, average_latency_seconds, average_tps,
-    cpu_percent, memory_percent, disk_percent,
+    cpu_percent, memory_percent, disk_percent, diagnostic_events,
+    diagnostic_events_total,
 )
 
 _KPI_COLUMNS = (
@@ -103,12 +113,52 @@ def _latest_per_node(view, time_column, columns, hours):
     """
 
 
+def _diagnostic_query(view, schema, hours, limits):
+    columns = None if schema is None else schema.get(view.upper())
+    if columns is not None and not {"ISE_NODE", "TIMESTAMP"} <= columns:
+        return None
+
+    def available(column):
+        return columns is None or column.upper() in columns
+
+    expressions = [("node", "NVL(ise_node, 'unknown')")]
+    for name, column in (
+        ("severity", "message_severity"),
+        ("category", "category"),
+        ("message_code", "message_code"),
+    ):
+        expressions.append((
+            name,
+            f"NVL(TO_CHAR({column}), 'unknown')"
+            if available(column)
+            else "'unknown'",
+        ))
+    selected = ", ".join(
+        f"{expression} AS {name}" for name, expression in expressions)
+    grouped = ", ".join(
+        expression for _name, expression in expressions
+        if expression != "'unknown'")
+    recent = reporting.recent("timestamp", hours, limits)
+    return f"""
+        SELECT grouped.*, SUM(events) OVER () AS total_events,
+               COUNT(*) OVER () AS group_total
+        FROM (
+            SELECT {selected}, COUNT(*) AS events
+            FROM {view}
+            WHERE {recent}
+            GROUP BY {grouped}
+        ) grouped
+        ORDER BY events DESC, node, severity, category, message_code
+        FETCH FIRST {reporting.group_limit(limits)} ROWS ONLY
+    """
+
+
 def statements(limits, schema=None, hours=0):
     # The same window ceiling every reporting statement scans under, rather than
     # a second copy of the number here.
     hours = reporting.window_hours(
         (hours or limits.window_hours) * 3600, limits)
-    return {
+    result = {
         "kpi": _latest_per_node(
             "key_performance_metrics", "logged_time",
             _available(schema, "KEY_PERFORMANCE_METRICS", ("ise_node",), _KPI_COLUMNS),
@@ -118,6 +168,15 @@ def statements(limits, schema=None, hours=0):
             _available(schema, "SYSTEM_SUMMARY", ("ise_node",), _SYSTEM_COLUMNS),
             hours),
     }
+    for name, view in (
+        ("aaa_diagnostics", "aaa_diagnostics_view"),
+        ("system_diagnostics", "system_diagnostics_view"),
+    ):
+        if schema is None or view.upper() in schema:
+            statement = _diagnostic_query(view, schema, hours, limits)
+            if statement is not None:
+                result[name] = statement
+    return result
 
 
 def fetch(ctx):
@@ -141,6 +200,31 @@ def fetch(ctx):
                 ctx.set(disk_percent, finite(row[column]),
                         node=node, filesystem=filesystem)
 
+    for key, source in (
+        ("aaa_diagnostics", "aaa"),
+        ("system_diagnostics", "system"),
+    ):
+        rows = results.get(key, [])
+        if key not in results:
+            continue
+        reporting.publish_truncation(ctx, key, rows)
+        if rows:
+            ctx.set(
+                diagnostic_events_total,
+                finite(rows[0].get("total_events")),
+                source=source,
+            )
+        for row in rows:
+            ctx.set(
+                diagnostic_events,
+                finite(row.get("events")),
+                source=source,
+                node=label(row.get("node")),
+                severity=label(row.get("severity")),
+                category=label(row.get("category")),
+                message_code=label(row.get("message_code")),
+            )
+
 
 DATASET = Dataset(
     name="psn_performance",
@@ -150,9 +234,11 @@ DATASET = Dataset(
     providers=(
         Provider(
             name="dataconnect",
-            # Two short statements in one batch under a single lease.
-            cost=Cost(target="oracle", db_seconds=3.0),
-            supplies=frozenset({"psn", "tps", "latency", "load", "resources"}),
+            # Two latest-row statements plus the diagnostic views this schema
+            # exposes, in one batch under a single lease.
+            cost=Cost(target="oracle", db_seconds=5.0),
+            supplies=frozenset({
+                "psn", "tps", "latency", "load", "resources", "diagnostics"}),
             requires=("view:KEY_PERFORMANCE_METRICS", "view:SYSTEM_SUMMARY"),
             fetch=fetch,
         ),

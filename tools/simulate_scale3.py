@@ -58,6 +58,7 @@ def parse_arguments(argv=None):
     parser.add_argument("--endpoints", type=int, default=100_000)
     parser.add_argument("--sessions", type=int, default=20_000)
     parser.add_argument("--accounts", type=int, default=1000)
+    parser.add_argument("--policy-sets", type=int, default=100)
     parser.add_argument("--churn-per-hour", type=float, default=0.12,
                         help="fraction of the active set that turns over each "
                              "hour (default 0.12, the 1%%-per-5-minutes the cost "
@@ -122,6 +123,33 @@ def declared_views():
     views.setdefault("SYSTEM_SUMMARY", set()).update(
         {"ISE_NODE", "TIMESTAMP",
          *(name.upper() for name in psn_performance._SYSTEM_COLUMNS)})
+    for view in ("AAA_DIAGNOSTICS_VIEW", "SYSTEM_DIAGNOSTICS_VIEW"):
+        views.setdefault(view, set()).update({
+            "ISE_NODE", "TIMESTAMP", "MESSAGE_SEVERITY", "CATEGORY",
+            "MESSAGE_CODE",
+        })
+    views.setdefault("RADIUS_ACCOUNTING", set()).update({
+        "TIMESTAMP", "ACCT_STATUS_TYPE", "ACCT_SESSION_TIME", "DEVICE_NAME",
+        "ISE_NODE", "AUTHORIZATION_POLICY",
+    })
+    views.setdefault("RADIUS_AUTHENTICATION_SUMMARY", set()).update({
+        "TIMESTAMP", "PASSED_COUNT", "FAILED_COUNT", "CALLING_STATION_ID",
+        "FAILURE_REASON", "AUTHORIZATION_PROFILES", "LOCATION",
+        "IDENTITY_STORE", "IDENTITY_GROUP", "DEVICE_TYPE", "SECURITY_GROUP",
+        "DEVICE_NAME", "ISE_NODE",
+    })
+    views.setdefault("RADIUS_AUTHENTICATIONS", set()).update({
+        "TIMESTAMP", "FAILED", "DEVICE_NAME", "AUTHENTICATION_METHOD",
+        "AUTHENTICATION_PROTOCOL", "AUTHORIZATION_RULE", "ISE_NODE",
+        "RESPONSE_TIME",
+    })
+    views.setdefault("PROFILED_ENDPOINTS_SUMMARY", set()).update({
+        "TIMESTAMP", "SOURCE", "ENDPOINT_ACTION_NAME",
+    })
+    views.setdefault("TACACS_AUTHORIZATION_LAST_TWO_DAYS", set()).update({
+        "EPOCH_TIME", "USERNAME", "DEVICE_NAME", "STATUS",
+        "AUTHORIZATION_POLICY", "SHELL_PROFILE", "MATCHED_COMMAND_SET",
+    })
     return views
 
 
@@ -216,7 +244,8 @@ def run_simulation(arguments):
         logging.WARNING if arguments.verbose else logging.ERROR)
 
     scale = {"nads": arguments.nads, "endpoints": arguments.endpoints,
-             "sessions": arguments.sessions, "accounts": arguments.accounts}
+             "sessions": arguments.sessions, "accounts": arguments.accounts,
+             "policy_sets": arguments.policy_sets}
 
     import tempfile
     workspace = tempfile.TemporaryDirectory(prefix="ise3-scale-")
@@ -224,11 +253,13 @@ def run_simulation(arguments):
 
     print(f"building a synthetic estate: {arguments.nads:,} NADs, "
           f"{arguments.endpoints:,} endpoints, {arguments.sessions:,} sessions, "
-          f"{arguments.accounts:,} accounts", file=sys.stderr)
+          f"{arguments.accounts:,} accounts, "
+          f"{arguments.policy_sets:,} policy sets", file=sys.stderr)
     build_started = time.perf_counter()
     clock = VirtualClock()
     estate = Estate(nads=arguments.nads, endpoints=arguments.endpoints,
                     sessions=arguments.sessions, accounts=arguments.accounts,
+                    policy_sets=arguments.policy_sets,
                     churn_per_hour=arguments.churn_per_hour, clock=clock)
     estate_seconds = time.perf_counter() - build_started
     estate_rss = rss_mib() - baseline_rss
@@ -455,6 +486,7 @@ def measure(arguments, config, plan, estate, clock, appliance, oracle, recorder,
     return {
         "scale": {"nads": arguments.nads, "endpoints": arguments.endpoints,
                   "sessions": arguments.sessions, "accounts": arguments.accounts,
+                  "policy_sets": arguments.policy_sets,
                   "psns": len(estate.psns), "profile": config.profile},
         "run": {
             "simulated_hours": hours,

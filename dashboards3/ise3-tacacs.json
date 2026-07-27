@@ -1,0 +1,1297 @@
+{
+  "annotations": {},
+  "description": "Internal account hygiene, policy-set inventory, authentication, authorization, commands, operational-owner rollups, and bounded-device coverage.",
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "links": [
+    {
+      "asDropdown": true,
+      "icon": "",
+      "includeVars": true,
+      "keepTime": true,
+      "tags": [
+        "ise-exporter3"
+      ],
+      "targetBlank": false,
+      "title": "ISE Exporter 3 dashboards",
+      "tooltip": "",
+      "type": "dashboards",
+      "url": ""
+    }
+  ],
+  "panels": [
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "id": 0,
+      "panels": [],
+      "title": "Configuration and account health",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${prometheus}"
+      },
+      "description": "Freshness of TACACS configuration and historical activity datasets used by this workflow.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 8,
+        "x": 0,
+        "y": 1
+      },
+      "options": null,
+      "repeatDirection": "h",
+      "targets": [
+        {
+          "expr": "((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"tacacs_config\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"tacacs_config\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"tacacs_config\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"tacacs_config\"} == 1))) == 1)",
+          "instant": true,
+          "legendFormat": "configuration",
+          "range": false,
+          "refId": "A"
+        },
+        {
+          "expr": "((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"tacacs_activity\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"tacacs_activity\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"tacacs_activity\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"tacacs_activity\"} == 1))) == 1)",
+          "instant": true,
+          "legendFormat": "activity",
+          "range": false,
+          "refId": "B"
+        },
+        {
+          "expr": "((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"tacacs_policy_rules\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"tacacs_policy_rules\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"tacacs_policy_rules\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"tacacs_policy_rules\"} == 1))) == 1)",
+          "instant": true,
+          "legendFormat": "policy rules",
+          "range": false,
+          "refId": "C"
+        }
+      ],
+      "title": "Dataset readiness",
+      "transformations": [],
+      "transparent": false,
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${prometheus}"
+      },
+      "description": "Seconds since the latest successful TACACS configuration and historical-activity collections.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 8,
+        "x": 8,
+        "y": 1
+      },
+      "options": null,
+      "repeatDirection": "h",
+      "targets": [
+        {
+          "expr": "time() - ise3_dataset_last_success_timestamp{instance=~\"$deployment\",dataset=\"tacacs_config\"}",
+          "instant": true,
+          "legendFormat": "configuration",
+          "range": false,
+          "refId": "A"
+        },
+        {
+          "expr": "time() - ise3_dataset_last_success_timestamp{instance=~\"$deployment\",dataset=\"tacacs_activity\"}",
+          "instant": true,
+          "legendFormat": "activity",
+          "range": false,
+          "refId": "B"
+        }
+      ],
+      "title": "Collection age",
+      "transformations": [],
+      "transparent": false,
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${prometheus}"
+      },
+      "description": "Configured internal Device Administration accounts beside those whose detail cache is classified.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 8,
+        "x": 16,
+        "y": 1
+      },
+      "options": null,
+      "repeatDirection": "h",
+      "targets": [
+        {
+          "expr": "ise3_tacacs_internal_accounts{instance=~\"$deployment\"}",
+          "instant": true,
+          "legendFormat": "accounts",
+          "range": false,
+          "refId": "A"
+        },
+        {
+          "expr": "ise3_tacacs_internal_accounts_classified{instance=~\"$deployment\"}",
+          "instant": true,
+          "legendFormat": "classified",
+          "range": false,
+          "refId": "B"
+        }
+      ],
+      "title": "Internal accounts",
+      "transformations": [],
+      "transparent": false,
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${prometheus}"
+      },
+      "description": "Configured Device Administration policy sets beside distinct accounts with reporting-window activity.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 8,
+        "x": 0,
+        "y": 6
+      },
+      "options": null,
+      "repeatDirection": "h",
+      "targets": [
+        {
+          "expr": "ise3_tacacs_policy_sets{instance=~\"$deployment\"}",
+          "instant": true,
+          "legendFormat": "policy sets",
+          "range": false,
+          "refId": "A"
+        },
+        {
+          "expr": "ise3_tacacs_active_accounts{instance=~\"$deployment\"}",
+          "instant": true,
+          "legendFormat": "active accounts",
+          "range": false,
+          "refId": "B"
+        }
+      ],
+      "title": "Policy sets and active accounts",
+      "transformations": [],
+      "transparent": false,
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${prometheus}"
+      },
+      "description": "Authentication, authorization, and command-accounting events retained by the activity reporting window.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 8,
+        "x": 8,
+        "y": 6
+      },
+      "options": null,
+      "repeatDirection": "h",
+      "targets": [
+        {
+          "expr": "sum(ise3_tacacs_authentications{instance=~\"$deployment\"})",
+          "instant": true,
+          "legendFormat": "authentications",
+          "range": false,
+          "refId": "A"
+        },
+        {
+          "expr": "sum(ise3_tacacs_authorizations{instance=~\"$deployment\"})",
+          "instant": true,
+          "legendFormat": "authorizations",
+          "range": false,
+          "refId": "B"
+        },
+        {
+          "expr": "sum(ise3_tacacs_commands{instance=~\"$deployment\"})",
+          "instant": true,
+          "legendFormat": "commands",
+          "range": false,
+          "refId": "C"
+        }
+      ],
+      "title": "Recent TACACS events",
+      "transformations": [],
+      "transparent": false,
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${prometheus}"
+      },
+      "description": "Complete configured policy-set, command-set, and shell-profile inventories from the PAN OpenAPI.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 16,
+        "y": 6
+      },
+      "options": {
+        "displayMode": "gradient",
+        "minVizHeight": 10,
+        "minVizWidth": 0,
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": []
+        },
+        "showUnfilled": true,
+        "valueMode": "color"
+      },
+      "repeatDirection": "h",
+      "targets": [
+        {
+          "expr": "sort_desc(ise3_tacacs_policy_objects{instance=~\"$deployment\"})",
+          "instant": true,
+          "legendFormat": "{{object_type}}",
+          "range": false,
+          "refId": "A"
+        },
+        {
+          "expr": "sort_desc(ise3_tacacs_policy_rules_total{instance=~\"$deployment\"})",
+          "instant": true,
+          "legendFormat": "{{rule_type}} rules",
+          "range": false,
+          "refId": "B"
+        }
+      ],
+      "title": "Configured Device Admin objects",
+      "transformations": [],
+      "transparent": false,
+      "type": "bargauge"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${prometheus}"
+      },
+      "description": "Authentication and authorization rule counts for each covered Device Administration policy set.",
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 14
+      },
+      "options": null,
+      "repeatDirection": "h",
+      "targets": [
+        {
+          "expr": "sort_desc(ise3_tacacs_policy_rule_count{instance=~\"$deployment\"})",
+          "instant": true,
+          "legendFormat": "{{policy_set}} \u00b7 {{rule_type}}",
+          "range": false,
+          "refId": "A"
+        }
+      ],
+      "title": "Policy rule inventory",
+      "transformations": [],
+      "transparent": false,
+      "type": "table"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${prometheus}"
+      },
+      "description": "Enabled state for each selected internal Device Administration account.",
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 14
+      },
+      "options": null,
+      "repeatDirection": "h",
+      "targets": [
+        {
+          "expr": "ise3_tacacs_internal_account_enabled{instance=~\"$deployment\",username=~\"$username\"}",
+          "instant": true,
+          "legendFormat": "{{username}}",
+          "range": false,
+          "refId": "A"
+        }
+      ],
+      "title": "Internal account inventory",
+      "transformations": [],
+      "transparent": false,
+      "type": "table"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${prometheus}"
+      },
+      "description": "Named hygiene risks for selected internal accounts; zero-valued risks remain visible for completeness.",
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 22
+      },
+      "options": null,
+      "repeatDirection": "h",
+      "targets": [
+        {
+          "expr": "ise3_tacacs_internal_account_hygiene_risk{instance=~\"$deployment\",username=~\"$username\"}",
+          "instant": true,
+          "legendFormat": "{{username}} \u00b7 {{risk}}",
+          "range": false,
+          "refId": "A"
+        }
+      ],
+      "title": "Account hygiene review queue",
+      "transformations": [],
+      "transparent": false,
+      "type": "table"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${prometheus}"
+      },
+      "description": "Enabled internal accounts absent from TACACS authentication activity in the retained reporting window.",
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 22
+      },
+      "options": null,
+      "repeatDirection": "h",
+      "targets": [
+        {
+          "expr": "ise3_tacacs_internal_account_enabled{instance=~\"$deployment\",username=~\"$username\"} == 1 unless on(instance,username) label_replace(ise3_tacacs_authentications{instance=~\"$deployment\",dimension=\"username\"}, \"username\", \"$1\", \"value\", \"(.*)\")",
+          "instant": true,
+          "legendFormat": "{{username}}",
+          "range": false,
+          "refId": "A"
+        }
+      ],
+      "title": "Enabled accounts without window activity",
+      "transformations": [],
+      "transparent": false,
+      "type": "table"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${prometheus}"
+      },
+      "description": "Seconds since the newest authentication, authorization, or command-accounting event for each selected account inside the retained reporting window.",
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 30
+      },
+      "options": null,
+      "repeatDirection": "h",
+      "targets": [
+        {
+          "expr": "time() - ise3_tacacs_account_last_seen_timestamp{instance=~\"$deployment\",username=~\"$username\"}",
+          "instant": true,
+          "legendFormat": "{{username}} \u00b7 {{event_type}}",
+          "range": false,
+          "refId": "A"
+        }
+      ],
+      "title": "Last TACACS evidence by account",
+      "transformations": [],
+      "transparent": false,
+      "type": "table"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${prometheus}"
+      },
+      "description": "Coverage, entries, and deferred work for internal account detail classification.",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "fillOpacity": 0
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 30
+      },
+      "options": {
+        "legend": {
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": false
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "asc"
+        }
+      },
+      "repeatDirection": "h",
+      "targets": [
+        {
+          "expr": "ise3_detail_cache_coverage{instance=~\"$deployment\",cache=\"ers_tacacs_user\"}",
+          "instant": false,
+          "legendFormat": "coverage",
+          "range": true,
+          "refId": "A"
+        },
+        {
+          "expr": "ise3_detail_cache_entries{instance=~\"$deployment\",cache=\"ers_tacacs_user\"}",
+          "instant": false,
+          "legendFormat": "entries",
+          "range": true,
+          "refId": "B"
+        },
+        {
+          "expr": "ise3_detail_fetches_deferred{instance=~\"$deployment\",cache=\"ers_tacacs_user\"}",
+          "instant": false,
+          "legendFormat": "deferred",
+          "range": true,
+          "refId": "C"
+        }
+      ],
+      "title": "Account detail-cache coverage",
+      "transformations": [],
+      "transparent": false,
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${prometheus}"
+      },
+      "description": "Coverage, cached policy sets, and deferred work for the converging authentication/authorization rule inventory.",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "fillOpacity": 0
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 38
+      },
+      "options": {
+        "legend": {
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": false
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "asc"
+        }
+      },
+      "repeatDirection": "h",
+      "targets": [
+        {
+          "expr": "ise3_detail_cache_coverage{instance=~\"$deployment\",cache=\"openapi_tacacs_policy_rules\"}",
+          "instant": false,
+          "legendFormat": "coverage",
+          "range": true,
+          "refId": "A"
+        },
+        {
+          "expr": "ise3_detail_cache_entries{instance=~\"$deployment\",cache=\"openapi_tacacs_policy_rules\"}",
+          "instant": false,
+          "legendFormat": "cached policy sets",
+          "range": true,
+          "refId": "B"
+        },
+        {
+          "expr": "ise3_detail_fetches_deferred{instance=~\"$deployment\",cache=\"openapi_tacacs_policy_rules\"}",
+          "instant": false,
+          "legendFormat": "deferred",
+          "range": true,
+          "refId": "C"
+        }
+      ],
+      "title": "Policy rule count coverage",
+      "transformations": [],
+      "transparent": false,
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${prometheus}"
+      },
+      "description": "Failed policy-rule detail reads by bounded result class, without discarding previously cached counts.",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "fillOpacity": 0
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 38
+      },
+      "options": {
+        "legend": {
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": false
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "asc"
+        }
+      },
+      "repeatDirection": "h",
+      "targets": [
+        {
+          "expr": "sum by (result) (rate(ise3_detail_fetches_total{instance=~\"$deployment\",cache=\"openapi_tacacs_policy_rules\",result=~\"failed|empty\"}[15m]))",
+          "instant": false,
+          "legendFormat": "{{result}}",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "title": "Policy rule refresh failures",
+      "transformations": [],
+      "transparent": false,
+      "type": "timeseries"
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 46
+      },
+      "id": 0,
+      "panels": [],
+      "title": "Authentication and authorization",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${prometheus}"
+      },
+      "description": "Passed and failed TACACS authentications for selected accounts in the reporting window.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 47
+      },
+      "options": {
+        "displayMode": "gradient",
+        "minVizHeight": 10,
+        "minVizWidth": 0,
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": []
+        },
+        "showUnfilled": true,
+        "valueMode": "color"
+      },
+      "repeatDirection": "h",
+      "targets": [
+        {
+          "expr": "sort_desc(ise3_tacacs_authentications{instance=~\"$deployment\",dimension=\"username\",value=~\"$username\"})",
+          "instant": true,
+          "legendFormat": "{{value}} \u00b7 {{status}}",
+          "range": false,
+          "refId": "A"
+        }
+      ],
+      "title": "Authentication by account and result",
+      "transformations": [],
+      "transparent": false,
+      "type": "bargauge"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${prometheus}"
+      },
+      "description": "Worst-first bounded device authentication view; the coverage panel states how much was published.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 47
+      },
+      "options": {
+        "displayMode": "gradient",
+        "minVizHeight": 10,
+        "minVizWidth": 0,
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": []
+        },
+        "showUnfilled": true,
+        "valueMode": "color"
+      },
+      "repeatDirection": "h",
+      "targets": [
+        {
+          "expr": "sort_desc(ise3_tacacs_authentications{instance=~\"$deployment\",dimension=\"device\"})",
+          "instant": true,
+          "legendFormat": "{{value}} \u00b7 {{status}}",
+          "range": false,
+          "refId": "A"
+        }
+      ],
+      "title": "Authentication by device and result",
+      "transformations": [],
+      "transparent": false,
+      "type": "bargauge"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${prometheus}"
+      },
+      "description": "Complete operational-owner rollup of TACACS authentication outcomes.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 55
+      },
+      "options": {
+        "displayMode": "gradient",
+        "minVizHeight": 10,
+        "minVizWidth": 0,
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": []
+        },
+        "showUnfilled": true,
+        "valueMode": "color"
+      },
+      "repeatDirection": "h",
+      "targets": [
+        {
+          "expr": "sort_desc(ise3_tacacs_authentications{instance=~\"$deployment\",dimension=\"ops_owner\"})",
+          "instant": true,
+          "legendFormat": "{{value}} \u00b7 {{status}}",
+          "range": false,
+          "refId": "A"
+        }
+      ],
+      "title": "Authentication by ops owner",
+      "transformations": [],
+      "transparent": false,
+      "type": "bargauge"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${prometheus}"
+      },
+      "description": "Passed and failed TACACS authorizations for selected accounts in the reporting window.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 55
+      },
+      "options": {
+        "displayMode": "gradient",
+        "minVizHeight": 10,
+        "minVizWidth": 0,
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": []
+        },
+        "showUnfilled": true,
+        "valueMode": "color"
+      },
+      "repeatDirection": "h",
+      "targets": [
+        {
+          "expr": "sort_desc(ise3_tacacs_authorizations{instance=~\"$deployment\",dimension=\"username\",value=~\"$username\"})",
+          "instant": true,
+          "legendFormat": "{{value}} \u00b7 {{status}}",
+          "range": false,
+          "refId": "A"
+        }
+      ],
+      "title": "Authorization by account and result",
+      "transformations": [],
+      "transparent": false,
+      "type": "bargauge"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${prometheus}"
+      },
+      "description": "Worst-first bounded device authorization view with explicit published-versus-total coverage.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 63
+      },
+      "options": {
+        "displayMode": "gradient",
+        "minVizHeight": 10,
+        "minVizWidth": 0,
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": []
+        },
+        "showUnfilled": true,
+        "valueMode": "color"
+      },
+      "repeatDirection": "h",
+      "targets": [
+        {
+          "expr": "sort_desc(ise3_tacacs_authorizations{instance=~\"$deployment\",dimension=\"device\"})",
+          "instant": true,
+          "legendFormat": "{{value}} \u00b7 {{status}}",
+          "range": false,
+          "refId": "A"
+        }
+      ],
+      "title": "Authorization by device and result",
+      "transformations": [],
+      "transparent": false,
+      "type": "bargauge"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${prometheus}"
+      },
+      "description": "Complete operational-owner rollup of TACACS authorization outcomes.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 63
+      },
+      "options": {
+        "displayMode": "gradient",
+        "minVizHeight": 10,
+        "minVizWidth": 0,
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": []
+        },
+        "showUnfilled": true,
+        "valueMode": "color"
+      },
+      "repeatDirection": "h",
+      "targets": [
+        {
+          "expr": "sort_desc(ise3_tacacs_authorizations{instance=~\"$deployment\",dimension=\"ops_owner\"})",
+          "instant": true,
+          "legendFormat": "{{value}} \u00b7 {{status}}",
+          "range": false,
+          "refId": "A"
+        }
+      ],
+      "title": "Authorization by ops owner",
+      "transformations": [],
+      "transparent": false,
+      "type": "bargauge"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${prometheus}"
+      },
+      "description": "Worst-first bounded authorization evidence retaining the account, device, matched policy, shell profile, command set, and result together.",
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 10,
+        "w": 24,
+        "x": 0,
+        "y": 71
+      },
+      "options": null,
+      "repeatDirection": "h",
+      "targets": [
+        {
+          "expr": "sort_desc(ise3_tacacs_authorization_details{instance=~\"$deployment\",username=~\"$username\"})",
+          "instant": true,
+          "legendFormat": "{{username}} \u00b7 {{device}} \u00b7 {{policy}} \u00b7 {{shell_profile}} \u00b7 {{command_set}} \u00b7 {{status}}",
+          "range": false,
+          "refId": "A"
+        }
+      ],
+      "title": "Authorization policy, profile, command set and account",
+      "transformations": [],
+      "transparent": false,
+      "type": "table"
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 81
+      },
+      "id": 0,
+      "panels": [],
+      "title": "Command accounting and bounds",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${prometheus}"
+      },
+      "description": "TACACS accounting records grouped by the first command token, never by full operator-entered text.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 82
+      },
+      "options": {
+        "displayMode": "gradient",
+        "minVizHeight": 10,
+        "minVizWidth": 0,
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": []
+        },
+        "showUnfilled": true,
+        "valueMode": "color"
+      },
+      "repeatDirection": "h",
+      "targets": [
+        {
+          "expr": "sort_desc(ise3_tacacs_commands{instance=~\"$deployment\",dimension=\"command_family\"})",
+          "instant": true,
+          "legendFormat": "{{value}}",
+          "range": false,
+          "refId": "A"
+        }
+      ],
+      "title": "Command families",
+      "transformations": [],
+      "transparent": false,
+      "type": "bargauge"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${prometheus}"
+      },
+      "description": "TACACS command accounting volume for each selected internal account.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 82
+      },
+      "options": {
+        "displayMode": "gradient",
+        "minVizHeight": 10,
+        "minVizWidth": 0,
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": []
+        },
+        "showUnfilled": true,
+        "valueMode": "color"
+      },
+      "repeatDirection": "h",
+      "targets": [
+        {
+          "expr": "sort_desc(ise3_tacacs_commands{instance=~\"$deployment\",dimension=\"username\",value=~\"$username\"})",
+          "instant": true,
+          "legendFormat": "{{value}}",
+          "range": false,
+          "refId": "A"
+        }
+      ],
+      "title": "Commands by account",
+      "transformations": [],
+      "transparent": false,
+      "type": "bargauge"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${prometheus}"
+      },
+      "description": "Worst-first bounded device command-accounting view for troubleshooting administrative activity.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 90
+      },
+      "options": {
+        "displayMode": "gradient",
+        "minVizHeight": 10,
+        "minVizWidth": 0,
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": []
+        },
+        "showUnfilled": true,
+        "valueMode": "color"
+      },
+      "repeatDirection": "h",
+      "targets": [
+        {
+          "expr": "sort_desc(ise3_tacacs_commands{instance=~\"$deployment\",dimension=\"device\"})",
+          "instant": true,
+          "legendFormat": "{{value}}",
+          "range": false,
+          "refId": "A"
+        }
+      ],
+      "title": "Commands by device",
+      "transformations": [],
+      "transparent": false,
+      "type": "bargauge"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${prometheus}"
+      },
+      "description": "Complete operational-owner rollup of TACACS command accounting activity.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 90
+      },
+      "options": {
+        "displayMode": "gradient",
+        "minVizHeight": 10,
+        "minVizWidth": 0,
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": []
+        },
+        "showUnfilled": true,
+        "valueMode": "color"
+      },
+      "repeatDirection": "h",
+      "targets": [
+        {
+          "expr": "sort_desc(ise3_tacacs_commands{instance=~\"$deployment\",dimension=\"ops_owner\"})",
+          "instant": true,
+          "legendFormat": "{{value}}",
+          "range": false,
+          "refId": "A"
+        }
+      ],
+      "title": "Commands by ops owner",
+      "transformations": [],
+      "transparent": false,
+      "type": "bargauge"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${prometheus}"
+      },
+      "description": "Published versus existing device groups for TACACS authentication, authorization, and accounting.",
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 98
+      },
+      "options": null,
+      "repeatDirection": "h",
+      "targets": [
+        {
+          "expr": "ise3_topk_groups_returned{instance=~\"$deployment\",dataset=\"tacacs_activity\",breakdown=~\".*device\"}",
+          "instant": true,
+          "legendFormat": "{{breakdown}} published",
+          "range": false,
+          "refId": "A"
+        },
+        {
+          "expr": "ise3_topk_groups_total{instance=~\"$deployment\",dataset=\"tacacs_activity\",breakdown=~\".*device\"}",
+          "instant": true,
+          "legendFormat": "{{breakdown}} total",
+          "range": false,
+          "refId": "B"
+        },
+        {
+          "expr": "ise3_topk_truncated{instance=~\"$deployment\",dataset=\"tacacs_activity\",breakdown=~\".*device\"}",
+          "instant": true,
+          "legendFormat": "{{breakdown}} truncated",
+          "range": false,
+          "refId": "C"
+        }
+      ],
+      "title": "Bounded device coverage",
+      "transformations": [],
+      "transparent": false,
+      "type": "table"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${prometheus}"
+      },
+      "description": "NAD classification entries available to roll device activity onto operational owners.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 24,
+        "x": 12,
+        "y": 98
+      },
+      "options": null,
+      "repeatDirection": "h",
+      "targets": [
+        {
+          "expr": "ise3_nad_directory_entries{instance=~\"$deployment\"}",
+          "instant": true,
+          "legendFormat": "entries",
+          "range": false,
+          "refId": "A"
+        }
+      ],
+      "title": "NAD directory coverage",
+      "transformations": [],
+      "transparent": false,
+      "type": "stat"
+    }
+  ],
+  "refresh": "5m",
+  "schemaVersion": 36,
+  "style": "dark",
+  "tags": [
+    "ise",
+    "ise-exporter3"
+  ],
+  "templating": {
+    "list": [
+      {
+        "auto": false,
+        "auto_count": 30,
+        "auto_min": "10s",
+        "hide": 0,
+        "id": "00000000-0000-0000-0000-000000000000",
+        "includeAll": false,
+        "label": "Prometheus",
+        "multi": false,
+        "name": "prometheus",
+        "query": "prometheus",
+        "skipUrlSync": false,
+        "type": "datasource"
+      },
+      {
+        "allValue": ".*",
+        "auto": false,
+        "auto_count": 30,
+        "auto_min": "10s",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${prometheus}"
+        },
+        "hide": 0,
+        "id": "00000000-0000-0000-0000-000000000000",
+        "includeAll": true,
+        "label": "Deployment",
+        "multi": true,
+        "name": "deployment",
+        "query": "label_values(ise3_dataset_enabled, instance)",
+        "skipUrlSync": false,
+        "type": "query"
+      },
+      {
+        "allValue": ".*",
+        "auto": false,
+        "auto_count": 30,
+        "auto_min": "10s",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${prometheus}"
+        },
+        "hide": 0,
+        "id": "00000000-0000-0000-0000-000000000000",
+        "includeAll": true,
+        "label": "Username",
+        "multi": true,
+        "name": "username",
+        "query": "label_values(ise3_tacacs_internal_account_enabled{instance=~\"$deployment\"}, username)",
+        "skipUrlSync": false,
+        "type": "query"
+      }
+    ]
+  },
+  "time": {
+    "from": "now-6h",
+    "to": "now"
+  },
+  "timezone": "browser",
+  "title": "ISE 3 \u2014 TACACS Device Administration",
+  "uid": "ise3-tacacs"
+}

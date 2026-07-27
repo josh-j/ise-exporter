@@ -504,7 +504,9 @@ def render_plan(plan):
     out = [
         f"ise-exporter3 plan  {config.path or '(no file)'}",
         f"profile={config.profile}  scale: {config.scale.nads:,} nads, "
-        f"{config.scale.endpoints:,} endpoints, {config.scale.sessions:,} sessions",
+        f"{config.scale.endpoints:,} endpoints, {config.scale.sessions:,} sessions, "
+        f"{config.scale.accounts:,} Device Admin accounts, "
+        f"{config.scale.policy_sets:,} policy sets",
         "",
     ]
     out += _render_table(

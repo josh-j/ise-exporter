@@ -1,0 +1,1225 @@
+{
+  "annotations": {},
+  "description": "Endpoint inventory and attributes alongside authoritative NAD classification, detail coverage, and authentication activity.",
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "links": [
+    {
+      "asDropdown": true,
+      "icon": "",
+      "includeVars": true,
+      "keepTime": true,
+      "tags": [
+        "ise-exporter3"
+      ],
+      "targetBlank": false,
+      "title": "ISE Exporter 3 dashboards",
+      "tooltip": "",
+      "type": "dashboards",
+      "url": ""
+    }
+  ],
+  "panels": [
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "id": 0,
+      "panels": [],
+      "title": "Endpoint inventory",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${prometheus}"
+      },
+      "description": "Availability and freshness of inventory, profiling events, and optional live endpoint attributes.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 8,
+        "x": 0,
+        "y": 1
+      },
+      "options": null,
+      "repeatDirection": "h",
+      "targets": [
+        {
+          "expr": "((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"endpoint_inventory\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"endpoint_inventory\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"endpoint_inventory\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"endpoint_inventory\"} == 1))) == 1)",
+          "instant": true,
+          "legendFormat": "inventory",
+          "range": false,
+          "refId": "A"
+        },
+        {
+          "expr": "((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"endpoint_attributes\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"endpoint_attributes\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"endpoint_attributes\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"endpoint_attributes\"} == 1))) == 1)",
+          "instant": true,
+          "legendFormat": "live attributes",
+          "range": false,
+          "refId": "B"
+        },
+        {
+          "expr": "((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"profile_events\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"profile_events\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"profile_events\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"profile_events\"} == 1))) == 1)",
+          "instant": true,
+          "legendFormat": "profile events",
+          "range": false,
+          "refId": "C"
+        }
+      ],
+      "title": "Endpoint inventory readiness",
+      "transformations": [],
+      "transparent": false,
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${prometheus}"
+      },
+      "description": "Seconds since the latest successful endpoint inventory and profiling-event snapshots.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 8,
+        "x": 8,
+        "y": 1
+      },
+      "options": null,
+      "repeatDirection": "h",
+      "targets": [
+        {
+          "expr": "time() - ise3_dataset_last_success_timestamp{instance=~\"$deployment\",dataset=\"endpoint_inventory\"}",
+          "instant": true,
+          "legendFormat": "inventory",
+          "range": false,
+          "refId": "A"
+        },
+        {
+          "expr": "time() - ise3_dataset_last_success_timestamp{instance=~\"$deployment\",dataset=\"profile_events\"}",
+          "instant": true,
+          "legendFormat": "profile events",
+          "range": false,
+          "refId": "B"
+        }
+      ],
+      "title": "Dataset collection age",
+      "transformations": [],
+      "transparent": false,
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${prometheus}"
+      },
+      "description": "Authoritative endpoint database total from the active inventory provider.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 8,
+        "x": 16,
+        "y": 1
+      },
+      "options": null,
+      "repeatDirection": "h",
+      "targets": [
+        {
+          "expr": "sum((ise3_endpoints_total{instance=~\"$deployment\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"endpoint_inventory\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"endpoint_inventory\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"endpoint_inventory\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"endpoint_inventory\"} == 1))) == 1)))",
+          "instant": true,
+          "legendFormat": "endpoints",
+          "range": false,
+          "refId": "A"
+        }
+      ],
+      "title": "Endpoints",
+      "transformations": [],
+      "transparent": false,
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${prometheus}"
+      },
+      "description": "Endpoint counts needing profile attention and those eligible for posture assessment.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 8,
+        "x": 0,
+        "y": 6
+      },
+      "options": null,
+      "repeatDirection": "h",
+      "targets": [
+        {
+          "expr": "sum((ise3_endpoints_unprofiled{instance=~\"$deployment\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"endpoint_inventory\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"endpoint_inventory\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"endpoint_inventory\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"endpoint_inventory\"} == 1))) == 1)))",
+          "instant": true,
+          "legendFormat": "unprofiled",
+          "range": false,
+          "refId": "A"
+        },
+        {
+          "expr": "sum((ise3_endpoints_posture_applicable{instance=~\"$deployment\",applicable=\"true\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"endpoint_inventory\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"endpoint_inventory\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"endpoint_inventory\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"endpoint_inventory\"} == 1))) == 1)))",
+          "instant": true,
+          "legendFormat": "posture applicable",
+          "range": false,
+          "refId": "B"
+        }
+      ],
+      "title": "Unprofiled and posture-applicable",
+      "transformations": [],
+      "transparent": false,
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${prometheus}"
+      },
+      "description": "Number of non-empty endpoint profile and identity-group categories currently represented in inventory.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 8,
+        "x": 8,
+        "y": 6
+      },
+      "options": null,
+      "repeatDirection": "h",
+      "targets": [
+        {
+          "expr": "count((ise3_endpoints_by_profile{instance=~\"$deployment\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"endpoint_inventory\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"endpoint_inventory\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"endpoint_inventory\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"endpoint_inventory\"} == 1))) == 1)) > 0)",
+          "instant": true,
+          "legendFormat": "profiles",
+          "range": false,
+          "refId": "A"
+        },
+        {
+          "expr": "count((ise3_endpoints_by_identity_group{instance=~\"$deployment\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"endpoint_inventory\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"endpoint_inventory\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"endpoint_inventory\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"endpoint_inventory\"} == 1))) == 1)) > 0)",
+          "instant": true,
+          "legendFormat": "identity groups",
+          "range": false,
+          "refId": "B"
+        }
+      ],
+      "title": "Populated profiles and identity groups",
+      "transformations": [],
+      "transparent": false,
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${prometheus}"
+      },
+      "description": "Complete endpoint-policy distribution from the authoritative endpoint inventory.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 16,
+        "y": 6
+      },
+      "options": {
+        "displayMode": "gradient",
+        "minVizHeight": 10,
+        "minVizWidth": 0,
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": []
+        },
+        "showUnfilled": true,
+        "valueMode": "color"
+      },
+      "repeatDirection": "h",
+      "targets": [
+        {
+          "expr": "sort_desc(sum by (profile) ((ise3_endpoints_by_profile{instance=~\"$deployment\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"endpoint_inventory\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"endpoint_inventory\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"endpoint_inventory\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"endpoint_inventory\"} == 1))) == 1))))",
+          "instant": true,
+          "legendFormat": "{{profile}}",
+          "range": false,
+          "refId": "A"
+        }
+      ],
+      "title": "Endpoints by profile",
+      "transformations": [],
+      "transparent": false,
+      "type": "bargauge"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${prometheus}"
+      },
+      "description": "Complete identity-group distribution for endpoints currently stored in ISE.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 14
+      },
+      "options": {
+        "displayMode": "gradient",
+        "minVizHeight": 10,
+        "minVizWidth": 0,
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": []
+        },
+        "showUnfilled": true,
+        "valueMode": "color"
+      },
+      "repeatDirection": "h",
+      "targets": [
+        {
+          "expr": "sort_desc(sum by (identity_group) ((ise3_endpoints_by_identity_group{instance=~\"$deployment\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"endpoint_inventory\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"endpoint_inventory\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"endpoint_inventory\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"endpoint_inventory\"} == 1))) == 1))))",
+          "instant": true,
+          "legendFormat": "{{identity_group}}",
+          "range": false,
+          "refId": "A"
+        }
+      ],
+      "title": "Endpoints by identity group",
+      "transformations": [],
+      "transparent": false,
+      "type": "bargauge"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${prometheus}"
+      },
+      "description": "Fraction of endpoint inventory rows carrying profile, identity-group, and posture-applicability fields.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 14
+      },
+      "options": {
+        "displayMode": "gradient",
+        "minVizHeight": 10,
+        "minVizWidth": 0,
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": []
+        },
+        "showUnfilled": true,
+        "valueMode": "color"
+      },
+      "repeatDirection": "h",
+      "targets": [
+        {
+          "expr": "sort_desc((ise3_endpoint_inventory_field_coverage{instance=~\"$deployment\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"endpoint_inventory\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"endpoint_inventory\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"endpoint_inventory\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"endpoint_inventory\"} == 1))) == 1)))",
+          "instant": true,
+          "legendFormat": "{{field}}",
+          "range": false,
+          "refId": "A"
+        }
+      ],
+      "title": "Endpoint operational field coverage",
+      "transformations": [],
+      "transparent": false,
+      "type": "bargauge"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${prometheus}"
+      },
+      "description": "Historical endpoint profiling changes grouped by the source that classified them and the resulting action.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 22
+      },
+      "options": {
+        "displayMode": "gradient",
+        "minVizHeight": 10,
+        "minVizWidth": 0,
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": []
+        },
+        "showUnfilled": true,
+        "valueMode": "color"
+      },
+      "repeatDirection": "h",
+      "targets": [
+        {
+          "expr": "sort_desc(sum by (source,action) ((ise3_endpoint_profile_events{instance=~\"$deployment\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"profile_events\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"profile_events\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"profile_events\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"profile_events\"} == 1))) == 1))))",
+          "instant": true,
+          "legendFormat": "{{source}} \u00b7 {{action}}",
+          "range": false,
+          "refId": "A"
+        }
+      ],
+      "title": "Profile events by source and action",
+      "transformations": [],
+      "transparent": false,
+      "type": "bargauge"
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 30
+      },
+      "id": 0,
+      "panels": [],
+      "title": "Live endpoint attributes",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${prometheus}"
+      },
+      "description": "Endpoints for which ISE publishes live model, OS, and MDM context; this source is intentionally partial.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 24,
+        "x": 0,
+        "y": 31
+      },
+      "options": null,
+      "repeatDirection": "h",
+      "targets": [
+        {
+          "expr": "ise3_endpoint_attributes_published{instance=~\"$deployment\"}",
+          "instant": true,
+          "legendFormat": "{{provider}}",
+          "range": false,
+          "refId": "A"
+        }
+      ],
+      "title": "Attribute-source coverage",
+      "transformations": [],
+      "transparent": false,
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${prometheus}"
+      },
+      "description": "Manufacturer and model distribution for endpoints visible to the live attribute source.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 36
+      },
+      "options": {
+        "displayMode": "gradient",
+        "minVizHeight": 10,
+        "minVizWidth": 0,
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": []
+        },
+        "showUnfilled": true,
+        "valueMode": "color"
+      },
+      "repeatDirection": "h",
+      "targets": [
+        {
+          "expr": "sort_desc(sum by (manufacturer,model) ((ise3_endpoint_model{instance=~\"$deployment\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"endpoint_attributes\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"endpoint_attributes\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"endpoint_attributes\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"endpoint_attributes\"} == 1))) == 1))))",
+          "instant": true,
+          "legendFormat": "{{manufacturer}} \u00b7 {{model}}",
+          "range": false,
+          "refId": "A"
+        }
+      ],
+      "title": "Endpoints by hardware model",
+      "transformations": [],
+      "transparent": false,
+      "type": "bargauge"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${prometheus}"
+      },
+      "description": "Operating-system distribution for endpoints visible to the live attribute source.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 36
+      },
+      "options": {
+        "displayMode": "gradient",
+        "minVizHeight": 10,
+        "minVizWidth": 0,
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": []
+        },
+        "showUnfilled": true,
+        "valueMode": "color"
+      },
+      "repeatDirection": "h",
+      "targets": [
+        {
+          "expr": "sort_desc(sum by (os) ((ise3_endpoint_operating_system{instance=~\"$deployment\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"endpoint_attributes\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"endpoint_attributes\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"endpoint_attributes\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"endpoint_attributes\"} == 1))) == 1))))",
+          "instant": true,
+          "legendFormat": "{{os}}",
+          "range": false,
+          "refId": "A"
+        }
+      ],
+      "title": "Endpoints by operating system",
+      "transformations": [],
+      "transparent": false,
+      "type": "bargauge"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${prometheus}"
+      },
+      "description": "Registration-state distribution from endpoint MDM context published by ISE.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 44
+      },
+      "options": {
+        "displayMode": "gradient",
+        "minVizHeight": 10,
+        "minVizWidth": 0,
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": []
+        },
+        "showUnfilled": true,
+        "valueMode": "color"
+      },
+      "repeatDirection": "h",
+      "targets": [
+        {
+          "expr": "sort_desc(sum by (registered) ((ise3_endpoint_mdm_registered{instance=~\"$deployment\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"endpoint_attributes\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"endpoint_attributes\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"endpoint_attributes\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"endpoint_attributes\"} == 1))) == 1))))",
+          "instant": true,
+          "legendFormat": "{{registered}}",
+          "range": false,
+          "refId": "A"
+        }
+      ],
+      "title": "MDM registration",
+      "transformations": [],
+      "transparent": false,
+      "type": "bargauge"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${prometheus}"
+      },
+      "description": "Compliance-state distribution from endpoint MDM context published by ISE.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 44
+      },
+      "options": {
+        "displayMode": "gradient",
+        "minVizHeight": 10,
+        "minVizWidth": 0,
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": []
+        },
+        "showUnfilled": true,
+        "valueMode": "color"
+      },
+      "repeatDirection": "h",
+      "targets": [
+        {
+          "expr": "sort_desc(sum by (compliant) ((ise3_endpoint_mdm_compliant{instance=~\"$deployment\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"endpoint_attributes\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"endpoint_attributes\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"endpoint_attributes\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"endpoint_attributes\"} == 1))) == 1))))",
+          "instant": true,
+          "legendFormat": "{{compliant}}",
+          "range": false,
+          "refId": "A"
+        }
+      ],
+      "title": "MDM compliance",
+      "transformations": [],
+      "transparent": false,
+      "type": "bargauge"
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 52
+      },
+      "id": 0,
+      "panels": [],
+      "title": "Network device inventory",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${prometheus}"
+      },
+      "description": "Configured NAD total beside the number whose group detail has converged into the local classification.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 24,
+        "x": 0,
+        "y": 53
+      },
+      "options": null,
+      "repeatDirection": "h",
+      "targets": [
+        {
+          "expr": "ise3_network_devices_total{instance=~\"$deployment\"}",
+          "instant": true,
+          "legendFormat": "total",
+          "range": false,
+          "refId": "A"
+        },
+        {
+          "expr": "ise3_network_devices_classified{instance=~\"$deployment\"}",
+          "instant": true,
+          "legendFormat": "classified",
+          "range": false,
+          "refId": "B"
+        }
+      ],
+      "title": "Network devices and classification",
+      "transformations": [],
+      "transparent": false,
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${prometheus}"
+      },
+      "description": "Configured network devices grouped by normalized ISE location hierarchy.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 58
+      },
+      "options": {
+        "displayMode": "gradient",
+        "minVizHeight": 10,
+        "minVizWidth": 0,
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": []
+        },
+        "showUnfilled": true,
+        "valueMode": "color"
+      },
+      "repeatDirection": "h",
+      "targets": [
+        {
+          "expr": "sort_desc(sum by (location) ((ise3_network_devices_by_location{instance=~\"$deployment\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"network_devices\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"network_devices\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"network_devices\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"network_devices\"} == 1))) == 1))))",
+          "instant": true,
+          "legendFormat": "{{location}}",
+          "range": false,
+          "refId": "A"
+        }
+      ],
+      "title": "Devices by location",
+      "transformations": [],
+      "transparent": false,
+      "type": "bargauge"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${prometheus}"
+      },
+      "description": "Configured network devices grouped by the operational owner derived from Network Device Groups.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 58
+      },
+      "options": {
+        "displayMode": "gradient",
+        "minVizHeight": 10,
+        "minVizWidth": 0,
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": []
+        },
+        "showUnfilled": true,
+        "valueMode": "color"
+      },
+      "repeatDirection": "h",
+      "targets": [
+        {
+          "expr": "sort_desc(sum by (ops_owner) ((ise3_network_devices_by_ops_owner{instance=~\"$deployment\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"network_devices\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"network_devices\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"network_devices\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"network_devices\"} == 1))) == 1))))",
+          "instant": true,
+          "legendFormat": "{{ops_owner}}",
+          "range": false,
+          "refId": "A"
+        }
+      ],
+      "title": "Devices by ops owner",
+      "transformations": [],
+      "transparent": false,
+      "type": "bargauge"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${prometheus}"
+      },
+      "description": "Configured network devices grouped by normalized device-type membership.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 66
+      },
+      "options": {
+        "displayMode": "gradient",
+        "minVizHeight": 10,
+        "minVizWidth": 0,
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": []
+        },
+        "showUnfilled": true,
+        "valueMode": "color"
+      },
+      "repeatDirection": "h",
+      "targets": [
+        {
+          "expr": "sort_desc(sum by (device_type) ((ise3_network_devices_by_type{instance=~\"$deployment\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"network_devices\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"network_devices\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"network_devices\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"network_devices\"} == 1))) == 1))))",
+          "instant": true,
+          "legendFormat": "{{device_type}}",
+          "range": false,
+          "refId": "A"
+        }
+      ],
+      "title": "Devices by type",
+      "transformations": [],
+      "transparent": false,
+      "type": "bargauge"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${prometheus}"
+      },
+      "description": "Per-NAD location, operations owner, and device type for inventory and session correlation.",
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 66
+      },
+      "options": null,
+      "repeatDirection": "h",
+      "targets": [
+        {
+          "expr": "ise3_network_device_assignment{instance=~\"$deployment\",nad=~\"$nad\"}",
+          "instant": true,
+          "legendFormat": "{{nad}} \u00b7 {{location}} \u00b7 {{ops_owner}}",
+          "range": false,
+          "refId": "A"
+        }
+      ],
+      "title": "Network device assignments",
+      "transformations": [],
+      "transparent": false,
+      "type": "table"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${prometheus}"
+      },
+      "description": "Warm-up coverage, deferred detail reads, and cache entries for network-device classification.",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "fillOpacity": 0
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 74
+      },
+      "options": {
+        "legend": {
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": false
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "asc"
+        }
+      },
+      "repeatDirection": "h",
+      "targets": [
+        {
+          "expr": "ise3_detail_cache_coverage{instance=~\"$deployment\",cache=\"ers_network_device\"}",
+          "instant": false,
+          "legendFormat": "coverage",
+          "range": true,
+          "refId": "A"
+        },
+        {
+          "expr": "ise3_detail_fetches_deferred{instance=~\"$deployment\",cache=\"ers_network_device\"}",
+          "instant": false,
+          "legendFormat": "deferred",
+          "range": true,
+          "refId": "B"
+        },
+        {
+          "expr": "ise3_detail_cache_entries{instance=~\"$deployment\",cache=\"ers_network_device\"}",
+          "instant": false,
+          "legendFormat": "entries",
+          "range": true,
+          "refId": "C"
+        }
+      ],
+      "title": "NAD detail-cache coverage",
+      "transformations": [],
+      "transparent": false,
+      "type": "timeseries"
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 82
+      },
+      "id": 0,
+      "panels": [],
+      "title": "NAD activity",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${prometheus}"
+      },
+      "description": "Configured network devices with no recent activity beside the inventory surface reached by the scan.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 24,
+        "x": 0,
+        "y": 83
+      },
+      "options": null,
+      "repeatDirection": "h",
+      "targets": [
+        {
+          "expr": "ise3_nad_silent_total{instance=~\"$deployment\"}",
+          "instant": true,
+          "legendFormat": "silent",
+          "range": false,
+          "refId": "A"
+        },
+        {
+          "expr": "ise3_nad_activity_covered{instance=~\"$deployment\"}",
+          "instant": true,
+          "legendFormat": "covered",
+          "range": false,
+          "refId": "B"
+        }
+      ],
+      "title": "Silent and covered NADs",
+      "transformations": [],
+      "transparent": false,
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${prometheus}"
+      },
+      "description": "Seconds since each selected NAD last authenticated anything in the reporting scan window.",
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 88
+      },
+      "options": null,
+      "repeatDirection": "h",
+      "targets": [
+        {
+          "expr": "sort_desc((ise3_nad_last_authentication_age_seconds{instance=~\"$deployment\",nad=~\"$nad\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"nad_health\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"nad_health\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"nad_health\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"nad_health\"} == 1))) == 1)))",
+          "instant": true,
+          "legendFormat": "{{nad}}",
+          "range": false,
+          "refId": "A"
+        }
+      ],
+      "title": "Stalest network devices",
+      "transformations": [],
+      "transparent": false,
+      "type": "table"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${prometheus}"
+      },
+      "description": "Configured NADs with zero accumulated authentication activity in the current scan window.",
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 88
+      },
+      "options": null,
+      "repeatDirection": "h",
+      "targets": [
+        {
+          "expr": "sum by (instance,nad) ((ise3_nad_authentications{instance=~\"$deployment\",nad=~\"$nad\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"nad_health\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"nad_health\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"nad_health\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"nad_health\"} == 1))) == 1))) == 0",
+          "instant": true,
+          "legendFormat": "{{nad}}",
+          "range": false,
+          "refId": "A"
+        }
+      ],
+      "title": "Never-authenticated network devices",
+      "transformations": [],
+      "transparent": false,
+      "type": "table"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${prometheus}"
+      },
+      "description": "Ten busiest selected network devices by passed and failed authentication volume in the scan window.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 96
+      },
+      "options": {
+        "displayMode": "gradient",
+        "minVizHeight": 10,
+        "minVizWidth": 0,
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": []
+        },
+        "showUnfilled": true,
+        "valueMode": "color"
+      },
+      "repeatDirection": "h",
+      "targets": [
+        {
+          "expr": "topk(10, sum by (nad,status) ((ise3_nad_authentications{instance=~\"$deployment\",nad=~\"$nad\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"nad_health\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"nad_health\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"nad_health\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"nad_health\"} == 1))) == 1))))",
+          "instant": true,
+          "legendFormat": "{{nad}} \u00b7 {{status}}",
+          "range": false,
+          "refId": "A"
+        }
+      ],
+      "title": "Per-NAD authentication activity (top 10)",
+      "transformations": [],
+      "transparent": false,
+      "type": "bargauge"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${prometheus}"
+      },
+      "description": "Session-bearing NADs matched and unmatched against the authoritative network-device directory.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 12,
+        "x": 12,
+        "y": 96
+      },
+      "options": null,
+      "repeatDirection": "h",
+      "targets": [
+        {
+          "expr": "ise3_nad_directory_attributed{instance=~\"$deployment\"}",
+          "instant": true,
+          "legendFormat": "{{matched}}",
+          "range": false,
+          "refId": "A"
+        }
+      ],
+      "title": "Session attribution coverage",
+      "transformations": [],
+      "transparent": false,
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${prometheus}"
+      },
+      "description": "Current number of NAD identities resolvable to a normalized location and operational owner.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 12,
+        "x": 0,
+        "y": 104
+      },
+      "options": null,
+      "repeatDirection": "h",
+      "targets": [
+        {
+          "expr": "ise3_nad_directory_entries{instance=~\"$deployment\"}",
+          "instant": true,
+          "legendFormat": "entries",
+          "range": false,
+          "refId": "A"
+        }
+      ],
+      "title": "NAD directory entries",
+      "transformations": [],
+      "transparent": false,
+      "type": "stat"
+    }
+  ],
+  "refresh": "5m",
+  "schemaVersion": 36,
+  "style": "dark",
+  "tags": [
+    "ise",
+    "ise-exporter3"
+  ],
+  "templating": {
+    "list": [
+      {
+        "auto": false,
+        "auto_count": 30,
+        "auto_min": "10s",
+        "hide": 0,
+        "id": "00000000-0000-0000-0000-000000000000",
+        "includeAll": false,
+        "label": "Prometheus",
+        "multi": false,
+        "name": "prometheus",
+        "query": "prometheus",
+        "skipUrlSync": false,
+        "type": "datasource"
+      },
+      {
+        "allValue": ".*",
+        "auto": false,
+        "auto_count": 30,
+        "auto_min": "10s",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${prometheus}"
+        },
+        "hide": 0,
+        "id": "00000000-0000-0000-0000-000000000000",
+        "includeAll": true,
+        "label": "Deployment",
+        "multi": true,
+        "name": "deployment",
+        "query": "label_values(ise3_dataset_enabled, instance)",
+        "skipUrlSync": false,
+        "type": "query"
+      },
+      {
+        "allValue": ".*",
+        "auto": false,
+        "auto_count": 30,
+        "auto_min": "10s",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${prometheus}"
+        },
+        "hide": 0,
+        "id": "00000000-0000-0000-0000-000000000000",
+        "includeAll": true,
+        "label": "Network device",
+        "multi": true,
+        "name": "nad",
+        "query": "label_values(ise3_network_device_assignment{instance=~\"$deployment\"}, nad)",
+        "skipUrlSync": false,
+        "type": "query"
+      }
+    ]
+  },
+  "time": {
+    "from": "now-6h",
+    "to": "now"
+  },
+  "timezone": "browser",
+  "title": "ISE 3 \u2014 Endpoints and Network Devices",
+  "uid": "ise3-endpoints"
+}

@@ -227,6 +227,12 @@ POLICY_SETS = (
     "Corporate-Wired", "Corporate-Wireless", "Guest-Wireless", "Voice",
     "IoT-MAB", "VPN-RemoteAccess", "Device-Admin",
 )
+COMMAND_SETS = (
+    "Permit-Show", "Permit-Interface", "Permit-Operations", "Deny-Dangerous",
+)
+SHELL_PROFILES = (
+    "IOS-Admin", "IOS-ReadOnly", "NXOS-Admin", "Firewall-Admin",
+)
 AUTHZ_RULES = (
     "Corp-Compliant-Full", "Corp-NonCompliant-Remediate", "Domain-Computer",
     "Employee-EAP-TLS", "Contractor-Limited", "Voice-Device", "Printer-Static",
@@ -261,11 +267,13 @@ class Estate:
     """A deterministic synthetic deployment of the requested size."""
 
     def __init__(self, *, nads=5000, endpoints=100_000, sessions=20_000,
-                 accounts=1000, churn_per_hour=0.12, clock=None):
+                 accounts=1000, policy_sets=len(POLICY_SETS),
+                 churn_per_hour=0.12, clock=None):
         self.nad_count = int(nads)
         self.endpoint_count = int(endpoints)
         self.session_count = int(sessions)
         self.account_count = int(accounts)
+        self.policy_set_count = max(1, int(policy_sets))
 
         site_count = max(1, min(40, self.nad_count // 100 or 1))
         self.locations = tuple(f"Site-{index:02d}" for index in range(site_count))
@@ -275,6 +283,7 @@ class Estate:
         psn_count = max(2, min(50, -(-self.session_count // 2500)))
         self.psns = tuple(f"psn{index:02d}.ise.example.net"
                           for index in range(1, psn_count + 1))
+        self.policy_sets = self._build_policy_sets()
         self.nodes = self._build_nodes()
         self.nads = self._build_nads()
         self.accounts = self._build_accounts()
@@ -329,6 +338,14 @@ class Estate:
                  "enabled": index % 17 != 0}
                 for index in range(self.account_count)]
 
+    def _build_policy_sets(self):
+        names = list(POLICY_SETS[:self.policy_set_count])
+        names.extend(
+            f"Device-Admin-{index:03d}"
+            for index in range(len(names), self.policy_set_count)
+        )
+        return tuple(names)
+
     def window_start(self):
         """Which endpoint index the active set currently starts at."""
         if self._clock is None or self.churn_per_hour <= 0:
@@ -347,7 +364,7 @@ class Estate:
         psn = index % len(self.psns)
         authz = index % len(AUTHZ_PROFILES)
         rule = index % len(AUTHZ_RULES)
-        policy = index % len(POLICY_SETS)
+        policy = index % len(self.policy_sets)
         method = index % len(AUTH_METHODS)
         posture = index % len(POSTURE_STATUSES)
         system = index % len(OPERATING_SYSTEMS)
@@ -377,12 +394,18 @@ class Estate:
             "posture_status": POSTURE_STATUSES[posture],
             "posture_agent_version": AGENT_VERSIONS[agent],
             "operating_system": OPERATING_SYSTEMS[system],
+            "execution_steps": "1001,1002,1003",
+            "step_latency": (
+                f"1={2 + index % 4};2={7 + index % 11};"
+                f"3={15 + index % 23}"
+            ),
+            "total_authentication_latency": str(35 + index % 90),
             "posture_report": ";".join(
                 f"{policy_name}:{'Passed' if (index + offset) % 4 else 'Failed'}"
                 for offset, policy_name in enumerate(POSTURE_POLICIES)),
             "other_attr_string": (
                 f":!:AuthorizationPolicyMatchedRule={AUTHZ_RULES[rule]}"
-                f":!:ISEPolicySetName={POLICY_SETS[policy]}"
+                f":!:ISEPolicySetName={self.policy_sets[policy]}"
                 f":!:AuthenticationIdentityStore=AD-example"
                 f":!:SelectedAccessService=Default Network Access"),
         }
@@ -681,7 +704,34 @@ class FakeIseHttp:
             self.clock.advance(self.latency.openapi(), "pan")
             return self._json(request, {"response": [
                 {"id": f"ps-{index}", "name": name, "rank": index}
-                for index, name in enumerate(POLICY_SETS)]})
+                for index, name in enumerate(self.estate.policy_sets)]})
+        policy_rules = re.fullmatch(
+            r"/policy/device-admin/policy-set/(ps-\d+)/(authentication|authorization)",
+            path,
+        )
+        if policy_rules:
+            policy_id, rule_type = policy_rules.groups()
+            index = int(policy_id.removeprefix("ps-"))
+            count = 3 + index % 5 if rule_type == "authentication" else 8 + index % 9
+            self.clock.advance(self.latency.openapi(count), "pan")
+            return self._json(request, {"response": [
+                {
+                    "id": f"{policy_id}-{rule_type}-{rule}",
+                    "name": f"{rule_type}-{rule}",
+                    "rank": rule,
+                }
+                for rule in range(count)
+            ]})
+        if path == "/policy/device-admin/command-sets":
+            self.clock.advance(self.latency.openapi(), "pan")
+            return self._json(request, {"response": [
+                {"id": f"cs-{index}", "name": name}
+                for index, name in enumerate(COMMAND_SETS)]})
+        if path == "/policy/device-admin/shell-profiles":
+            self.clock.advance(self.latency.openapi(), "pan")
+            return self._json(request, {"response": [
+                {"id": f"sp-{index}", "name": name}
+                for index, name in enumerate(SHELL_PROFILES)]})
         self.unhandled.append(f"api/v1{path}")
         return self._send(request, 404, b'{"error":"no such OpenAPI resource"}',
                           "application/json")
@@ -1066,7 +1116,7 @@ class Domains:
         if name in ("device_type", "nad_type"):
             return list(estate.device_types)
         if "policy_set" in name:
-            return list(POLICY_SETS)
+            return list(estate.policy_sets)
         if "azn" in name or "authz" in name or "authorization_profile" in name:
             return list(AUTHZ_PROFILES)
         if "profile" in name:

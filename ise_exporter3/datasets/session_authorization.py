@@ -40,6 +40,7 @@ Location is deliberately absent: `network_devices` already publishes
 `ise3_network_device_assignment{nad,location,ops_owner}`, so a dashboard joins
 for it rather than every session series carrying a copy.
 """
+import math
 from collections import defaultdict
 
 from prometheus_client import Gauge
@@ -93,9 +94,39 @@ policy_set_by_nad = Gauge(
     "Distinct endpoints per matched policy set, per NAD. Kept per switch because "
     "'which switches are still in open mode' has no useful coarser form",
     ["provider", "policy_set", "nad"])
+failed_authz_profiles = Gauge(
+    "ise3_session_failed_authz_profile_endpoints",
+    "Distinct failed endpoints per selected authorization profile and ops owner",
+    ["provider", "authz_profile", "ops_owner"])
+failed_authz_rules = Gauge(
+    "ise3_session_failed_authz_rule_endpoints",
+    "Distinct failed endpoints per matched authorization rule and ops owner",
+    ["provider", "authz_rule", "ops_owner"])
+failed_policy_sets = Gauge(
+    "ise3_session_failed_policy_set_endpoints",
+    "Distinct failed endpoints per matched policy set and ops owner",
+    ["provider", "policy_set", "ops_owner"])
+authentication_latency = Gauge(
+    "ise3_session_authentication_latency_seconds",
+    "Current MnT authentication latency across usable session-detail samples",
+    ["provider", "statistic"])
+authentication_latency_samples = Gauge(
+    "ise3_session_authentication_latency_samples",
+    "Current MnT session details carrying usable total authentication latency",
+    ["provider"])
+step_latency = Gauge(
+    "ise3_session_authentication_step_latency_seconds",
+    "Current MnT authentication-step latency across usable session-detail samples",
+    ["provider", "step", "statistic"])
+step_latency_samples = Gauge(
+    "ise3_session_authentication_step_latency_samples",
+    "Current MnT session details carrying usable latency for each step",
+    ["provider", "step"])
 
 _METRICS = (status_endpoints, failure_reasons, auth_methods, authz_profiles,
-            authz_rules, policy_sets, policy_set_by_nad)
+            authz_rules, policy_sets, policy_set_by_nad, failed_authz_profiles,
+            failed_authz_rules, failed_policy_sets, authentication_latency,
+            authentication_latency_samples, step_latency, step_latency_samples)
 
 # Per-cycle warm-up ceiling. Bounded so a cold start cannot monopolise the MnT
 # lane; the cache converges over several cycles instead.
@@ -105,6 +136,8 @@ WARMUP_FETCHES_PER_CYCLE = 2000
 # typically runs, so "one series per NAD" can be stated as a number rather than
 # as a shape. The real count comes from the appliance and is not knowable here.
 TYPICAL_POLICY_SETS = 4
+MAX_STEP_CODES = 256
+MAX_ISE_STEP_CODE = 999_999
 
 
 def _top_nads_danger(value, scale):
@@ -205,6 +238,41 @@ def warm(ctx, cache, macs):
     return len(outstanding) - len(batch)
 
 
+def _milliseconds(value):
+    text = str(value or "").strip()
+    if text.lower().endswith("ms"):
+        text = text[:-2].strip()
+    try:
+        milliseconds = float(text)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(milliseconds) or not 0 <= milliseconds <= 86_400_000:
+        return None
+    return milliseconds / 1000.0
+
+
+def _step_samples(execution_steps, raw_latency):
+    codes = [item.strip() for item in str(execution_steps or "").split(",")]
+    samples = []
+    for item in str(raw_latency or "").split(";"):
+        position, separator, raw_ms = item.partition("=")
+        if not separator:
+            continue
+        try:
+            index = int(position.strip()) - 1
+        except ValueError:
+            continue
+        if index < 0:
+            continue
+        step = codes[index] if index < len(codes) and codes[index] else str(index + 1)
+        if not step.isdigit() or not 1 <= int(step) <= MAX_ISE_STEP_CODE:
+            continue
+        seconds = _milliseconds(raw_ms)
+        if seconds is not None:
+            samples.append((step, seconds))
+    return samples
+
+
 def aggregate(cache, macs, directory):
     """Build distinct-MAC sets per dimension from whatever is cached.
 
@@ -213,8 +281,10 @@ def aggregate(cache, macs, directory):
     """
     buckets = {name: defaultdict(set) for name in (
         "status", "reason", "method", "profile", "rule", "policy_set",
-        "policy_set_nad")}
+        "policy_set_nad", "failed_profile", "failed_rule", "failed_policy_set")}
     covered = 0
+    total_latencies = []
+    step_latencies = defaultdict(list)
 
     for mac in macs:
         detail = cache.get(mac)
@@ -246,18 +316,39 @@ def aggregate(cache, macs, directory):
         # selected_azn_profiles can be comma-separated.
         for profile in detail["profiles"].split(","):
             if profile.strip():
-                buckets["profile"][(label(profile.strip()), owner)].add(mac)
+                normalized = label(profile.strip())
+                buckets["profile"][(normalized, owner)].add(mac)
+                if detail["failed"]:
+                    buckets["failed_profile"][(normalized, owner)].add(mac)
 
         # Already parsed out of other_attr_string when the record was cached,
         # rather than on every read of every session on every cycle.
         rule, policy_set = detail["authz_rule"], detail["policy_set"]
         if rule:
             buckets["rule"][(label(rule), owner)].add(mac)
+            if detail["failed"]:
+                buckets["failed_rule"][(label(rule), owner)].add(mac)
         if policy_set:
             buckets["policy_set"][(label(policy_set), owner)].add(mac)
             buckets["policy_set_nad"][(label(policy_set), nad)].add(mac)
+            if detail["failed"]:
+                buckets["failed_policy_set"][(label(policy_set), owner)].add(mac)
 
-    return buckets, covered
+        total_latency = _milliseconds(detail["total_authentication_latency"])
+        if total_latency is not None:
+            total_latencies.append(total_latency)
+        for step, seconds in _step_samples(
+                detail["execution_steps"], detail["step_latency"]):
+            step_latencies[step].append(seconds)
+
+    # Step codes are a label. Keep the most-observed legitimate codes and use
+    # numeric ordering as a stable tie-breaker if a malformed population tries
+    # to manufacture an unbounded domain.
+    step_latencies = dict(sorted(
+        step_latencies.items(),
+        key=lambda item: (-len(item[1]), int(item[0])),
+    )[:MAX_STEP_CODES])
+    return buckets, covered, total_latencies, step_latencies
 
 
 def rank_nads(bucket, keep):
@@ -294,7 +385,8 @@ def fetch(ctx):
 
     outstanding = warm(ctx, cache, macs)
     directory = nad_directory.shared()
-    buckets, covered = aggregate(cache, macs, directory)
+    buckets, covered, total_latencies, step_latencies = aggregate(
+        cache, macs, directory)
     cache.publish(len(macs), deferred_count=outstanding)
     # The scheduler revisits a filling cache at the rate the budget affords
     # rather than at this dataset's cadence, so it needs the count too.
@@ -312,6 +404,42 @@ def fetch(ctx):
         ctx.set(authz_rules, len(members), authz_rule=rule, ops_owner=owner)
     for (name, owner), members in buckets["policy_set"].items():
         ctx.set(policy_sets, len(members), policy_set=name, ops_owner=owner)
+    for (profile, owner), members in buckets["failed_profile"].items():
+        ctx.set(
+            failed_authz_profiles,
+            len(members),
+            authz_profile=profile,
+            ops_owner=owner,
+        )
+    for (rule, owner), members in buckets["failed_rule"].items():
+        ctx.set(
+            failed_authz_rules,
+            len(members),
+            authz_rule=rule,
+            ops_owner=owner,
+        )
+    for (name, owner), members in buckets["failed_policy_set"].items():
+        ctx.set(
+            failed_policy_sets,
+            len(members),
+            policy_set=name,
+            ops_owner=owner,
+        )
+
+    ctx.set(authentication_latency_samples, len(total_latencies))
+    if total_latencies:
+        for statistic, value in (
+            ("mean", sum(total_latencies) / len(total_latencies)),
+            ("max", max(total_latencies)),
+        ):
+            ctx.set(authentication_latency, value, statistic=statistic)
+    for step, samples in step_latencies.items():
+        ctx.set(step_latency_samples, len(samples), step=step)
+        for statistic, value in (
+            ("mean", sum(samples) / len(samples)),
+            ("max", max(samples)),
+        ):
+            ctx.set(step_latency, value, step=step, statistic=statistic)
 
     # The one bounded breakdown in this dataset. The rollup above is computed
     # from every session regardless, so bounding this one narrows what is
@@ -346,7 +474,8 @@ DATASET = Dataset(
                       churn_fraction=0.01, shares=POOL),
             supplies=frozenset({
                 "policy_set", "authz_rule", "authz_profile", "method",
-                "failure_reason", "status", "nad", "ops_owner"}),
+                "failure_reason", "failure_context", "status", "nad",
+                "ops_owner", "authentication_latency"}),
             coverage="converging",
             fetch=fetch,
         ),
