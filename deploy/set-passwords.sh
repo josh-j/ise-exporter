@@ -8,6 +8,7 @@ CONFIG_FILE="$CONFIG_DIR/config.toml"
 CREDENTIALS_FILE="$CONFIG_DIR/credentials"
 V2_CONFIG_FILE="${ISE_EXPORTER_V2_CONFIG:-/etc/ise-exporter/config.toml}"
 SERVICE_NAME=ise-exporter3
+SERVICE_USER=ise-exporter3
 ACTION=restart-active
 MODE=prompt
 
@@ -156,9 +157,12 @@ print("systemd credentials and configured target hosts are ready")
 PY
 }
 
-if [[ ! -d "$CONFIG_DIR" ]]; then
-    install -d -o root -g root -m 750 "$CONFIG_DIR"
+CONFIG_GROUP=root
+if command -v getent >/dev/null 2>&1 \
+        && getent group "$SERVICE_USER" >/dev/null; then
+    CONFIG_GROUP="$SERVICE_USER"
 fi
+install -d -o root -g "$CONFIG_GROUP" -m 750 "$CONFIG_DIR"
 if [[ ! -f "$CREDENTIALS_FILE" ]]; then
     install -o root -g root -m 600 /dev/null "$CREDENTIALS_FILE"
 fi

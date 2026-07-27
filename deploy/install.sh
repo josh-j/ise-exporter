@@ -119,7 +119,7 @@ if command -v apt-get >/dev/null 2>&1 && command -v dpkg-query >/dev/null 2>&1; 
     fi
 fi
 
-for command_name in python3 useradd install systemctl readlink; do
+for command_name in python3 useradd groupadd getent install systemctl readlink find; do
     if ! command -v "$command_name" >/dev/null 2>&1; then
         echo "error: required command not found: $command_name" >&2
         exit 1
@@ -130,9 +130,14 @@ if ! python3 -c 'import sys; raise SystemExit(sys.version_info < (3, 10))'; then
     exit 1
 fi
 
+if ! getent group "$SERVICE_USER" >/dev/null; then
+    echo "==> creating system group $SERVICE_USER"
+    groupadd --system "$SERVICE_USER"
+fi
 if ! id "$SERVICE_USER" &>/dev/null; then
     echo "==> creating system user $SERVICE_USER"
-    useradd --system --no-create-home --shell /usr/sbin/nologin "$SERVICE_USER"
+    useradd --system --gid "$SERVICE_USER" --no-create-home \
+        --shell /usr/sbin/nologin "$SERVICE_USER"
 else
     echo "==> user $SERVICE_USER already exists"
 fi
@@ -141,6 +146,12 @@ echo "==> ensuring directories"
 install -d -o root -g root -m 755 "$INSTALL_DIR"
 install -d -o root -g "$SERVICE_USER" -m 750 "$CONFIG_DIR" "$CERTS_DIR"
 install -d -o "$SERVICE_USER" -g "$SERVICE_USER" -m 750 "$STATE_DIR"
+# StateDirectory fixes the directory itself, not files left by a manual or
+# root-run v3 process. Normalize the complete tree so SQLite can reopen its
+# database, journal, WAL, and shared-memory files after an in-place upgrade.
+chown -R "$SERVICE_USER":"$SERVICE_USER" "$STATE_DIR"
+find "$STATE_DIR" -type d -exec chmod 750 {} +
+find "$STATE_DIR" -type f -exec chmod 640 {} +
 
 # Reuse trusted CA material when staging beside v2, but never overwrite a v3
 # certificate. Configuration still needs its paths reviewed because schemas
@@ -226,13 +237,12 @@ else
     chmod 600 "$CREDENTIALS_FILE"
 fi
 
-chown root:"$SERVICE_USER" "$CERTS_DIR"
-chmod 750 "$CERTS_DIR"
-if compgen -G "$CERTS_DIR"'/*' >/dev/null; then
-    chown root:"$SERVICE_USER" "$CERTS_DIR"/*
-    chmod 640 "$CERTS_DIR"/*
-    chmod 644 "$CERTS_DIR"/*.cer "$CERTS_DIR"/*.crt 2>/dev/null || true
-fi
+# CA bundles and optional pxGrid client keys can be arranged in subdirectories.
+# Normalize the full tree: directories must remain searchable, while files are
+# readable only by root and the exporter service group.
+chown -R root:"$SERVICE_USER" "$CERTS_DIR"
+find "$CERTS_DIR" -type d -exec chmod 750 {} +
+find "$CERTS_DIR" -type f -exec chmod 640 {} +
 
 echo "==> installing systemd unit"
 install -o root -g root -m 644 \
