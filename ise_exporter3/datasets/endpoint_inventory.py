@@ -15,6 +15,7 @@ from prometheus_client import Gauge
 from .. import reporting
 from ..model import Cost, Dataset, Provider
 from ..parsing import finite
+from ..pxgrid import endpoint_attribute
 
 
 endpoints_total = Gauge(
@@ -118,6 +119,32 @@ def fetch(ctx):
             ctx.set(gauge, finite(row.get("endpoints")), **{label_name: value})
 
 
+def fetch_pxgrid(ctx):
+    endpoints = ctx.transport.get_endpoints(max_age=ctx.interval)
+    profiles = {}
+    profile_present = 0
+    unprofiled_count = 0
+    for endpoint in endpoints:
+        profile = str(endpoint_attribute(
+            endpoint, "endPointPolicy", "EndPointPolicy",
+            "mfcInfoEndpointPolicy", "MFCInfoEndpointPolicy") or "").strip()
+        if profile:
+            profile_present += 1
+        else:
+            profile = "Unknown"
+            unprofiled_count += 1
+        profiles[profile] = profiles.get(profile, 0) + 1
+
+    ctx.set(endpoints_total, len(endpoints))
+    ctx.set(unprofiled, unprofiled_count)
+    ctx.set(
+        field_coverage,
+        profile_present / len(endpoints) if endpoints else 1.0,
+        field="profile")
+    for profile, count in profiles.items():
+        ctx.set(by_profile, count, profile=profile)
+
+
 DATASET = Dataset(
     name="endpoint_inventory",
     description="Endpoint totals, profiles, identity groups",
@@ -143,10 +170,14 @@ DATASET = Dataset(
         ),
         Provider(
             name="pxgrid",
-            cost=Cost(target="pxgrid", requests=1),
+            # getEndpoints is paged at 1,000 rows. The transport cache is shared
+            # with endpoint_attributes, so both datasets charge this pool once.
+            cost=Cost(target="pxgrid", requests=1, scales_with="endpoints",
+                      requests_per_1k=1, shares="pxgrid_endpoints"),
             supplies=frozenset({"total", "profile"}),
             coverage="bounded",
             requires=("capability:pxgrid_endpoints",),
+            fetch=fetch_pxgrid,
             notes="the pxGrid endpoint directory is not a mirror of the endpoint "
                   "database: it carries only endpoints with live published "
                   "profiling context, so the total is not a fleet total",

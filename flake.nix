@@ -57,7 +57,7 @@
         default = pkgs.mkShell {
           packages = [
             (pkgs.python312.withPackages (p: [
-              p.prometheus-client p.requests p.oracledb
+              p.prometheus-client p.requests p.websocket-client p.oracledb
               p.pytest p.ruff p.pip p.build p.hatchling
               (foundationSdk pkgs)
             ]))

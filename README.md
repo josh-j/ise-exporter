@@ -31,10 +31,12 @@ deliberately not done:
   the simulator settles that: the lab has almost no RADIUS or TACACS event
   volume, and the simulator's appliance is synthetic. Behaviour at 5,000 NADs
   rests on the simulator alone.
-- **pxGrid is not ported.** 18 of 19 datasets collect; `endpoint_attributes`
-  (model, OS, MDM) is pxGrid-only by design and is unavailable until the v1
-  streaming client is ported. Datasets that can fall back do so visibly, and
-  `plan` prints `fell back from pxgrid`.
+- **pxGrid 2.0 is operational.** The exporter activates and discovers services
+  through the control API, reconciles `getSessions` with the persistent
+  STOMP-over-WSS topic, and pages/caches `getEndpoints`. Session reconnects and
+  sequence gaps take a fresh baseline before data is exposed again. Password or
+  client-certificate authentication is supported, with the same persistent
+  account-lockout guard and enforced request budget as the other transports.
 
 ## Quick start
 
@@ -168,7 +170,7 @@ and a value that is legal but unwise warns at start.
 | PAN (ERS / OpenAPI) | `deployment`, `network_devices`, `certificates`, `licensing`, `backup`, `patches`, `tacacs_config`, `tacacs_policy_rules` |
 | MnT | `active_sessions`, `session_authorization`, `posture_current` |
 | Data Connect | `endpoint_inventory`, `profile_events`, `psn_performance`, `radius_reporting`, `radius_accounting`, `radius_errors`, `posture_history`, `nad_health`, `tacacs_activity`, `source_freshness` |
-| pxGrid | `endpoint_attributes` (declared, not yet built) |
+| pxGrid | `active_sessions`, `posture_current`, `endpoint_inventory`, `endpoint_attributes` |
 
 Metrics are prefixed `ise3_`. `provider` is a label on the data itself, because
 two sources for one dataset rarely mean exactly the same thing — a dashboard can

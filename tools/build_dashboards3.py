@@ -2288,6 +2288,41 @@ def health_dashboard():
                         )
                     ),
                     sized(
+                        tbl(
+                            "pxGrid session stream",
+                            "Persistent STOMP/WebSocket health, reconciled "
+                            "session state, last-frame age, and successful "
+                            "connection count. A connected value of one means "
+                            "the stream also completed its getSessions baseline.",
+                            [
+                                instant(
+                                    metric("ise3_pxgrid_stream_connected"),
+                                    "connected",
+                                ),
+                                instant(
+                                    metric("ise3_pxgrid_stream_sessions"),
+                                    "sessions",
+                                    "B",
+                                ),
+                                instant(
+                                    "time() - "
+                                    + metric(
+                                        "ise3_pxgrid_stream_last_frame_timestamp"
+                                    ),
+                                    "last frame age",
+                                    "C",
+                                ),
+                                instant(
+                                    metric(
+                                        "ise3_pxgrid_stream_reconnects_total"
+                                    ),
+                                    "connections",
+                                    "D",
+                                ),
+                            ],
+                        )
+                    ),
+                    sized(
                         ts(
                             "API request rate",
                             "Outbound requests by ISE target, API surface, and "

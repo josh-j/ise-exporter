@@ -80,6 +80,7 @@ client_cert = ""
 client_key = ""
 ca_bundle = ""
 verify_tls = true
+request_timeout = 30
 
 # ---------------------------------------------------------------------------
 # Budget: the ceiling per target. This is what makes load a decision rather

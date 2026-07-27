@@ -136,6 +136,20 @@ api_request_duration_seconds = Histogram(
     ["target", "api"],
     buckets=(0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30))
 
+# --- pxGrid stream ---
+pxgrid_stream_connected = Gauge(
+    "ise3_pxgrid_stream_connected",
+    "The pxGrid session STOMP/WebSocket is connected with a reconciled baseline")
+pxgrid_stream_last_frame_timestamp = Gauge(
+    "ise3_pxgrid_stream_last_frame_timestamp",
+    "Unix time of the most recent pxGrid WebSocket data or control frame")
+pxgrid_stream_sessions = Gauge(
+    "ise3_pxgrid_stream_sessions",
+    "Active sessions held in the reconciled pxGrid stream state")
+pxgrid_stream_reconnects_total = Counter(
+    "ise3_pxgrid_stream_reconnects_total",
+    "Successful pxGrid stream connections, including the initial connection")
+
 # --- Data Connect ---
 # The duty cycle is the one budget expressed in time rather than requests, so it
 # gets its own visibility: what was configured, what each view actually cost, and

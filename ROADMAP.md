@@ -20,8 +20,7 @@ measurement, it says so and names the measurement that would settle it — and o
 still does: **item 4's warm-up burst value is deliberately left undeclared until
 the MnT API is timed on a real appliance.**
 
-What remains before this can replace v2 is in **Already known** at the end, and
-none of it is code: live validation, the pxGrid port, and the cutover itself.
+What remains before this can replace v2 is in **Already known** at the end.
 
 Status key: `[ ]` open · `[~]` partly done · `[x]` done
 
@@ -360,7 +359,9 @@ Tracked in `docs/v3-status.md`; repeated here because they gate the items above.
   never met a real appliance. Expect to fix column names on first contact. The
   simulator answers whatever a statement asks for, so it structurally *cannot*
   catch a wrong column.
-- **pxGrid is not ported.** `endpoint_attributes` is unavailable and datasets
-  that prefer pxGrid fall back visibly.
+- **pxGrid is ported and unit-tested.** Control/REST discovery, the persistent
+  session stream, snapshot/event reconciliation, endpoint paging, and provider
+  adapters are built. Lab deployment and live metric verification remain the
+  completion gate.
 - **Cutover is not attempted.** The sequence is: run v3 on a side port against
   the lab, diff `/metrics` against the running v2, then switch the unit.

@@ -70,7 +70,8 @@ class Outcome:
 class FetchContext:
     """What a provider is given: its transport, the config, and a way to write."""
 
-    def __init__(self, *, dataset, provider, transport, config, publication):
+    def __init__(self, *, dataset, provider, transport, config, publication,
+                 interval=None):
         self.dataset = dataset
         self.provider = provider
         self.transport = transport
@@ -81,6 +82,7 @@ class FetchContext:
         # a constant that used to agree.
         self.limits = config.limits
         self.settings = config.dataset(dataset.name)
+        self.interval = int(interval or dataset.default_interval)
         self.deferred = 0
         self._publication = publication
 
@@ -137,7 +139,7 @@ class Runner:
             dataset.metrics, limits=self.config.limits, provider=provider_name)
         context = FetchContext(
             dataset=dataset, provider=provider, transport=transport,
-            config=self.config, publication=publication)
+            config=self.config, publication=publication, interval=entry.interval)
 
         try:
             # Settle the preconditions the offline plan had to defer before

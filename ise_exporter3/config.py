@@ -72,7 +72,8 @@ _TARGET_FIELDS = MappingProxyType({
     "oracle": frozenset({"host", "port", "service", "user", "ca_bundle",
                          "verify_tls"}),
     "pxgrid": frozenset({"host", "port", "node_name", "client_cert",
-                         "client_key", "ca_bundle", "verify_tls"}),
+                         "client_key", "ca_bundle", "verify_tls",
+                         "request_timeout"}),
 })
 
 _BUDGET_FIELDS = frozenset({"requests_per_hour", "duty_cycle_percent",

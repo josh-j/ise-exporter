@@ -24,7 +24,9 @@ and production -- which is why its coverage is declared `bounded`.
 """
 from prometheus_client import Gauge
 
+from ..labels import label
 from ..model import Cost, Dataset, Provider
+from ..pxgrid import bool_label, endpoint_attribute
 
 
 by_model = Gauge(
@@ -48,6 +50,42 @@ published = Gauge(
 _METRICS = (by_model, by_os, mdm_registered, mdm_compliant, published)
 
 
+def fetch_pxgrid(ctx):
+    endpoints = ctx.transport.get_endpoints(max_age=ctx.interval)
+    models, systems = {}, {}
+    registered, compliant = {}, {}
+
+    for endpoint in endpoints:
+        manufacturer = label(endpoint_attribute(
+            endpoint, "mfcInfoHardwareManufacturer",
+            "MFCInfoHardwareManufacturer", "manufacturer", "oui"))
+        model = label(endpoint_attribute(
+            endpoint, "mfcInfoHardwareModel", "MFCInfoHardwareModel", "model"))
+        operating_system = label(endpoint_attribute(
+            endpoint, "mfcInfoOperatingSystem", "MFCInfoOperatingSystem",
+            "operatingSystem", "os"))
+        models[(manufacturer, model)] = models.get((manufacturer, model), 0) + 1
+        systems[operating_system] = systems.get(operating_system, 0) + 1
+
+        registered_value = bool_label(endpoint_attribute(
+            endpoint, "mdmRegistered", "MDMRegistered"))
+        compliant_value = bool_label(endpoint_attribute(
+            endpoint, "mdmCompliant", "MDMCompliant"))
+        registered[registered_value] = registered.get(registered_value, 0) + 1
+        compliant[compliant_value] = compliant.get(compliant_value, 0) + 1
+
+    ctx.set(published, len(endpoints))
+    for (manufacturer, model), count in models.items():
+        ctx.set(
+            by_model, count, manufacturer=manufacturer, model=model)
+    for operating_system, count in systems.items():
+        ctx.set(by_os, count, os=operating_system)
+    for state, count in registered.items():
+        ctx.set(mdm_registered, count, registered=state)
+    for state, count in compliant.items():
+        ctx.set(mdm_compliant, count, compliant=state)
+
+
 DATASET = Dataset(
     name="endpoint_attributes",
     description="Endpoint model, OS, and MDM attributes",
@@ -56,10 +94,12 @@ DATASET = Dataset(
     providers=(
         Provider(
             name="pxgrid",
-            cost=Cost(target="pxgrid", requests=1),
+            cost=Cost(target="pxgrid", requests=1, scales_with="endpoints",
+                      requests_per_1k=1, shares="pxgrid_endpoints"),
             supplies=frozenset({"model", "manufacturer", "os", "mdm"}),
             coverage="bounded",
             requires=("capability:pxgrid_endpoints",),
+            fetch=fetch_pxgrid,
             notes="only endpoints ISE is actively publishing profiling context "
                   "for; endpoints without live context are absent entirely, and "
                   "this returned zero on both this lab and production. No "

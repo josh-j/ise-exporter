@@ -20,6 +20,7 @@ from prometheus_client import Gauge
 from .. import detail_cache, nad_directory
 from ..labels import label
 from ..model import Cost, Dataset, Provider
+from ..pxgrid import first, normalize_mac as normalize_pxgrid_mac, session_key
 from .session_authorization import CACHE, active_list, active_macs, normalize_mac
 
 
@@ -99,6 +100,44 @@ def parse_posture_report(value):
         policy, result = policy.strip(), result.strip()
         if policy and result:
             yield policy, result
+
+
+def fetch_pxgrid(ctx):
+    sessions = ctx.transport.get_sessions(max_age=ctx.interval)
+    directory = nad_directory.shared()
+    statuses = defaultdict(set)
+    fields = defaultdict(int)
+    identified = set()
+
+    for session in sessions:
+        identity = normalize_pxgrid_mac(first(
+            session, "macAddress", "callingStationId", "calling_station_id"))
+        identity = identity or session_key(session)
+        if not identity:
+            continue
+        identified.add(identity)
+        owner = label(directory.ops_owner(
+            first(session, "nasIpAddress", "nas_ip_address"),
+            first(session, "nasName", "networkDeviceName", "network_device_name")))
+        status = canonical_status(first(
+            session, "postureStatus", "posture_status"))
+        statuses[(status, owner)].add(identity)
+        for field_name, keys in (
+            ("posture_status", ("postureStatus", "posture_status")),
+            ("mdm_registered", ("mdmRegistered", "mdm_registered")),
+            ("mdm_compliant", ("mdmCompliant", "mdm_compliant")),
+        ):
+            fields[field_name] += int(bool(first(session, *keys)))
+
+    for (status, owner), members in statuses.items():
+        ctx.set(
+            endpoints_by_status, len(members),
+            status=status, ops_owner=owner)
+    if identified:
+        for field_name, populated in fields.items():
+            ctx.set(
+                field_coverage, populated / len(identified),
+                field=field_name)
 
 
 def fetch_mnt(ctx):
@@ -191,6 +230,7 @@ DATASET = Dataset(
             cost=Cost(target="pxgrid", requests=0, streaming=True),
             supplies=frozenset({"status", "mdm"}),
             requires=("capability:pxgrid_session_topic",),
+            fetch=fetch_pxgrid,
             notes="session postureStatus only; no per-policy PostureReport breakdown",
         ),
     ),

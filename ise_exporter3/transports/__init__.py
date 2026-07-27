@@ -119,12 +119,14 @@ def build_transports(config, *, kinds=None):
     which datasets that makes unavailable, and by name.
     """
     from .dataconnect import DataConnectTransport
+    from .pxgrid import PxGridTransport
     from .rest import RestTransport
 
     builders = {
         "pan": lambda: RestTransport(config, "pan"),
         "mnt": lambda: RestTransport(config, "mnt"),
         "oracle": lambda: DataConnectTransport(config),
+        "pxgrid": lambda: PxGridTransport(config),
     }
     if kinds is not None:
         builders = {name: build for name, build in builders.items() if name in kinds}

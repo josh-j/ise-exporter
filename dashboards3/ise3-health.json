@@ -611,6 +611,59 @@
         "type": "prometheus",
         "uid": "${prometheus}"
       },
+      "description": "Persistent STOMP/WebSocket health, reconciled session state, last-frame age, and successful connection count. A connected value of one means the stream also completed its getSessions baseline.",
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 50
+      },
+      "options": null,
+      "repeatDirection": "h",
+      "targets": [
+        {
+          "expr": "ise3_pxgrid_stream_connected{instance=~\"$deployment\"}",
+          "instant": true,
+          "legendFormat": "connected",
+          "range": false,
+          "refId": "A"
+        },
+        {
+          "expr": "ise3_pxgrid_stream_sessions{instance=~\"$deployment\"}",
+          "instant": true,
+          "legendFormat": "sessions",
+          "range": false,
+          "refId": "B"
+        },
+        {
+          "expr": "time() - ise3_pxgrid_stream_last_frame_timestamp{instance=~\"$deployment\"}",
+          "instant": true,
+          "legendFormat": "last frame age",
+          "range": false,
+          "refId": "C"
+        },
+        {
+          "expr": "ise3_pxgrid_stream_reconnects_total{instance=~\"$deployment\"}",
+          "instant": true,
+          "legendFormat": "connections",
+          "range": false,
+          "refId": "D"
+        }
+      ],
+      "title": "pxGrid session stream",
+      "transformations": [],
+      "transparent": false,
+      "type": "table"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${prometheus}"
+      },
       "description": "Outbound requests by ISE target, API surface, and outcome after all rate limiting.",
       "fieldConfig": {
         "defaults": {
@@ -624,7 +677,7 @@
       "gridPos": {
         "h": 8,
         "w": 12,
-        "x": 0,
+        "x": 12,
         "y": 50
       },
       "options": {
@@ -675,8 +728,8 @@
       "gridPos": {
         "h": 8,
         "w": 12,
-        "x": 12,
-        "y": 50
+        "x": 0,
+        "y": 58
       },
       "options": {
         "legend": {
@@ -726,7 +779,7 @@
       "gridPos": {
         "h": 8,
         "w": 12,
-        "x": 0,
+        "x": 12,
         "y": 58
       },
       "options": {

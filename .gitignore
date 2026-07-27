@@ -8,4 +8,5 @@ certs/
 dist/
 test-results/
 docs/
-tests/
+tests/*
+!tests/test_v3_pxgrid.py

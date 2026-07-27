@@ -25,6 +25,7 @@ from prometheus_client import Gauge
 from .. import nad_directory
 from ..labels import label
 from ..model import Cost, Dataset, Provider
+from ..pxgrid import first, normalize_mac
 
 
 total = Gauge("ise3_active_sessions_total", "Active RADIUS sessions", ["provider"])
@@ -41,6 +42,40 @@ unique_endpoints = Gauge(
     ["provider"])
 
 _METRICS = (total, by_psn, by_nad, by_ops_owner, unique_endpoints)
+
+
+def fetch_pxgrid(ctx):
+    sessions = ctx.transport.get_sessions(max_age=ctx.interval)
+    directory = nad_directory.shared()
+    nads, owners, endpoints = defaultdict(int), defaultdict(int), set()
+    matched = unmatched = 0
+
+    for session in sessions:
+        nas_ip = first(session, "nasIpAddress", "nas_ip_address")
+        device = first(
+            session, "nasName", "networkDeviceName", "network_device_name")
+        classification = directory.lookup(nas_ip, device)
+        if classification:
+            matched += 1
+            nad, location, owner = classification
+        else:
+            unmatched += 1
+            nad = label(device or nas_ip, "unknown")
+            location, owner = "Unknown", "unknown"
+        nads[(nad, location)] += 1
+        owners[owner] += 1
+        mac = normalize_mac(first(
+            session, "macAddress", "callingStationId", "calling_station_id"))
+        if mac:
+            endpoints.add(mac)
+
+    nad_directory.record_attribution(matched, unmatched)
+    ctx.set(total, len(sessions))
+    ctx.set(unique_endpoints, len(endpoints))
+    for (nad, location), count in nads.items():
+        ctx.set(by_nad, count, nad=nad, location=location)
+    for owner, count in owners.items():
+        ctx.set(by_ops_owner, count, ops_owner=owner)
 
 
 def fetch_mnt(ctx):
@@ -99,6 +134,7 @@ DATASET = Dataset(
             cost=Cost(target="pxgrid", requests=1, streaming=True),
             supplies=frozenset({"session", "endpoint", "posture_status", "mdm"}),
             requires=("capability:pxgrid_session_topic",),
+            fetch=fetch_pxgrid,
             notes="no owning-PSN field in the session object; PSN breakdown needs another source",
         ),
         Provider(
