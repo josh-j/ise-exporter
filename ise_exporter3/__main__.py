@@ -1,14 +1,16 @@
 """Entry point.
 
 ``plan`` comes first on purpose: you should be able to see what a configuration
-will cost each ISE persona before anything connects to an appliance. It needs no
-credentials and no network. ``run`` executes that same plan.
+will cost each ISE persona before anything connects to an appliance. It remains
+offline unless ``--live-scale`` is requested. ``run`` executes that same plan.
 """
 from __future__ import annotations
 
 import argparse
 import json
 import logging
+import os
+from pathlib import Path
 import signal
 import sys
 import threading
@@ -16,7 +18,14 @@ import threading
 from . import __version__
 from .api import OperatorApi
 from .config import Config, ConfigError
+from .credentials import (
+    DEFAULT_CREDENTIALS_FILE,
+    SECRET_KEYS,
+    CredentialsError,
+    load_credentials,
+)
 from .plan import build_plan, render_plan
+from .scale_discovery import discover_scale, render_scale_discovery
 from .scheduler import Scheduler
 from .server import HttpServer
 from .snapshots import LockedCollectorRegistry
@@ -30,11 +39,51 @@ EXIT_OVER_BUDGET = 1
 EXIT_CONFIG_ERROR = 2
 
 
-def _add_config_argument(parser):
+def _add_config_arguments(parser):
     parser.add_argument(
         "--config", "-c", metavar="PATH",
         help="configuration file (default: $ISE_EXPORTER3_CONFIG, "
              "else /etc/ise-exporter3/config.toml)")
+    credentials = parser.add_mutually_exclusive_group()
+    credentials.add_argument(
+        "--credentials-file", metavar="PATH",
+        help="load exporter passwords from this root/private EnvironmentFile "
+             "(default: $ISE_EXPORTER3_CREDENTIALS_FILE, else "
+             f"{DEFAULT_CREDENTIALS_FILE} when readable)")
+    credentials.add_argument(
+        "--no-credentials-file", action="store_true",
+        help="use only credentials already present in the process environment")
+
+
+def _load_config(args):
+    environment = dict(os.environ)
+    loaded = ""
+    if not args.no_credentials_file:
+        path = (
+            args.credentials_file
+            or environment.get("ISE_EXPORTER3_CREDENTIALS_FILE")
+            or DEFAULT_CREDENTIALS_FILE
+        )
+        environment, loaded = load_credentials(
+            path,
+            environ=environment,
+            optional=args.credentials_file is None,
+        )
+        if (
+            not loaded
+            and args.credentials_file is None
+            and Path(path).exists()
+            and not os.access(path, os.R_OK)
+            and not SECRET_KEYS.issubset(environment)
+        ):
+            logger.warning(
+                "credentials file exists but is not readable: %s; run as root, "
+                "use --credentials-file, or use --no-credentials-file for an "
+                "environment-only plan",
+                path,
+            )
+    config = Config.load(args.config, environ=environment)
+    return config, loaded
 
 
 def build_parser():
@@ -50,35 +99,59 @@ def build_parser():
         help="show the resolved source and hourly load for every dataset",
         description="Resolve the configuration against the dataset registry and "
                     "report which source supplies each dataset and what it costs "
-                    "each ISE persona per hour. Requires no appliance access.")
-    _add_config_argument(plan_parser)
+                    "each ISE persona per hour. Offline unless --live-scale is used.")
+    _add_config_arguments(plan_parser)
     plan_parser.add_argument(
         "--json", action="store_true", help="emit the plan as JSON")
     plan_parser.add_argument(
         "--strict", action="store_true",
         help="also fail when an enabled dataset has no viable provider")
+    plan_parser.add_argument(
+        "--live-scale", "--discover-scale", action="store_true",
+        help="perform five bounded ISE reads, show the observed fleet counts, "
+             "and preview the plan using them without changing the TOML")
 
     run_parser = subcommands.add_parser(
         "run", help="collect and serve metrics",
         description="Execute the plan: serve /metrics and collect each dataset "
                     "from its selected provider on its target's lane.")
-    _add_config_argument(run_parser)
+    _add_config_arguments(run_parser)
     return parser
 
 
 def command_plan(args):
     try:
-        config = Config.load(args.config)
-    except ConfigError as error:
+        config, credentials_file = _load_config(args)
+    except (ConfigError, CredentialsError) as error:
         logger.error("%s", error)
         return EXIT_CONFIG_ERROR
 
+    discovery = None
+    if args.live_scale:
+        discovery = discover_scale(config)
+        try:
+            config = config.with_scale(discovery.scale)
+        except ConfigError as error:
+            logger.error("%s", error)
+            return EXIT_CONFIG_ERROR
+
     plan = build_plan(config)
     if args.json:
-        print(json.dumps(plan.to_dict(), indent=2))
+        document = plan.to_dict()
+        document["credentials_file"] = credentials_file or None
+        if discovery is not None:
+            document["scale_discovery"] = discovery.to_dict()
+        print(json.dumps(document, indent=2))
     else:
+        if credentials_file:
+            print(f"credentials loaded from {credentials_file}")
+        if discovery is not None:
+            print(render_scale_discovery(discovery))
+            print()
         print(render_plan(plan))
 
+    if discovery is not None and not discovery.complete:
+        return EXIT_CONFIG_ERROR
     if not plan.fits:
         return EXIT_OVER_BUDGET
     if args.strict and plan.unresolved:
@@ -88,8 +161,8 @@ def command_plan(args):
 
 def command_run(args):
     try:
-        config = Config.load(args.config)
-    except ConfigError as error:
+        config, _credentials_file = _load_config(args)
+    except (ConfigError, CredentialsError) as error:
         logger.error("%s", error)
         return EXIT_CONFIG_ERROR
     logging.getLogger().setLevel(config.exporter.log_level)

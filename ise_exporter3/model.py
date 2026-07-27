@@ -27,6 +27,32 @@ SCALE_DIMENSIONS = (
     "nads", "endpoints", "sessions", "accounts", "policy_sets",
 )
 
+# Operator-facing meanings of the values above. These deliberately describe
+# ISE objects rather than exporter implementation details: an endpoint record
+# is not necessarily online, and a session is not necessarily one endpoint.
+SCALE_DESCRIPTIONS = {
+    "nads": (
+        "Configured Network Access Devices in ERS: switches, wireless "
+        "controllers, VPN headends, and other devices that send AAA traffic."
+    ),
+    "endpoints": (
+        "Records in ISE's endpoint database, including inactive and historical "
+        "devices; this is not a count of devices currently online."
+    ),
+    "sessions": (
+        "RADIUS sessions active on MnT right now. One endpoint can hold more "
+        "than one session, so this is not a unique-device or user count."
+    ),
+    "accounts": (
+        "ISE Internal Users records examined by Device Administration inventory; "
+        "external AD/LDAP users are not included."
+    ),
+    "policy_sets": (
+        "Device Administration policy sets configured for TACACS+, not the "
+        "authorization rules contained inside those sets."
+    ),
+}
+
 
 class ModelError(ValueError):
     """A dataset, provider, or cost declaration is malformed."""
@@ -52,9 +78,9 @@ class Scale:
     nads: int = 500
     endpoints: int = 10_000
     sessions: int = 2_000
-    # Internal Device Administration accounts. A human-managed set, but it sizes
-    # the TACACS configuration sweep and a wrong dimension there made that cache
-    # believe it needed fifty cycles to warm when it needs ten.
+    # ISE Internal Users objects. This includes records not currently used by
+    # Device Administration, because the ERS collection has to examine the
+    # inventory before it can classify it. It excludes external identity stores.
     accounts: int = 200
     # Device Administration policy sets. Rule inventory needs two OpenAPI reads
     # per set, so this remains separate from internal accounts in the load model.

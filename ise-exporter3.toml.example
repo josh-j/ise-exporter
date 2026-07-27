@@ -30,12 +30,14 @@ enforce_budget = true
 
 # How big this deployment is. Costs that scale with the fleet are resolved
 # against these numbers, so the plan is predictive for *your* estate.
+# `ise-exporter3 plan --live-scale` pulls all five as bounded live counts,
+# explains their sources, and previews the plan without changing this file.
 [scale]
-nads = 5000
-accounts = 1000
-policy_sets = 100
-endpoints = 100000
-sessions = 20000
+nads = 5000        # configured switches, WLCs, VPN headends, and other AAA NADs
+endpoints = 100000 # endpoint-database records, including inactive devices
+sessions = 20000   # active RADIUS sessions now; not unique endpoints or users
+accounts = 1000    # ISE Internal Users records; excludes external AD/LDAP users
+policy_sets = 100  # Device Admin TACACS+ policy sets, not rules inside the sets
 
 # ---------------------------------------------------------------------------
 # Targets: which ISE personas can be reached, and as whom.

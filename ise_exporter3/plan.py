@@ -17,7 +17,7 @@ from dataclasses import dataclass
 
 from . import datasets as registry
 from .config import format_duration
-from .model import TARGETS, Load
+from .model import SCALE_DESCRIPTIONS, SCALE_DIMENSIONS, TARGETS, Load
 
 
 @dataclass(frozen=True)
@@ -161,10 +161,10 @@ class Plan:
             "config_file": self.config.path,
             "profile": self.config.profile,
             "scale": {
-                "nads": self.config.scale.nads,
-                "endpoints": self.config.scale.endpoints,
-                "sessions": self.config.scale.sessions,
+                dimension: getattr(self.config.scale, dimension)
+                for dimension in SCALE_DIMENSIONS
             },
+            "scale_descriptions": dict(SCALE_DESCRIPTIONS),
             "fits_budget": self.fits,
             "limits": {
                 name: {"value": value, "origin": origin}
@@ -505,10 +505,16 @@ def render_plan(plan):
         f"ise-exporter3 plan  {config.path or '(no file)'}",
         f"profile={config.profile}  scale: {config.scale.nads:,} nads, "
         f"{config.scale.endpoints:,} endpoints, {config.scale.sessions:,} sessions, "
-        f"{config.scale.accounts:,} Device Admin accounts, "
+        f"{config.scale.accounts:,} Internal Users, "
         f"{config.scale.policy_sets:,} policy sets",
         "",
     ]
+    out.append("What each planning count means:")
+    for dimension in SCALE_DIMENSIONS:
+        out.append(
+            f"  {dimension}={getattr(config.scale, dimension):,}: "
+            f"{SCALE_DESCRIPTIONS[dimension]}")
+    out.append("")
     out += _render_table(
         ("DATASET", "PROVIDER", "TARGET", "EVERY", "REQ/H", "DBSEC/H", "NOTE"),
         _dataset_rows(plan))

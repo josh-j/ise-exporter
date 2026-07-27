@@ -30,7 +30,7 @@ from __future__ import annotations
 
 import os
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from types import MappingProxyType
 
@@ -175,7 +175,7 @@ class TargetConfig:
         if self.name == "pan":
             return bool(self.user and self.password)
         if self.name == "mnt":
-            return True  # reuses the PAN account, validated on the pan target
+            return bool(self.user and self.password)  # mirrors the PAN account
         if self.name == "oracle":
             return bool(self.user and self.password and self.service)
         if self.name == "pxgrid":
@@ -191,6 +191,7 @@ class TargetConfig:
             return f"targets.{self.name}.host is not set"
         missing = {
             "pan": "targets.pan.user and ISE_PASS",
+            "mnt": "targets.pan.user and ISE_PASS",
             "oracle": "targets.oracle.user/service and ISE_DATACONNECT_PASSWORD",
             "pxgrid": "targets.pxgrid.node_name and a password or client certificate",
         }.get(self.name, "required credentials")
@@ -299,6 +300,37 @@ class Config:
 
     def budget_for(self, target):
         return self.budget[target]
+
+    def with_scale(self, scale):
+        """Return a preview config with costs and derived limits at ``scale``.
+
+        Explicit limit overrides remain explicit. Dynamic warnings are
+        recomputed so a live-scale preview cannot retain advice written for the
+        old declared scale.
+        """
+        if not isinstance(scale, Scale):
+            raise ConfigError("live scale must be a Scale")
+
+        old_dynamic = list(limits_module.dangerous(self.limits, self.scale))
+        _warn_dangerous_options(self.datasets, self.scale, old_dynamic)
+        stable = [warning for warning in self.warnings if warning not in old_dynamic]
+
+        overrides = {
+            name: getattr(self.limits, name)
+            for name in self.limits.overridden
+        }
+        dynamic = []
+        try:
+            resolved_limits = limits_module.derive(scale, overrides, dynamic)
+        except limits_module.LimitsError as error:
+            raise ConfigError(str(error)) from error
+        _warn_dangerous_options(self.datasets, scale, dynamic)
+        return replace(
+            self,
+            scale=scale,
+            limits=resolved_limits,
+            warnings=tuple(stable + dynamic),
+        )
 
     @classmethod
     def load(cls, path=None, *, environ=None):

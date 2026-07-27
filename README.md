@@ -88,6 +88,31 @@ It manages `ISE_PASS`, `ISE_DATACONNECT_PASSWORD`, and optional
 check. An active service restarts by default; an inactive one stays stopped
 unless `--start` is given.
 
+Direct `plan` and `run` invocations also load that credentials file when it is
+readable, so their provider selection matches the systemd service rather than
+reporting credential-backed providers as unavailable. An explicit process
+environment wins over the file. Use `--credentials-file PATH` for another
+root/private file or `--no-credentials-file` for a deliberately offline plan.
+The loader accepts only the three password keys above and refuses symlinks,
+non-regular files, unexpected keys, duplicate keys, and group/world-readable
+files.
+
+To compare the declared `[scale]` with the current ISE deployment and preview
+the plan at the observed size:
+
+```bash
+sudo /opt/ise-exporter3/.venv/bin/ise-exporter3 plan --live-scale
+```
+
+This performs five bounded reads: ERS totals for NADs, endpoint records, and
+Internal Users; PAN OpenAPI for Device Admin policy sets; and MnT `ActiveCount`
+for current sessions. It shows declared, observed, and effective values plus
+their real-world meanings, then builds the preview plan from the effective
+values. It does not edit `config.toml`. If a read is unavailable, its declared
+value is shown as the fallback and the command exits nonzero instead of silently
+calling a mixed observed/declared plan complete. `--discover-scale` is an alias,
+and `--json` includes the same provenance as structured data.
+
 ### Migrating an existing v2 service
 
 The installer detects `ise-exporter.service` and stages v3 beside it without
@@ -123,7 +148,7 @@ commented and is what CI plans against.
 | Section | What it decides |
 |---|---|
 | `profile` | `production` (~100k endpoints / 5k NADs) or `lab`; everything below overrides it |
-| `[scale]` | how many NADs / endpoints / sessions / Device Admin accounts and policy sets, so the plan is predictive for your estate |
+| `[scale]` | how many NADs / endpoint records / active sessions / ISE Internal Users / Device Admin policy sets, so the plan is predictive for your estate |
 | `[targets]` | which ISE personas are reachable, and as whom |
 | `[budget]` | the ceiling per target — requests/hour for REST, duty cycle for Data Connect |
 | `[limits]` | what one statement, batch and snapshot may return; derived from `[scale]`, shown so it can be read |

@@ -587,6 +587,8 @@ class FakeIseHttp:
             if remainder:
                 return self._ers_user_detail(request, remainder)
             return self._ers_user_list(request, query)
+        if path == "/config/endpoint":
+            return self._ers_endpoint_list(request, query)
         self.unhandled.append(f"ers{path}")
         return self._send(request, 404, b'{"error":"no such ERS resource"}',
                           "application/json")
@@ -638,6 +640,27 @@ class FakeIseHttp:
                 for account in self.estate.accounts]
         return self._search_result(request, "/config/internaluser", rows, page,
                                    size, len(rows))
+
+    def _ers_endpoint_list(self, request, query):
+        """A paged identity-only view; never materialize the whole fake estate."""
+        page, size = self._page(query)
+        start = (page - 1) * size
+        stop = min(self.estate.endpoint_count, start + size)
+        rows = [
+            {"id": f"endpoint-{index:08d}", "name": mac_of(index)}
+            for index in range(start, stop)
+        ]
+        result = {"total": self.estate.endpoint_count, "resources": rows}
+        if stop < self.estate.endpoint_count:
+            result["nextPage"] = {
+                "rel": "next",
+                "href": (
+                    f"{self.base_url}/ers/config/endpoint"
+                    f"?size={size}&page={page + 1}"
+                ),
+            }
+        self.clock.advance(self.latency.ers_page(), "pan")
+        return self._json(request, {"SearchResult": result})
 
     def _ers_user_detail(self, request, account_id):
         self.clock.advance(self.latency.ers_detail(), "pan")
@@ -778,6 +801,14 @@ class FakeIseHttp:
     # --- MnT ------------------------------------------------------------
 
     def _mnt(self, request, path):
+        if path == "/Session/ActiveCount":
+            self.clock.advance(self.latency.mnt_detail(), "mnt")
+            body = (
+                '<?xml version="1.0" encoding="UTF-8"?>'
+                f"<sessionCount><count>{self.estate.session_count}</count>"
+                "</sessionCount>"
+            ).encode("utf-8")
+            return self._send(request, 200, body, "application/xml")
         if path == "/Session/ActiveList":
             self.clock.advance(
                 self.latency.mnt_active_list(self.estate.session_count), "mnt")

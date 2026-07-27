@@ -42,6 +42,9 @@ logger = logging.getLogger(__name__)
 
 ERS_MAX_PAGES = 2000
 ERS_MAX_ROWS = 200_000
+# A total-only response retains one integer, not that many rows. Keep a sanity
+# bound without inheriting the much smaller enumeration-memory ceiling.
+ERS_MAX_TOTAL = 10_000_000
 PAN_MAX_PAGES = 100
 PAN_MAX_ROWS = 100_000
 HTTP_READ_CHUNK_BYTES = 64 * 1024
@@ -585,6 +588,6 @@ class RestTransport(Transport):
             total = int(total)
         except (TypeError, ValueError):
             self._malformed(api, "malformed ERS total for %s: %r", url, total)
-        if not 0 <= total <= ERS_MAX_ROWS:
+        if not 0 <= total <= ERS_MAX_TOTAL:
             self._malformed(api, "ERS total out of bounds for %s: %d", url, total)
         return total
