@@ -1,0 +1,140 @@
+"""What one cached MnT session record keeps, and what it must not lose.
+
+The cache holds one record per active MAC -- 20,000 at the declared scale -- and
+it used to hold the whole MnT document. These tests pin the projection that
+replaced it: that it keeps everything both readers actually use, that it resolves
+ISE's spelling variants once rather than on every read, and above all that it
+preserves the one distinction a naive field copy would quietly destroy.
+"""
+import pytest
+
+from ise_exporter3.session_detail import parse_attributes, project
+
+
+FULL = {
+    "calling_station_id": "00:11:22:33:44:55",
+    "network_device_name": "sw-01",
+    "nas_ip_address": "10.1.1.1",
+    "location": "All Locations#Germany#Ramstein AB",
+    "passed": "true",
+    "authentication_method": "dot1x",
+    "selected_azn_profiles": "PermitAccess,Quarantine",
+    "other_attr_string":
+        ":!:ISEPolicySetName=Wired Open Mode:!:"
+        "AuthorizationPolicyMatchedRule=Basic_Authenticated_Access:!:",
+    "posture_status": "Compliant",
+    "posture_report": "AV_Policy:Passed;FW_Policy:Failed",
+    "posture_agent_version": "5.1.2.42",
+    "operating_system": "Windows 11",
+    "execution_steps": "1001,1002",
+    "step_latency": "1=5;2=12",
+    "total_authentication_latency": "24",
+    # Everything below is real MnT payload that nothing has ever read.
+    "acct_session_id": "0A0101010000001F",
+    "audit_session_id": "0A01010100000020",
+    "nas_port_id": "GigabitEthernet1/0/12",
+    "nas_port_type": "Ethernet",
+    "framed_ip_address": "10.20.30.40",
+    "service_type": "Framed",
+    "identity_group": "Workstations",
+    "server": "psn1",
+    "acct_session_time": "3600",
+}
+
+
+def test_the_projection_keeps_what_its_readers_use():
+    projected = project(FULL)
+    assert projected["nad"] == "sw-01"
+    assert projected["nas_ip"] == "10.1.1.1"
+    assert projected["passed"] is True
+    assert projected["method"] == "dot1x"
+    assert projected["profiles"] == "PermitAccess,Quarantine"
+    assert projected["policy_set"] == "Wired Open Mode"
+    assert projected["authz_rule"] == "Basic_Authenticated_Access"
+    assert projected["posture_status"] == "Compliant"
+    assert projected["posture_report"] == "AV_Policy:Passed;FW_Policy:Failed"
+    assert projected["agent_version"] == "5.1.2.42"
+    assert projected["operating_system"] == "Windows 11"
+    assert projected["execution_steps"] == "1001,1002"
+    assert projected["step_latency"] == "1=5;2=12"
+    assert projected["total_authentication_latency"] == "24"
+
+
+def test_the_projection_drops_what_nothing_reads():
+    projected = project(FULL)
+    for field in ("acct_session_id", "audit_session_id", "nas_port_id",
+                  "nas_port_type", "framed_ip_address", "service_type",
+                  "identity_group", "server", "acct_session_time",
+                  "other_attr_string"):
+        assert field not in projected, f"{field} is retained but never read"
+    # 20,000 of these are held at once, so the shape is the memory.
+    assert len(projected) < len(FULL)
+
+
+def test_location_is_not_retained_per_session():
+    # network_devices publishes ise3_network_device_assignment{nad,location,
+    # ops_owner}, so a dashboard joins for it. Keeping a copy on every session
+    # was 20,000 copies of a fact that already had one home -- and it was parsed
+    # and then discarded unread at the only place that asked for it.
+    assert "location" not in project(FULL)
+
+
+def test_an_accounting_only_record_is_distinguishable_from_a_failed_one():
+    # The distinction a naive {k: record.get(k)} loses. A stop record carries
+    # no verdict at all, and counting it as an authorization would dilute every
+    # ratio built from this cache -- but `passed` missing and `passed` false
+    # both read as falsey.
+    accounting = project({"calling_station_id": "x", "acct_status_type": "Stop"})
+    failed = project({"calling_station_id": "x", "failed": "true"})
+
+    assert accounting["has_verdict"] is False
+    assert accounting["passed"] is False and accounting["failed"] is False
+    assert failed["has_verdict"] is True
+    assert failed["failed"] is True
+
+
+@pytest.mark.parametrize("field,value,key", [
+    ("posture_status", "Compliant", "posture_status"),
+    ("PostureStatus", "Compliant", "posture_status"),
+    ("posture_assessment_status", "Compliant", "posture_status"),
+    ("posture_report", "P:Passed", "posture_report"),
+    ("PostureReport", "P:Passed", "posture_report"),
+    ("posture_agent_version", "5.1", "agent_version"),
+    ("PostureAgentVersion", "5.1", "agent_version"),
+    ("agent_version", "5.1", "agent_version"),
+    ("operating_system", "Windows", "operating_system"),
+    ("os_type", "Windows", "operating_system"),
+    ("endpoint_operating_system", "Windows", "operating_system"),
+])
+def test_ise_spelling_variants_are_resolved_once_at_the_boundary(field, value, key):
+    # They used to be tried on every read of every record on every cycle. Now a
+    # new spelling is handled in one place and costs one comparison per session.
+    assert project({field: value})[key] == value
+
+
+def test_the_first_populated_variant_wins():
+    projected = project({"posture_status": "", "PostureStatus": "Compliant"})
+    assert projected["posture_status"] == "Compliant"
+
+
+def test_a_missing_field_is_an_empty_string_not_a_missing_key():
+    # Readers index the projection directly, so every declared key must exist.
+    projected = project({})
+    assert projected["nad"] == "" and projected["policy_set"] == ""
+    assert projected["has_verdict"] is False
+
+
+def test_other_attr_string_is_parsed_once_and_not_retained():
+    projected = project(FULL)
+    assert "other_attr_string" not in projected
+    assert projected["policy_set"] and projected["authz_rule"]
+
+
+def test_attribute_parsing_handles_the_ise_pair_format():
+    parsed = parse_attributes(":!:A=1:!:B=two:!:broken:!:C=3:!:")
+    assert parsed == {"A": "1", "B": "two", "C": "3"}
+
+
+def test_a_record_that_is_not_a_record_does_not_raise():
+    # One malformed MnT response must not fail a 20,000-session collection.
+    assert project(None)["nad"] == ""

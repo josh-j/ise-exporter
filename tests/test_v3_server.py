@@ -1,0 +1,191 @@
+"""End to end: a real listener, a real scrape, real dataset series."""
+import gzip
+import urllib.error
+import urllib.request
+
+import pytest
+
+from ise_exporter3.config import Config
+from ise_exporter3.plan import build_plan
+from ise_exporter3.scheduler import Scheduler
+from ise_exporter3.server import HttpServer, accepts_gzip
+from ise_exporter3.snapshots import LockedCollectorRegistry
+from tests.test_v3_scheduler import ScriptedTransport
+
+
+@pytest.fixture
+def served():
+    server = HttpServer("127.0.0.1", 0, LockedCollectorRegistry())
+    server.start()
+    try:
+        yield server, f"http://127.0.0.1:{server.address[1]}"
+    finally:
+        server.stop(timeout=5)
+
+
+def _get(url):
+    with urllib.request.urlopen(url, timeout=5) as response:
+        return response.status, response.read().decode("utf-8")
+
+
+def test_metrics_are_served_after_a_collection(served):
+    server, base = served
+    config = Config.from_document(
+        {"targets": {"pan": {"host": "pan1", "user": "ro"}}},
+        path="test.toml", environ={"ISE_PASS": "secret"})
+    scheduler = Scheduler(config, build_plan(config), {"pan": ScriptedTransport()},
+                          asynchronous=False)
+    scheduler.bootstrap()
+    scheduler.tick()
+
+    status, body = _get(f"{base}/metrics")
+    assert status == 200
+    # Data, health, provider selection and the load model all in one scrape.
+    assert 'ise3_deployment_pan_ha_enabled{provider="openapi"} 1.0' in body
+    assert 'ise3_dataset_up{dataset="deployment",provider="openapi"} 1.0' in body
+    assert 'ise3_dataset_provider_active{dataset="deployment",provider="openapi"} 1.0' in body
+    assert "ise3_load_planned_requests_per_hour" in body
+    assert "ise3_load_measured_requests_total" in body
+
+
+def test_health_and_unknown_paths(served):
+    _server, base = served
+    assert _get(f"{base}/healthz")[0] == 200
+    with pytest.raises(urllib.error.HTTPError) as raised:
+        _get(f"{base}/nope")
+    assert raised.value.code == 404
+
+
+def test_the_listener_stops_cleanly_and_frees_its_port():
+    server = HttpServer("127.0.0.1", 0, LockedCollectorRegistry())
+    server.start()
+    port = server.address[1]
+    server.stop(timeout=5)
+    # Binding the same port again proves the socket was really released.
+    again = HttpServer("127.0.0.1", port, LockedCollectorRegistry())
+    again.start()
+    again.stop(timeout=5)
+
+
+def test_stopping_a_listener_that_never_started_returns_instead_of_hanging():
+    # run()'s teardown calls stop() unconditionally, so this path is reached
+    # whenever start() raised. shutdown() waits on an event serve_forever()
+    # sets, which would otherwise block forever here.
+    HttpServer("127.0.0.1", 0, LockedCollectorRegistry()).stop(timeout=5)
+
+
+# --- scrape size ------------------------------------------------------------
+
+def _get_raw(url, headers=None):
+    request = urllib.request.Request(url, headers=headers or {})
+    with urllib.request.urlopen(request, timeout=5) as response:
+        return response.status, response.headers, response.read()
+
+
+def test_a_client_that_offers_gzip_gets_a_compressed_scrape(served):
+    server, base = served
+    config = Config.from_document(
+        {"targets": {"pan": {"host": "pan1", "user": "ro"}}},
+        path="test.toml", environ={"ISE_PASS": "secret"})
+    scheduler = Scheduler(config, build_plan(config), {"pan": ScriptedTransport()},
+                          asynchronous=False)
+    scheduler.bootstrap()
+    scheduler.tick()
+
+    _status, plain_headers, plain = _get_raw(f"{base}/metrics")
+    _status, headers, body = _get_raw(
+        f"{base}/metrics", {"Accept-Encoding": "gzip"})
+
+    assert plain_headers.get("Content-Encoding") is None
+    assert headers.get("Content-Encoding") == "gzip"
+    # Prometheus text compresses roughly tenfold; anything under half is a sign
+    # the body is not what we think it is. The two scrapes are not compared byte
+    # for byte because counters move between them -- exact fidelity is asserted
+    # against a fixed body below.
+    assert len(body) < len(plain) / 2
+    assert gzip.decompress(body).startswith(b"# HELP")
+    assert int(headers.get("Content-Length")) == len(body)
+
+
+def test_compression_does_not_change_the_body_it_delivers():
+    # Fidelity, against a body that does not move underneath the assertion.
+    payload = (b"# HELP ise3_probe a fixed body\n"
+               b"# TYPE ise3_probe gauge\n") + b"ise3_probe 1.0\n" * 500
+    server = HttpServer(
+        "127.0.0.1", 0, LockedCollectorRegistry(),
+        routes={"/probe": lambda: (200, payload, "text/plain; charset=utf-8")})
+    server.start()
+    try:
+        base = f"http://127.0.0.1:{server.address[1]}"
+        _status, headers, body = _get_raw(
+            f"{base}/probe", {"Accept-Encoding": "gzip"})
+        assert headers.get("Content-Encoding") == "gzip"
+        assert gzip.decompress(body) == payload
+        assert len(body) < len(payload) / 10
+
+        _status, plain_headers, plain = _get_raw(f"{base}/probe")
+        assert plain_headers.get("Content-Encoding") is None
+        assert plain == payload
+    finally:
+        server.stop(timeout=5)
+
+
+def test_the_response_says_it_was_negotiated_even_when_it_was_not_compressed():
+    # A cache that stores the plain body and later serves it to a gzip client,
+    # or the reverse, is the failure Vary exists to prevent. It has to be sent
+    # on both answers, not only the compressed one.
+    server = HttpServer("127.0.0.1", 0, LockedCollectorRegistry())
+    server.start()
+    try:
+        base = f"http://127.0.0.1:{server.address[1]}"
+        _status, headers, _body = _get_raw(f"{base}/metrics")
+        assert headers.get("Vary") == "Accept-Encoding"
+    finally:
+        server.stop(timeout=5)
+
+
+@pytest.mark.parametrize("header,expected", [
+    ("gzip", True),
+    ("gzip, deflate", True),
+    ("gzip;q=0.5", True),
+    ("*", True),
+    ("deflate", False),
+    ("", False),
+    (None, False),
+    # A client saying it does not want gzip, which a substring match reads as
+    # a client asking for it.
+    ("gzip;q=0", False),
+    ("deflate, gzip;q=0", False),
+])
+def test_gzip_is_only_used_when_the_client_actually_offered_it(header, expected):
+    assert accepts_gzip(header) is expected
+
+
+def test_a_tiny_body_is_not_compressed_for_nothing(served):
+    server, base = served
+    _status, headers, body = _get_raw(
+        f"{base}/healthz", {"Accept-Encoding": "gzip"})
+    assert headers.get("Content-Encoding") is None
+    assert body == b"ok\n"
+
+
+def test_compression_happens_outside_the_snapshot_lock(served):
+    """The lock is held for generation and must not also cover compression.
+
+    Generation already blocks publication for its duration; adding compression
+    to that window would make every scrape a longer stall for the collectors.
+    This asserts the shape rather than the timing: the payload is produced by
+    the locked registry, and _respond -- which compresses -- is called after
+    that call has returned and released the lock.
+    """
+    import inspect
+
+    from ise_exporter3 import server as server_module
+
+    source = inspect.getsource(server_module.make_handler)
+    generate_at = source.index("generate_latest(registry)")
+    respond_at = source.index("self._respond(200, payload", generate_at)
+    assert generate_at < respond_at
+    # And the compression itself is in _respond, not beside generate_latest.
+    assert "gzip.compress" not in source[generate_at:respond_at]
+    assert "gzip.compress" in source
