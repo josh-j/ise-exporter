@@ -180,6 +180,11 @@ cp -a "$SOURCE_DIR/powershell/." "$PWSH_DIR/"
 chown -R root:root "$PWSH_DIR"
 chmod -R go-w "$PWSH_DIR"
 chmod -R a+rX "$PWSH_DIR"
+# `a+rX` deliberately does not invent executable bits on regular data files.
+# The launcher is code, though, and older checkouts accidentally committed it as
+# 0644. Set it explicitly so an update repairs that deployment before the
+# self-check executes it below.
+chmod 755 "$PWSH_DIR/ise-cli3"
 install -d -o root -g root -m 755 "$(dirname "$PWSH_MODULE_LINK")"
 rm -rf -- "$PWSH_MODULE_LINK"
 ln -s "$PWSH_DIR/Ise.Cli3" "$PWSH_MODULE_LINK"
