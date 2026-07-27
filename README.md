@@ -22,21 +22,25 @@ API answers from live state, and dashboards are generated and contract-tested.
 the measurements behind each item. Every item in it is closed.
 
 It has run against a live appliance — `laba-ise-001`, ISE 3.3 Patch 11 — with
-all 18 datasets collecting, no `schema_incompatible`, and every view and column
-the generated SQL names present on the real catalogue. Two things remain
-deliberately not done:
+every then-implemented non-pxGrid dataset collecting, no `schema_incompatible`,
+and every view and column the generated SQL names present on the real catalogue.
+One limitation remains:
 
 - **Aggregate values are unverified.** A statement that runs and returns
   plausible numbers can still measure the wrong thing, and neither the lab nor
   the simulator settles that: the lab has almost no RADIUS or TACACS event
   volume, and the simulator's appliance is synthetic. Behaviour at 5,000 NADs
   rests on the simulator alone.
-- **pxGrid 2.0 is operational.** The exporter activates and discovers services
-  through the control API, reconciles `getSessions` with the persistent
-  STOMP-over-WSS topic, and pages/caches `getEndpoints`. Session reconnects and
-  sequence gaps take a fresh baseline before data is exposed again. Password or
-  client-certificate authentication is supported, with the same persistent
-  account-lockout guard and enforced request budget as the other transports.
+
+**pxGrid 2.0 is operational and lab-verified.** The exporter activates and
+discovers services through the control API, reconciles `getSessions` with the
+persistent STOMP-over-WSS topic, and pages/caches `getEndpoints`. On the live
+lab it established the stream, reconciled and published all 27 active sessions,
+matched the previous MnT count, completed the bounded endpoint read, and was
+scraped successfully by Prometheus. Session reconnects and sequence gaps take a
+fresh baseline before data is exposed again. Password or client-certificate
+authentication is supported, with the same persistent account-lockout guard
+and enforced request budget as the other transports.
 
 ## Quick start
 

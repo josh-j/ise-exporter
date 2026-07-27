@@ -351,17 +351,22 @@ estate large enough for the wrong answer to be obvious.
   statement about a session. Here there was no true statement available, so the
   only honest output is none.
 
-## Already known, and not from the simulation
+## Live completion evidence
 
-Tracked in `docs/v3-status.md`; repeated here because they gate the items above.
+The implementation gates above were checked against the real ISE 3.3 Patch 11
+lab, not only the simulator:
 
-- **No live validation yet.** The Data Connect SQL and the ERS/MnT parsing have
-  never met a real appliance. Expect to fix column names on first contact. The
-  simulator answers whatever a statement asks for, so it structurally *cannot*
-  catch a wrong column.
-- **pxGrid is ported and unit-tested.** Control/REST discovery, the persistent
-  session stream, snapshot/event reconciliation, endpoint paging, and provider
-  adapters are built. Lab deployment and live metric verification remain the
-  completion gate.
-- **Cutover is not attempted.** The sequence is: run v3 on a side port against
-  the lab, diff `/metrics` against the running v2, then switch the unit.
+- **Data Connect, ERS, and MnT are live-validated.** The generated SQL resolved
+  against the appliance catalogue and the collectors parsed real responses.
+- **pxGrid is live-validated.** On 2026-07-27 the deployed exporter activated
+  its password-authenticated account, discovered session/pubsub/endpoint
+  services, established the persistent STOMP-over-WSS subscription, reconciled
+  a 27-session `getSessions` baseline, and published 27 active sessions and 27
+  unique endpoints. That matched the 27 sessions the previous MnT source
+  reported immediately before cutover. `getEndpoints` completed successfully
+  with zero published endpoint-context records, which is a valid bounded answer
+  for this ISE 3.3 lab rather than a failed or missing dataset.
+- **The systemd cutover is complete.** `maas` runs the immutable `c872029`
+  source pin with pxGrid supplied through a systemd credential. Both pxGrid
+  datasets are up and fresh, the stream remains connected without a service
+  restart, and deck00 Prometheus scrapes the target with `up = 1`.
