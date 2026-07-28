@@ -21,6 +21,10 @@ Three things bound what an ad-hoc statement can be:
 - **The window is a validated integer**, built by ``reporting.recent`` (or its
   epoch twin) exactly like a scheduled statement's, and clamped to
   ``limits.window_hours``. A view with no time column cannot be given one.
+  ``last=all`` is the explicit opt-out: the row limit becomes the only bound,
+  read newest-first so Oracle can stop at ``FETCH FIRST`` rather than sort the
+  history, with the statement timeout and the byte ceilings as the backstop --
+  and the duty cycle still charges whatever the scan really cost.
 - **One statement at a time, and only when the lane is nearly free.** A
   non-blocking lock makes concurrent requests fail fast rather than queue, and a
   request that would sit through a long cooldown is refused with the wait, so
@@ -328,6 +332,10 @@ class Request:
     entry: View
     hours: int = 0
     window_requested: bool = False
+    # last=all: the operator explicitly traded the time bound for the row
+    # bound. Distinct from an omitted last, which keeps an event view's
+    # default window.
+    window_disabled: bool = False
     equals: tuple = ()
     matches: tuple = ()
     columns: tuple = ()
@@ -412,8 +420,12 @@ def parse_request(query, limits):
             f"/api/v1/dataconnect/views", status=404)
 
     hours = 0
+    window_disabled = False
     last = _single(query, "last")
-    if last is not None:
+    if last is not None and str(last).strip().lower() == "all":
+        window_disabled = True
+        last = None
+    elif last is not None:
         try:
             seconds = parse_duration(last, key="last")
         except ConfigError as error:
@@ -454,6 +466,7 @@ def parse_request(query, limits):
         entry=entry,
         hours=hours,
         window_requested=last is not None,
+        window_disabled=window_disabled,
         equals=tuple(equals),
         matches=tuple(matches),
         columns=tuple(columns),
@@ -554,7 +567,7 @@ def build_query(request, catalog_columns, limits):
         raise _invalid(
             f"{entry.view} has no event time column, so last cannot bound it")
 
-    windowed = bool(time_column) and (
+    windowed = bool(time_column) and not request.window_disabled and (
         request.window_requested or not entry.window_optional)
     binds, where = {}, []
     if windowed:
@@ -579,11 +592,15 @@ def build_query(request, catalog_columns, limits):
         # columns still get their CAST and the statement says what it fetched.
         selected = default_projection(entry, columns) or tuple(sorted(columns))
 
-    # An unwindowed current-state browse keeps its stable key order; asking for
-    # a window is asking "what changed lately", which reads newest-first.
+    # An unwindowed current-state browse keeps its stable key order. Everything
+    # else that has a time column reads newest-first -- a window is "what
+    # changed lately", and last=all is "the newest N rows": ordering by time is
+    # also what lets Oracle stop at FETCH FIRST instead of sorting the history.
     order = (_validate(request.order, columns, entry, "order by")
              if request.order
-             else (time_column if windowed else selected[0]))
+             else (selected[0] if not time_column
+                   or (entry.window_optional and not windowed)
+                   else time_column))
     descending = (request.descending if request.descending is not None
                   else order == time_column)
     binds["limit"] = request.first

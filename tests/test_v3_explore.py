@@ -226,6 +226,29 @@ def test_a_current_state_view_is_only_windowed_on_request():
     assert "ORDER BY UPDATE_TIME DESC" in sql
 
 
+def test_last_all_makes_the_row_limit_the_only_bound():
+    # The explicit trade: no time bound, newest-first so Oracle stops at FETCH
+    # FIRST rather than sorting the history, and the row limit does the
+    # bounding. Distinct from omitting last, which keeps the default window.
+    sql, binds = _build(view="radius_authentications", last="all", first=50)
+    assert "WHERE" not in sql
+    assert "ORDER BY TIMESTAMP DESC" in sql
+    assert sql.endswith("FETCH FIRST :limit ROWS ONLY")
+    assert binds["limit"] == 50
+
+    # Filters still filter; only the window bound is gone.
+    sql, binds = _build(view="radius_authentications", last="ALL",
+                        eq="USERNAME:alice")
+    assert "WHERE USERNAME = :b0" in sql
+    assert "NUMTODSINTERVAL" not in sql
+
+
+def test_last_all_on_a_current_state_view_is_the_plain_browse():
+    sql, _binds = _build(view="endpoints_data", last="all")
+    assert "WHERE" not in sql
+    assert "ORDER BY MAC_ADDRESS ASC" in sql
+
+
 def test_a_view_whose_catalog_lost_its_time_column_refuses_a_window():
     # The curated time column is a preference; the catalog is the fact. When a
     # release does not carry it, last= must refuse rather than build ORA-00904.

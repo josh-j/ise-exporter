@@ -343,6 +343,11 @@ try {
     $null = Invoke-IseDcQuery -View radius_authentications -Last 2h -Force
     Assert-Like '-Force travels as force=1' '*force=1*' $listenerState.Requests[-1]
 
+    # 'all' is a value of -Last, not another parameter: rows become the only
+    # bound and the server reads newest-first.
+    $null = Invoke-IseDcQuery -View radius_authentications -Last all -First 50
+    Assert-Like '-Last all travels as last=all' '*first=50*last=all*' $listenerState.Requests[-1]
+
     $sql = Invoke-IseDcQuery -View radius_authentications -Last 1d -AsSql
     Assert-Like '-AsSql hits explain=1' '*explain=1*' $listenerState.Requests[-1]
     Assert-Equal '-AsSql is typed' 'Ise.Dc.Sql' $sql.PSObject.TypeNames[0]

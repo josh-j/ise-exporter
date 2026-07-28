@@ -465,7 +465,10 @@ function Invoke-IseDcQuery {
     server translates them and matches case-insensitively.
     .PARAMETER Last
     Time window: 30m, 2h, 1d. Clamped to the exporter's window ceiling, and
-    rejected for views that carry no time column.
+    rejected for views that carry no time column. 'all' drops the time bound
+    entirely and makes -First the only bound: the newest N rows, however old.
+    The statement timeout still applies, and the scan is charged what it
+    really cost.
     .PARAMETER Column
     Projection. Defaults to the view's curated default columns.
     .PARAMETER OrderBy
