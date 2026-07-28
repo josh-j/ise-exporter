@@ -530,7 +530,13 @@ class PxGridTransport(Transport):
                 error = self._stream_error
                 if isinstance(error, TransportError):
                     return False, error.reason, error.detail
-                return False, "connection_failed", (
+                # No stream error means the first connect and getSessions
+                # baseline are still in flight. A production baseline can
+                # outlive the bounded wait in _await_stream, and calling that
+                # a connection failure counted strikes until the scheduler
+                # stepped a source that was only warming over to a coarser
+                # one. "Not yet" is a pending reason, not a failure.
+                return False, "baseline_pending", (
                     "pxGrid session stream has not completed its baseline")
         return True, "", ""
 

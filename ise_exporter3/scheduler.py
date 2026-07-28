@@ -81,7 +81,8 @@ SLOW_RETRY_REASONS = frozenset({
 # was then pushed out to a six-hour retry -- reinstating exactly the blind
 # window the refusal existed to close, only now with an honest label on it.
 # Five minutes of waiting turned into six hours of waiting.
-PENDING_REASONS = frozenset({"dependency_pending", "schema_pending"})
+PENDING_REASONS = frozenset(
+    {"baseline_pending", "dependency_pending", "schema_pending"})
 
 
 @dataclass

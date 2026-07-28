@@ -503,6 +503,38 @@ def _demand_transport():
     return transport
 
 
+def test_a_baseline_still_in_flight_is_pending_not_a_connection_failure():
+    # The first production getSessions baseline can outlive the bounded wait in
+    # _await_stream. Until the stream has failed at something, the honest
+    # answer is "not yet": reporting it as connection_failed counted a strike
+    # per cycle until the scheduler stepped active_sessions off a source that
+    # was only warming -- the exact escalation PENDING_REASONS exists to stop.
+    transport = _demand_transport()
+    transport._connected.clear()
+    transport._stream_error = None
+    ready, reason, detail = transport.satisfies(
+        ("capability:pxgrid_session_topic",))
+    assert not ready and reason == "baseline_pending"
+    assert "baseline" in detail
+
+    # A stream that actually failed keeps its real classification.
+    transport._stream_error = TransportError("tls_failed", "handshake refused")
+    ready, reason, detail = transport.satisfies(
+        ("capability:pxgrid_session_topic",))
+    assert not ready and reason == "tls_failed"
+    assert detail == "handshake refused"
+
+
+def test_baseline_pending_is_bounded_and_the_scheduler_treats_it_as_not_yet():
+    from ise_exporter3.scheduler import PENDING_REASONS, SLOW_RETRY_REASONS
+    from ise_exporter3.transports import FAILURE_EXPLANATIONS, FAILURE_REASONS
+
+    assert "baseline_pending" in FAILURE_REASONS
+    assert FAILURE_EXPLANATIONS["baseline_pending"]
+    assert "baseline_pending" in PENDING_REASONS
+    assert "baseline_pending" not in SLOW_RETRY_REASONS
+
+
 def test_the_session_stream_is_started_by_demand_not_by_advertisement():
     # An endpoint-only deployment plans streams=0 for pxgrid. Subscribing anyway
     # holds the whole session map, re-baselines getSessions on every reconnect
