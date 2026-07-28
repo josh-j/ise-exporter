@@ -36,7 +36,7 @@ from .plan import warmup_interval
 from .runtime import Runner, forget_provider_health
 from .snapshots import snapshot_lock
 from .telemetry import _reason_slug
-from .transports import FAILURE_EXPLANATIONS
+from .transports import FAILURE_EXPLANATIONS, PENDING_REASONS
 
 
 logger = logging.getLogger(__name__)
@@ -81,8 +81,9 @@ SLOW_RETRY_REASONS = frozenset({
 # was then pushed out to a six-hour retry -- reinstating exactly the blind
 # window the refusal existed to close, only now with an honest label on it.
 # Five minutes of waiting turned into six hours of waiting.
-PENDING_REASONS = frozenset(
-    {"baseline_pending", "dependency_pending", "schema_pending"})
+#
+# The set itself lives with the reason vocabulary, because the runner reads it
+# too: a pending outcome is logged as pending, not as a failed collection.
 
 
 @dataclass

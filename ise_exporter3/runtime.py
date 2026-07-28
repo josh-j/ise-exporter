@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from . import telemetry
 from .labels import bounded_detail
 from .snapshots import Publication, snapshot_lock
-from .transports import FAILURE_EXPLANATIONS, TransportError
+from .transports import FAILURE_EXPLANATIONS, PENDING_REASONS, TransportError
 
 
 logger = logging.getLogger(__name__)
@@ -217,9 +217,19 @@ class Runner:
             duration = max(0.0, time.monotonic() - started)
             self._publish_failure(publication, name, provider_name, reason,
                                   detail, duration)
-            level = logger.warning if reason != "unexpected_error" else logger.exception
-            level("collection failed dataset=%s provider=%s reason=%s detail=%s",
-                  name, provider_name, reason, bounded_detail(detail))
+            # "Not yet" is an expected state on the way to an answer, not an
+            # alarm: cold starts pend on inventories and baselines by design,
+            # and logging those as failed collections trains operators to
+            # ignore the log line that matters when something actually breaks.
+            if reason in PENDING_REASONS:
+                logger.info(
+                    "collection pending dataset=%s provider=%s reason=%s detail=%s",
+                    name, provider_name, reason, bounded_detail(detail))
+            else:
+                level = (logger.warning if reason != "unexpected_error"
+                         else logger.exception)
+                level("collection failed dataset=%s provider=%s reason=%s detail=%s",
+                      name, provider_name, reason, bounded_detail(detail))
             return Outcome(name, provider_name, False, duration, reason,
                            bounded_detail(detail))
 

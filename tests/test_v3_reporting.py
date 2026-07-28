@@ -291,14 +291,20 @@ def test_endpoint_inventory_withholds_the_empty_identity_group_breakdown():
 def test_the_freshness_probe_ages_the_view_not_the_window():
     from ise_exporter3.datasets import source_freshness
 
-    for sql in source_freshness.statements(6, LIMITS).values():
-        # The age must not sit under the window predicate: a view staler than
-        # the window is exactly the view an operator is asking about, and it
-        # used to publish no age at all.
+    for sql in source_freshness.statements().values():
+        # The age must not sit under any predicate: a view staler than the
+        # window is exactly the view an operator is asking about, and it used
+        # to publish no age at all. No predicate also means no COUNT-shaped
+        # full scan -- every fact reads off the MAX() the timestamp index
+        # answers, which is what lets the probe fit the statement budget at
+        # production row counts.
         assert "WHERE" not in sql
+        assert "COUNT" not in sql
         assert "MAX(" in sql
-        assert "AS total_rows" in sql
-        assert "NUMTODSINTERVAL" in sql
+        assert "AS has_rows" in sql
+        # The marker routes the statement to the freshness_probe telemetry
+        # label instead of billing the first view the batch happens to name.
+        assert "ise_exporter:freshness" in sql
 
 
 def test_a_stale_view_publishes_an_age_and_an_empty_one_does_not():
@@ -308,11 +314,14 @@ def test_a_stale_view_publishes_an_age_and_an_empty_one_does_not():
         def query_many(self, statements):
             return {"batch_0": [
                 # Four days stale on the appliance, but it does hold rows.
-                {"view_name": "radius_accounting", "total_rows": 370,
-                 "recent_rows": 0, "age_seconds": 367_104},
+                {"view_name": "radius_accounting", "has_rows": 1,
+                 "age_seconds": 367_104},
                 # Empty all-time: no newest row, so no age exists to publish.
-                {"view_name": "radius_errors_view", "total_rows": 0,
-                 "recent_rows": 0, "age_seconds": -1},
+                {"view_name": "radius_errors_view", "has_rows": 0,
+                 "age_seconds": -1},
+                # Newest row inside the window: recent, and the age publishes.
+                {"view_name": "radius_authentications", "has_rows": 1,
+                 "age_seconds": 90},
             ]}
 
     ctx = _DimensionCtx("source_freshness")
@@ -322,12 +331,16 @@ def test_a_stale_view_publishes_an_age_and_an_empty_one_does_not():
 
     assert ("ise3_source_latest_row_age_seconds", 367_104.0,
             {"view": "radius_accounting"}) in ctx.samples
-    assert ("ise3_source_rows_total", 370.0,
+    assert ("ise3_source_has_rows", 1,
             {"view": "radius_accounting"}) in ctx.samples
     assert ("ise3_source_has_recent_rows", 0,
             {"view": "radius_accounting"}) in ctx.samples
-    assert ("ise3_source_rows_total", 0.0,
+    assert ("ise3_source_has_rows", 0,
             {"view": "radius_errors_view"}) in ctx.samples
+    assert ("ise3_source_has_recent_rows", 0,
+            {"view": "radius_errors_view"}) in ctx.samples
+    assert ("ise3_source_has_recent_rows", 1,
+            {"view": "radius_authentications"}) in ctx.samples
     assert not [sample for sample in ctx.samples
                 if sample[0] == "ise3_source_latest_row_age_seconds"
                 and sample[2] == {"view": "radius_errors_view"}]

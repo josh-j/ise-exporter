@@ -9,11 +9,20 @@ for many minutes. One `UNION ALL` would mean a slow branch blowing the whole
 dataset's timeout. So the probe runs as a small batch of unions: bounded, and a
 slow view damages only its own branch.
 
+Every fact is read off one `MAX(column)` aggregate per view -- the same shape
+nad_health uses for its source age, and for the same reason: the optimiser
+answers it from the timestamp index instead of scanning the view. The probe
+used to also take `COUNT(*)` and a windowed count, which forced a full scan of
+each view; at production row counts three of those in one statement cannot fit
+the fixed statement budget, and the probe timed out on exactly the deployments
+it exists to reassure.
+
 Three states have to stay distinguishable, because the operator's next action
 differs for each: a view that is missing (no series), a view that exists and is
-empty (rows 0, no age), and a view that holds rows but has stopped receiving
-them (rows > 0, age far above the window). That is why the age is aggregated
-over the whole view and the window survives only as a counted predicate.
+empty (has_rows 0, no age), and a view that holds rows but has stopped receiving
+them (has_rows 1, age far above the window). Emptiness and recency both derive
+from the newest row: a view is empty when MAX() is NULL, and it is recent when
+its newest row is younger than the scan window.
 """
 from prometheus_client import Gauge
 
@@ -31,13 +40,13 @@ latest_row_age_seconds = Gauge(
     "Age of the newest row in a reporting view, measured over the whole view "
     "rather than the scan window, so a view staler than the window still has "
     "an age", ["provider", "view"])
-rows_total = Gauge(
-    "ise3_source_rows_total",
-    "Rows a reporting view holds at all. Zero with no age is an empty view; "
-    "non-zero with a large age is a stale feed; neither is a missing view",
+has_rows = Gauge(
+    "ise3_source_has_rows",
+    "A reporting view holds at least one row. Zero with no age is an empty "
+    "view; one with a large age is a stale feed; neither is a missing view",
     ["provider", "view"])
 
-_METRICS = (has_recent_rows, latest_row_age_seconds, rows_total)
+_METRICS = (has_recent_rows, latest_row_age_seconds, has_rows)
 
 # Each view carries its own time column, so a probe cannot assume TIMESTAMP --
 # ENDPOINTS_DATA is a current-state view with UPDATE_TIME, and the performance
@@ -55,18 +64,15 @@ VIEW_BATCHES = (
 )
 
 
-def _branch(view, column, hours, limits):
-    # The age is deliberately NOT taken under the window predicate. Computing
-    # the newest row inside the same window that decides whether the view is
-    # recent means a stale view reports no age at all -- exactly the view an
-    # operator is asking about -- and makes stale, empty and missing look
-    # identical. The window survives as a counted predicate instead, so one
-    # aggregate pass still answers both questions.
+def _branch(view, column):
+    # The age is deliberately NOT taken under a window predicate. Computing the
+    # newest row inside the same window that decides whether the view is recent
+    # means a stale view reports no age at all -- exactly the view an operator
+    # is asking about. The explicit CASE keeps emptiness separate from the -1
+    # sentinel, which a future-dated newest row could otherwise collide with.
     return f"""
         SELECT '{view}' AS view_name,
-               COUNT(*) AS total_rows,
-               NVL(SUM(CASE WHEN {reporting.recent(column, hours, limits)}
-                            THEN 1 ELSE 0 END), 0) AS recent_rows,
+               CASE WHEN MAX({column}) IS NULL THEN 0 ELSE 1 END AS has_rows,
                NVL(
                  (CAST(SYSTIMESTAMP AS DATE) - CAST(MAX({column}) AS DATE)) * 86400,
                  -1) AS age_seconds
@@ -74,27 +80,29 @@ def _branch(view, column, hours, limits):
     """
 
 
-def statements(hours, limits):
+def statements():
+    # The marker routes these statements to the freshness_probe telemetry
+    # label, so their cost is not attributed to the first view a batch names.
     return {
-        f"batch_{index}": "\nUNION ALL\n".join(
-            _branch(view, column, hours, limits) for view, column in batch)
+        f"batch_{index}": "/* ise_exporter:freshness */\n" + "\nUNION ALL\n".join(
+            _branch(view, column) for view, column in batch)
         for index, batch in enumerate(VIEW_BATCHES)
     }
 
 
 def fetch(ctx):
-    hours = reporting.scan_window(ctx)
-    results = ctx.transport.query_many(statements(hours, ctx.limits))
+    window = reporting.scan_window(ctx) * 3600
+    results = ctx.transport.query_many(statements())
     for rows in results.values():
         for row in rows:
             (view,) = reporting.group(row, "view_name")
-            recent = finite(row.get("recent_rows"))
-            ctx.set(has_recent_rows, int(recent > 0), view=view)
-            ctx.set(rows_total, finite(row.get("total_rows")), view=view)
+            populated = finite(row.get("has_rows")) > 0
             age = finite(row.get("age_seconds"), -1)
-            # -1 is the empty-view sentinel: MAX() over no rows is NULL, and
-            # there is no newest row to be old.
-            if age >= 0:
+            ctx.set(has_rows, int(populated), view=view)
+            # A future-dated newest row (negative age) still counts as recent:
+            # the view is receiving rows, which is the question asked here.
+            ctx.set(has_recent_rows, int(populated and age <= window), view=view)
+            if populated:
                 ctx.set(latest_row_age_seconds, age, view=view)
 
 
@@ -107,13 +115,11 @@ DATASET = Dataset(
     providers=(
         Provider(
             name="dataconnect",
-            # Each branch aggregates its whole view rather than a windowed
-            # slice, which is what makes a stale view report an age at all. It
-            # costs a full scan per view on a large deployment, so the budget is
-            # declared for that and not for the cheaper windowed form.
-            cost=Cost(target="oracle", db_seconds=9.0),
+            # Three batched statements of three MAX() aggregates each, every
+            # one answerable from the view's timestamp index.
+            cost=Cost(target="oracle", db_seconds=1.5),
             supplies=frozenset({
-                "view", "has_recent_rows", "latest_row_age", "rows_total"}),
+                "view", "has_recent_rows", "latest_row_age", "has_rows"}),
             fetch=fetch,
         ),
     ),

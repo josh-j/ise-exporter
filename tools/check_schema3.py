@@ -104,7 +104,7 @@ def statements_for(limits, schema):
         "posture_history": posture_history.statements(6, limits),
         "tacacs_activity": tacacs_activity.statements(6, limits),
         "endpoint_inventory": endpoint_inventory.statements(limits),
-        "source_freshness": source_freshness.statements(6, limits),
+        "source_freshness": source_freshness.statements(),
         "psn_performance": psn_performance.statements(limits, schema),
         # Built through a private pager rather than a statements() map.
         "nad_health": {"by_nad": nad_health._page(6, 0, limits)},

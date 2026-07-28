@@ -63,6 +63,14 @@ FAILURE_EXPLANATIONS = {
     "unexpected_error": "The transport failed unexpectedly",
 }
 
+# The reasons that mean "not yet" rather than "broken": a source that cannot
+# answer yet has not failed at anything. They are part of the reason
+# vocabulary, not of scheduling policy, so both the scheduler (no strike, no
+# failover, fast retry) and the runner (log as pending, not as failed) read
+# the same set from here.
+PENDING_REASONS = frozenset(
+    {"baseline_pending", "dependency_pending", "schema_pending"})
+
 
 class TransportError(RuntimeError):
     """A bounded, typed transport failure carried into dataset health."""
