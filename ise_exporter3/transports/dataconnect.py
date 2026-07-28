@@ -628,10 +628,39 @@ class DataConnectTransport(Transport):
 
     # --- statements -------------------------------------------------------
 
+    def _acquire_lane(self, *, forced=False, lane_timeout=None):
+        """Take the lane lock without sleeping a cooldown inside it.
+
+        The in-process cooldown used to be waited out while holding this lock,
+        which made the lock busy for whole cooldowns at a time: at a production
+        duty cycle the oracle lane spends most of its life asleep, so a forced
+        statement -- whose entire point is to run during a cooldown -- could
+        only ever see "busy". Waiting outside the lock and re-checking after
+        taking it keeps the lock an execution lock rather than a schedule.
+        """
+        while True:
+            if not forced:
+                self._wait(self._next_query_at - time.monotonic())
+            if not self._lock.acquire(timeout=(
+                    lane_timeout if lane_timeout is not None else -1)):
+                raise TransportError(
+                    "busy",
+                    f"a statement held the Data Connect lane for "
+                    f"{lane_timeout:.0f}s")
+            if forced or time.monotonic() >= self._next_query_at:
+                return
+            # Another statement ran while this one slept and pushed the
+            # deadline. Go back to waiting rather than jumping the cooldown it
+            # just charged.
+            self._lock.release()
+
     def query(self, sql, parameters=None, *, adaptive=True):
         """Run one bounded read-only statement under the pacing gate."""
-        with self._lock:
+        self._acquire_lane()
+        try:
             return self._query(sql, parameters, adaptive=adaptive)
+        finally:
+            self._lock.release()
 
     def query_forced(self, sql, parameters=None, *, lane_timeout=None):
         """Run one statement without waiting out the duty-cycle cooldowns.
@@ -643,26 +672,18 @@ class DataConnectTransport(Transport):
         the in-process cooldown and the deadline another process published,
         both of which exist to shape sustained load, not to bound one read.
 
-        ``lane_timeout`` bounds how long to wait for a scheduled statement that
-        currently holds the lane; forcing must not turn into an unbounded block
-        on an HTTP thread behind a lane that is itself sleeping out a cooldown.
+        ``lane_timeout`` bounds how long to wait for a statement actually
+        executing on the lane; forcing must not turn into an unbounded block on
+        an HTTP thread behind live Oracle work.
         """
-        if not self._lock.acquire(timeout=(
-                lane_timeout if lane_timeout is not None else -1)):
-            raise TransportError(
-                "busy",
-                f"a scheduled statement held the Data Connect lane for "
-                f"{lane_timeout:.0f}s")
+        self._acquire_lane(forced=True, lane_timeout=lane_timeout)
         try:
-            return self._query(sql, parameters, adaptive=False, forced=True)
+            return self._query(sql, parameters, adaptive=False)
         finally:
             self._lock.release()
 
-    def _query(self, sql, parameters=None, *, adaptive=True, forced=False):
+    def _query(self, sql, parameters=None, *, adaptive=True):
         view = view_of(sql)
-        if not self._batch_active and not forced:
-            self._wait(self._next_query_at - time.monotonic())
-
         gate = self._batch_gate
         if not self._batch_active:
             gate = self._acquire_gate(view=view, adaptive=adaptive)
@@ -802,18 +823,19 @@ class DataConnectTransport(Transport):
         -- the freshness probe going dark because one view is slow silences
         its verdict on the other eight, exactly when it is needed.
         """
-        with self._lock:
-            items = list(statements.items())
-            if not items:
-                return {}
-            if len(items) > self.limits.batch_queries:
-                raise ValueError(
-                    f"batch exceeds the {self.limits.batch_queries}-statement "
-                    "ceiling")
+        items = list(statements.items())
+        if not items:
+            return {}
+        if len(items) > self.limits.batch_queries:
+            raise ValueError(
+                f"batch exceeds the {self.limits.batch_queries}-statement "
+                "ceiling")
+
+        self._acquire_lane()
+        try:
             if self._batch_active:
                 raise RuntimeError("nested Data Connect batches are not supported")
 
-            self._wait(self._next_query_at - time.monotonic())
             views = ",".join(dict.fromkeys(view_of(sql) for _name, sql in items))
             gate = self._acquire_gate(view=views)
             self._batch_active = True
@@ -872,6 +894,8 @@ class DataConnectTransport(Transport):
                         logger.exception("releasing the Data Connect gate also failed")
                     else:
                         raise
+        finally:
+            self._lock.release()
 
     # --- schema capability ------------------------------------------------
 
@@ -950,7 +974,8 @@ class DataConnectTransport(Transport):
                 "user_tab_columns", "user_views"}:
             raise ValueError(
                 "a catalog query must be a SELECT from an allowed dictionary view")
-        with self._lock:
+        self._acquire_lane()
+        try:
             self._catalog_active = True
             try:
                 # The exemption is for one cheap successful compatibility check.
@@ -966,3 +991,5 @@ class DataConnectTransport(Transport):
                 self._catalog_active = False
             self._catalog_failures = 0
             return rows
+        finally:
+            self._lock.release()

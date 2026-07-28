@@ -279,6 +279,72 @@ def test_a_forced_statement_skips_the_waits_but_not_the_debts(transport):
         assert float(handle.read().strip()) >= far_future - 1
 
 
+def test_a_forced_statement_cuts_in_while_a_paced_one_sleeps_its_cooldown(
+        transport):
+    # The failure that made -Force useless in practice: at a production duty
+    # cycle the lane spends most of its life asleep between statements, and
+    # that sleep used to happen while holding the lane lock -- so a forced
+    # statement, whose entire point is to run during a cooldown, could only
+    # ever see "busy". The cooldown sleep must not hold the lock.
+    transport._connection = _StubConnection(columns=("X",), rows=[(1,)])
+    transport._next_query_at = time.monotonic() + 30
+    shutdown = threading.Event()
+    transport.set_shutdown_event(shutdown)
+    sleeping = threading.Event()
+    outcome = {}
+
+    def paced():
+        sleeping.set()
+        try:
+            transport.query("SELECT x FROM system_summary")
+        except TransportError as error:
+            outcome["error"] = error
+
+    worker = threading.Thread(target=paced, daemon=True)
+    worker.start()
+    sleeping.wait(5)
+    time.sleep(0.2)
+
+    started = time.monotonic()
+    rows = transport.query_forced("SELECT x FROM system_summary", lane_timeout=5)
+    assert rows == [{"x": 1}]
+    assert time.monotonic() - started < 5
+
+    shutdown.set()
+    worker.join(5)
+    assert not worker.is_alive()
+    assert outcome["error"].reason == "unexpected_error"
+
+
+def test_a_paced_statement_rechecks_the_deadline_a_forced_one_moved(transport):
+    # Waiting outside the lock opens a race: the sleeper wakes, takes the
+    # lane, but a forced statement ran meanwhile and charged a new cooldown.
+    # The sleeper must go back to waiting, not jump the cooldown it never paid.
+    transport._next_query_at = time.monotonic() + 30
+    with pytest.raises(TransportError):
+        # No shutdown event is set here, so make the re-check observable by
+        # letting the second wait fail fast instead of sleeping half a minute.
+        original_wait = transport._wait
+        waits = []
+
+        def counting_wait(seconds):
+            waits.append(seconds)
+            if len(waits) > 1:
+                raise TransportError("unexpected_error", "second wait reached")
+
+        transport._wait = counting_wait
+        try:
+            # The first wait is a no-op sleep the stub swallows; the deadline
+            # is still ahead when the lock is taken, so the lane must loop.
+            transport.query("SELECT x FROM system_summary")
+        finally:
+            transport._wait = original_wait
+    assert len(waits) == 2
+    # The failed attempt must not leave the lane held.
+    assert transport._lock.acquire(blocking=False)
+    transport._lock.release()
+
+
 def test_a_forced_statement_gives_up_on_a_held_lane_rather_than_hanging(transport):
     # The lane may legitimately be held by a scheduled statement sleeping out
     # its own cooldown. Forcing runs on an HTTP thread, so it asks for the lane
