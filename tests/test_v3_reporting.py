@@ -311,7 +311,8 @@ def test_a_stale_view_publishes_an_age_and_an_empty_one_does_not():
     from ise_exporter3.datasets import source_freshness
 
     class Transport:
-        def query_many(self, statements):
+        def query_many(self, statements, *, tolerant=False):
+            assert tolerant
             return {"batch_0": [
                 # Four days stale on the appliance, but it does hold rows.
                 {"view_name": "radius_accounting", "has_rows": 1,
@@ -322,7 +323,7 @@ def test_a_stale_view_publishes_an_age_and_an_empty_one_does_not():
                 # Newest row inside the window: recent, and the age publishes.
                 {"view_name": "radius_authentications", "has_rows": 1,
                  "age_seconds": 90},
-            ]}
+            ]}, {}
 
     ctx = _DimensionCtx("source_freshness")
     ctx.interval = 21600
@@ -344,6 +345,59 @@ def test_a_stale_view_publishes_an_age_and_an_empty_one_does_not():
     assert not [sample for sample in ctx.samples
                 if sample[0] == "ise3_source_latest_row_age_seconds"
                 and sample[2] == {"view": "radius_errors_view"}]
+
+
+def test_a_slow_view_silences_only_its_own_batch():
+    from ise_exporter3.datasets import source_freshness
+    from ise_exporter3.transports import TransportError
+
+    # A diagnostic dataset that goes completely dark because one view cannot
+    # aggregate inside the statement budget is silent exactly when it is
+    # needed. The views the failed statements carried are named by probed=0
+    # and publish no freshness facts -- unknown, not missing.
+    class Transport:
+        def query_many(self, statements, *, tolerant=False):
+            assert tolerant
+            return (
+                {"batch_2": [
+                    {"view_name": "key_performance_metrics", "has_rows": 1,
+                     "age_seconds": 120},
+                ]},
+                {"batch_0": TransportError("timeout"),
+                 "batch_1": TransportError("timeout")},
+            )
+
+    ctx = _DimensionCtx("source_freshness")
+    ctx.interval = 21600
+    ctx.transport = Transport()
+    source_freshness.fetch(ctx)
+
+    assert ("ise3_source_probed", 0,
+            {"view": "radius_authentications"}) in ctx.samples
+    assert ("ise3_source_probed", 1,
+            {"view": "key_performance_metrics"}) in ctx.samples
+    assert ("ise3_source_has_recent_rows", 1,
+            {"view": "key_performance_metrics"}) in ctx.samples
+    assert not [sample for sample in ctx.samples
+                if sample[0] == "ise3_source_has_rows"
+                and sample[2] == {"view": "radius_authentications"}]
+
+
+def test_a_probe_where_nothing_answered_fails_with_a_classified_reason():
+    from ise_exporter3.datasets import source_freshness
+    from ise_exporter3.transports import TransportError
+
+    class Transport:
+        def query_many(self, statements, *, tolerant=False):
+            return {}, {name: TransportError("timeout") for name in statements}
+
+    ctx = _DimensionCtx("source_freshness")
+    ctx.interval = 21600
+    ctx.transport = Transport()
+    with pytest.raises(TransportError) as caught:
+        source_freshness.fetch(ctx)
+    assert caught.value.reason == "timeout"
+    assert not ctx.samples
 
 
 def test_nad_health_publishes_the_age_of_the_feed_it_judges_silence_by():

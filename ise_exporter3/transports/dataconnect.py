@@ -731,13 +731,19 @@ class DataConnectTransport(Transport):
             raise TimeoutError("statement exceeded its hard attempt timeout")
         connection.call_timeout = max(1, math.ceil(remaining * 1000))
 
-    def query_many(self, statements, parameters=None):
+    def query_many(self, statements, parameters=None, *, tolerant=False):
         """Run a small atomic set of statements under one duty-cycle lease.
 
         One dashboard update often needs several bounded statements. Charging
         each its own cooldown would put hours between them at a low duty cycle;
         charging the batch once, on combined Oracle time, keeps the long-run
         duty cycle honest while letting a snapshot actually complete.
+
+        With ``tolerant`` a failed statement does not abort the statements
+        behind it: the call returns ``(results, errors)`` and the caller
+        decides what a partial answer means. A diagnostic dataset wants this
+        -- the freshness probe going dark because one view is slow silences
+        its verdict on the other eight, exactly when it is needed.
         """
         with self._lock:
             items = list(statements.items())
@@ -761,7 +767,7 @@ class DataConnectTransport(Transport):
             self._batch_views = []
             failed = False
             try:
-                results = {}
+                results, errors = {}, {}
                 given = parameters or {}
                 for index, (name, sql) in enumerate(items):
                     if index:
@@ -771,8 +777,19 @@ class DataConnectTransport(Transport):
                         # dataset behind a whole-batch worst case.
                         self._write_lease(
                             gate, self._crash_lease(elapsed=self._batch_duration))
-                    results[name] = self._query(sql, given.get(name))
-                return results
+                    if not tolerant:
+                        results[name] = self._query(sql, given.get(name))
+                        continue
+                    try:
+                        results[name] = self._query(sql, given.get(name))
+                    except TransportError as error:
+                        # The Oracle time it burned is already in the batch
+                        # duration, so the shared cooldown still charges it.
+                        errors[name] = error
+                        logger.warning(
+                            "Data Connect statement %s failed in a tolerant "
+                            "batch: %s: %s", name, error.reason, error.detail)
+                return (results, errors) if tolerant else results
             except BaseException:
                 failed = True
                 raise

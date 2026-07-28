@@ -6,8 +6,11 @@ dataset depends on and none of them can answer about itself.
 
 One statement per view would mean a paced wait each, holding the serialized lane
 for many minutes. One `UNION ALL` would mean a slow branch blowing the whole
-dataset's timeout. So the probe runs as a small batch of unions: bounded, and a
-slow view damages only its own branch.
+dataset's timeout. So the probe runs as a tolerant batch of unions: a statement
+that dies damages only the three views it carries, the others still publish,
+and `ise3_source_probed` names the views whose statement did not answer -- a
+diagnostic dataset that goes completely dark because one view is slow is
+silent exactly when it is needed.
 
 Every fact is read off one `MAX(column)` aggregate per view -- the same shape
 nad_health uses for its source age, and for the same reason: the optimiser
@@ -45,8 +48,15 @@ has_rows = Gauge(
     "A reporting view holds at least one row. Zero with no age is an empty "
     "view; one with a large age is a stale feed; neither is a missing view",
     ["provider", "view"])
+probed = Gauge(
+    "ise3_source_probed",
+    "The freshness probe answered for this view inside its statement budget. "
+    "Zero means the statement carrying this view failed -- missing, erroring, "
+    "or too slow to aggregate -- and the view's other freshness series are "
+    "absent because they are unknown, not because the view is",
+    ["provider", "view"])
 
-_METRICS = (has_recent_rows, latest_row_age_seconds, has_rows)
+_METRICS = (has_recent_rows, latest_row_age_seconds, has_rows, probed)
 
 # Each view carries its own time column, so a probe cannot assume TIMESTAMP --
 # ENDPOINTS_DATA is a current-state view with UPDATE_TIME, and the performance
@@ -92,7 +102,15 @@ def statements():
 
 def fetch(ctx):
     window = reporting.scan_window(ctx) * 3600
-    results = ctx.transport.query_many(statements())
+    results, errors = ctx.transport.query_many(statements(), tolerant=True)
+    if not results:
+        # Nothing answered, so there is no partial verdict to publish; the
+        # first classified error names why for the failure detail.
+        raise next(iter(errors.values()))
+    for index, batch in enumerate(VIEW_BATCHES):
+        answered = f"batch_{index}" in results
+        for view, _column in batch:
+            ctx.set(probed, int(answered), view=view)
     for rows in results.values():
         for row in rows:
             (view,) = reporting.group(row, "view_name")
@@ -119,7 +137,8 @@ DATASET = Dataset(
             # one answerable from the view's timestamp index.
             cost=Cost(target="oracle", db_seconds=1.5),
             supplies=frozenset({
-                "view", "has_recent_rows", "latest_row_age", "has_rows"}),
+                "view", "has_recent_rows", "latest_row_age", "has_rows",
+                "probed"}),
             fetch=fetch,
         ),
     ),

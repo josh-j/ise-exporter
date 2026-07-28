@@ -3044,22 +3044,31 @@ def health_dashboard():
                     sized(
                         tbl(
                             "Data Connect source freshness",
-                            "Whether each reporting view has recent rows and the "
-                            "age of its newest row.",
+                            "Whether each reporting view's probe answered, "
+                            "whether the view has recent rows, and the age of "
+                            "its newest row. Probed zero means the statement "
+                            "carrying that view failed, so its other cells are "
+                            "unknown rather than empty.",
                             [
+                                instant(
+                                    metric("ise3_source_probed"),
+                                    "{{view}} probed",
+                                ),
                                 instant(
                                     metric("ise3_source_has_recent_rows"),
                                     "{{view}} recent",
+                                    "B",
                                 ),
                                 instant(
                                     metric("ise3_source_latest_row_age_seconds"),
                                     "{{view}} age",
-                                    "B",
+                                    "C",
                                 ),
                             ],
-                            columns=("recent", "age s"),
+                            columns=("probed", "recent", "age s"),
                             sort=("age s", True),
                             column_overrides=(
+                                by_column("probed", **BOOLEAN_CELL),
                                 by_column("recent", **BOOLEAN_CELL),
                                 by_column("age s", **SECONDS_CELL),
                             ),

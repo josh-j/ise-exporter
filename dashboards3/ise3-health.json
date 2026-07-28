@@ -736,10 +736,61 @@
         "type": "prometheus",
         "uid": "${prometheus}"
       },
-      "description": "Whether each reporting view has recent rows and the age of its newest row.",
+      "description": "Whether each reporting view's probe answered, whether the view has recent rows, and the age of its newest row. Probed zero means the statement carrying that view failed, so its other cells are unknown rather than empty.",
       "fieldConfig": {
         "defaults": {},
         "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "probed"
+            },
+            "properties": [
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "red",
+                      "value": null
+                    },
+                    {
+                      "color": "green",
+                      "value": 1
+                    }
+                  ]
+                }
+              },
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "options": {
+                      "0": {
+                        "color": "red",
+                        "index": 1,
+                        "text": "No"
+                      },
+                      "1": {
+                        "color": "green",
+                        "index": 0,
+                        "text": "Yes"
+                      }
+                    },
+                    "type": "value"
+                  }
+                ]
+              },
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "mode": "basic",
+                  "type": "color-background"
+                }
+              }
+            ]
+          },
           {
             "matcher": {
               "id": "byName",
@@ -815,12 +866,20 @@
       "repeatDirection": "h",
       "targets": [
         {
+          "expr": "ise3_source_probed{instance=~\"$deployment\"}",
+          "format": "table",
+          "instant": true,
+          "legendFormat": "{{view}} probed",
+          "range": false,
+          "refId": "A"
+        },
+        {
           "expr": "ise3_source_has_recent_rows{instance=~\"$deployment\"}",
           "format": "table",
           "instant": true,
           "legendFormat": "{{view}} recent",
           "range": false,
-          "refId": "A"
+          "refId": "B"
         },
         {
           "expr": "ise3_source_latest_row_age_seconds{instance=~\"$deployment\"}",
@@ -828,7 +887,7 @@
           "instant": true,
           "legendFormat": "{{view}} age",
           "range": false,
-          "refId": "B"
+          "refId": "C"
         }
       ],
       "title": "Data Connect source freshness",
@@ -853,8 +912,9 @@
           "id": "organize",
           "options": {
             "renameByName": {
-              "Value #A": "recent",
-              "Value #B": "age s"
+              "Value #A": "probed",
+              "Value #B": "recent",
+              "Value #C": "age s"
             }
           }
         },
