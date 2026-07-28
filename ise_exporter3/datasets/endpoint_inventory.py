@@ -162,6 +162,10 @@ DATASET = Dataset(
             supplies=frozenset({
                 "total", "profile", "identity_group", "posture_applicable"}),
             requires=("view:ENDPOINTS_DATA",),
+            notes="reads only attributes Cisco documents as updated in real "
+                  "time (profile, identity group, posture applicability), so "
+                  "its cadence is honest; most other ENDPOINTS_DATA columns "
+                  "synchronize up to 12h behind and are not worth polling",
             fetch=fetch,
         ),
         Provider(

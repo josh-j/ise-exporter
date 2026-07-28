@@ -347,6 +347,43 @@ def test_a_stale_view_publishes_an_age_and_an_empty_one_does_not():
                 and sample[2] == {"view": "radius_errors_view"}]
 
 
+def test_endpoints_data_recency_respects_the_documented_sync_delay():
+    from ise_exporter3.datasets import source_freshness
+
+    # Cisco syncs the view's non-real-time attributes up to 12 hours behind.
+    # An 8-hour-old newest row is therefore normal operation for
+    # endpoints_data and a stale feed for an event view -- the same age, two
+    # different verdicts, and the probe must not report the documented sync
+    # as an outage.
+    class Transport:
+        def query_many(self, statements, *, tolerant=False):
+            return {"batch_1": [
+                {"view_name": "endpoints_data", "has_rows": 1,
+                 "age_seconds": 8 * 3600},
+                {"view_name": "radius_errors_view", "has_rows": 1,
+                 "age_seconds": 8 * 3600},
+            ]}, {}
+
+    ctx = _DimensionCtx("source_freshness")
+    ctx.interval = 21600
+    ctx.transport = Transport()
+    source_freshness.fetch(ctx)
+
+    assert ("ise3_source_has_recent_rows", 1,
+            {"view": "endpoints_data"}) in ctx.samples
+    assert ("ise3_source_has_recent_rows", 0,
+            {"view": "radius_errors_view"}) in ctx.samples
+    # Beyond even the documented sync delay, stale is stale.
+    ctx = _DimensionCtx("source_freshness")
+    ctx.interval = 21600
+    ctx.transport = type("T", (), {"query_many": lambda self, s, tolerant=False: (
+        {"batch_1": [{"view_name": "endpoints_data", "has_rows": 1,
+                      "age_seconds": 14 * 3600}]}, {})})()
+    source_freshness.fetch(ctx)
+    assert ("ise3_source_has_recent_rows", 0,
+            {"view": "endpoints_data"}) in ctx.samples
+
+
 def test_a_slow_view_silences_only_its_own_batch():
     from ise_exporter3.datasets import source_freshness
     from ise_exporter3.transports import TransportError

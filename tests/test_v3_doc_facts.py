@@ -11,9 +11,11 @@ describes what Cisco published, the appliance describes what ISE does.
 """
 import json
 import pathlib
+import re
 
 import pytest
 
+from ise_exporter3.config import Config
 from ise_exporter3.explore import VIEW_CATALOG
 from ise_exporter3.transports.dataconnect import SCHEMA_COLUMN_CONTRACTS
 
@@ -115,3 +117,29 @@ def test_the_schema_contracts_name_documented_columns(official):
         for requirement in ("required", "optional"):
             for column in contract[requirement]:
                 assert column in columns, f"{view}.{column}"
+
+
+def test_the_exporter_polls_endpoints_data_only_for_realtime_attributes(
+        official):
+    # endpoint_inventory and posture_history read ENDPOINTS_DATA at intervals
+    # far inside the 12-hour sync delay. That cadence is only honest because
+    # every attribute their statements touch is in the documented real-time
+    # set -- a delayed column added here would poll for data that cannot have
+    # changed, and this is where that shows up.
+    from ise_exporter3.datasets import endpoint_inventory, posture_history
+
+    realtime = set(VIEW_CATALOG["endpoints_data"].realtime_columns)
+    # Row identity and the row's own change stamp are not synchronized
+    # attributes; the freshness probe deliberately reads the latter.
+    allowed = realtime | {"MAC_ADDRESS", "UPDATE_TIME"}
+    delayed = set(_columns(official, "ENDPOINTS_DATA")) - allowed
+
+    config = Config.from_document(
+        {"targets": {"pan": {"host": "pan1", "user": "ro"}}},
+        path="test.toml", environ={"ISE_PASS": "secret"})
+    statements = list(endpoint_inventory.statements(config.limits).values())
+    statements += [sql for sql in posture_history.statements(
+        24, config.limits).values() if "ENDPOINTS_DATA" in sql.upper()]
+    for sql in statements:
+        for column in sorted(delayed):
+            assert not re.search(rf"\b{column}\b", sql.upper()), column

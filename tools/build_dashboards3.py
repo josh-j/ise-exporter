@@ -3048,7 +3048,10 @@ def health_dashboard():
                             "whether the view has recent rows, and the age of "
                             "its newest row. Probed zero means the statement "
                             "carrying that view failed, so its other cells are "
-                            "unknown rather than empty.",
+                            "unknown rather than empty. endpoints_data is "
+                            "judged against Cisco's documented 12h attribute "
+                            "sync, so an age inside that horizon still counts "
+                            "as recent there.",
                             [
                                 instant(
                                     metric("ise3_source_probed"),

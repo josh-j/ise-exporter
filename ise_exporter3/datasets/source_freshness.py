@@ -36,7 +36,9 @@ from ..parsing import finite
 
 has_recent_rows = Gauge(
     "ise3_source_has_recent_rows",
-    "A reporting view produced rows inside the scan window",
+    "A reporting view produced rows inside its recency horizon: the scan "
+    "window, or the view's documented sync delay where Cisco declares one "
+    "(ENDPOINTS_DATA synchronizes non-real-time attributes up to 12h behind)",
     ["provider", "view"])
 latest_row_age_seconds = Gauge(
     "ise3_source_latest_row_age_seconds",
@@ -72,6 +74,14 @@ VIEW_BATCHES = (
      ("system_summary", "timestamp"),
      ("profiled_endpoints_summary", "timestamp")),
 )
+
+# Cisco documents ENDPOINTS_DATA's non-real-time attributes as synchronized
+# with a delay of up to 12 hours (docs/dataconnect-views.json, the view's
+# note). Judging that view's recency by a shorter scan window reports the
+# documented sync behaviour as a stale feed -- a false alarm on exactly the
+# dashboard this dataset exists to keep honest -- so a view's horizon never
+# drops below its declared sync delay.
+SYNC_DELAY_FLOOR_SECONDS = {"endpoints_data": 12 * 3600}
 
 
 def _branch(view, column):
@@ -119,7 +129,8 @@ def fetch(ctx):
             ctx.set(has_rows, int(populated), view=view)
             # A future-dated newest row (negative age) still counts as recent:
             # the view is receiving rows, which is the question asked here.
-            ctx.set(has_recent_rows, int(populated and age <= window), view=view)
+            horizon = max(window, SYNC_DELAY_FLOOR_SECONDS.get(view, 0))
+            ctx.set(has_recent_rows, int(populated and age <= horizon), view=view)
             if populated:
                 ctx.set(latest_row_age_seconds, age, view=view)
 
