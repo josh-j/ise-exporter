@@ -49,6 +49,21 @@ def _targets(dashboard):
     for panel in _panels(dashboard):
         for target in panel.get("targets", []):
             yield panel, target
+    # Annotation queries reference metrics and labels exactly the way panel
+    # targets do, and a broken one fails the same way: silently, as a graph
+    # with no change markers. Shaping them as pseudo-targets runs them through
+    # every contract below; the title/text formats stand in for the legend so
+    # the label check covers them too.
+    for annotation in dashboard.get("annotations", {}).get("list", []):
+        if "expr" not in annotation:
+            continue
+        formats = " ".join(
+            (annotation.get("titleFormat", ""), annotation.get("textFormat", ""))
+        )
+        yield (
+            {"title": f"annotation: {annotation.get('name')}"},
+            {"expr": annotation["expr"], "legendFormat": formats},
+        )
 
 
 def _exported():

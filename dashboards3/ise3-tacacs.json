@@ -35,7 +35,7 @@
           "uid": "${prometheus}"
         },
         "enable": true,
-        "expr": "changes(ise3_exporter_build_info{instance=~\"$deployment\"}[15m]) > 0",
+        "expr": "ise3_exporter_build_info{instance=~\"$deployment\"} unless (ise3_exporter_build_info{instance=~\"$deployment\"} offset 5m)",
         "hide": false,
         "iconColor": "blue",
         "name": "Exporter build changed",
@@ -993,6 +993,13 @@
       "description": "Worst-first bounded device authentication view; the coverage panel states how much was published.",
       "fieldConfig": {
         "defaults": {
+          "links": [
+            {
+              "targetBlank": false,
+              "title": "This device on Endpoints and devices",
+              "url": "/d/ise3-endpoints?${__url_time_range}&${deployment:queryparam}&var-nad=${__field.labels.value}"
+            }
+          ],
           "unit": "short"
         },
         "overrides": []
@@ -1125,6 +1132,13 @@
       "description": "Worst-first bounded device authorization view with explicit published-versus-total coverage.",
       "fieldConfig": {
         "defaults": {
+          "links": [
+            {
+              "targetBlank": false,
+              "title": "This device on Endpoints and devices",
+              "url": "/d/ise3-endpoints?${__url_time_range}&${deployment:queryparam}&var-nad=${__field.labels.value}"
+            }
+          ],
           "unit": "short"
         },
         "overrides": []
@@ -1368,6 +1382,13 @@
       "description": "Worst-first bounded device command-accounting view for troubleshooting administrative activity.",
       "fieldConfig": {
         "defaults": {
+          "links": [
+            {
+              "targetBlank": false,
+              "title": "This device on Endpoints and devices",
+              "url": "/d/ise3-endpoints?${__url_time_range}&${deployment:queryparam}&var-nad=${__field.labels.value}"
+            }
+          ],
           "unit": "short"
         },
         "overrides": []

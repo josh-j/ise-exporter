@@ -35,7 +35,7 @@
           "uid": "${prometheus}"
         },
         "enable": true,
-        "expr": "changes(ise3_exporter_build_info{instance=~\"$deployment\"}[15m]) > 0",
+        "expr": "ise3_exporter_build_info{instance=~\"$deployment\"} unless (ise3_exporter_build_info{instance=~\"$deployment\"} offset 5m)",
         "hide": false,
         "iconColor": "blue",
         "name": "Exporter build changed",
@@ -610,7 +610,7 @@
       "repeatDirection": "h",
       "targets": [
         {
-          "expr": "sort_desc(label_replace(label_replace(label_replace(label_replace(label_replace(label_replace(label_replace(label_replace(label_replace(label_replace(label_replace(label_replace(label_replace(label_replace(label_replace(sum by (message_code) ((ise3_radius_errors_by_message_code{instance=~\"$deployment\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"radius_errors\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"radius_errors\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"radius_errors\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"radius_errors\"} == 1))) == 1))), \"message_code\", \"12300 \u00b7 PEAP certificate/PKI failure\", \"message_code\", \"12300\"), \"message_code\", \"12321 \u00b7 PEAP handshake failed, client rejected the ISE certificate\", \"message_code\", \"12321\"), \"message_code\", \"12500 \u00b7 EAP-TLS certificate/PKI failure\", \"message_code\", \"12500\"), \"message_code\", \"12501 \u00b7 EAP-TLS certificate/PKI failure\", \"message_code\", \"12501\"), \"message_code\", \"12511 \u00b7 EAP-TLS certificate/PKI failure\", \"message_code\", \"12511\"), \"message_code\", \"12625 \u00b7 EAP certificate/PKI failure\", \"message_code\", \"12625\"), \"message_code\", \"5400 \u00b7 authentication failed\", \"message_code\", \"5400\"), \"message_code\", \"5411 \u00b7 supplicant stopped responding to ISE\", \"message_code\", \"5411\"), \"message_code\", \"5440 \u00b7 endpoint abandoned the EAP session and started a new one\", \"message_code\", \"5440\"), \"message_code\", \"11007 \u00b7 could not locate network device or AAA client\", \"message_code\", \"11007\"), \"message_code\", \"11036 \u00b7 invalid RADIUS Message-Authenticator attribute\", \"message_code\", \"11036\"), \"message_code\", \"15039 \u00b7 rejected by the matched authorization profile\", \"message_code\", \"15039\"), \"message_code\", \"22040 \u00b7 wrong password or invalid shared secret\", \"message_code\", \"22040\"), \"message_code\", \"22056 \u00b7 subject not found in the identity store\", \"message_code\", \"22056\"), \"message_code\", \"24408 \u00b7 Active Directory authentication failed, wrong password\", \"message_code\", \"24408\"))",
+          "expr": "sort_desc(label_replace(label_replace(label_replace(label_replace(label_replace(label_replace(label_replace(label_replace(label_replace(label_replace(label_replace(label_replace(label_replace(sum by (message_code) ((ise3_radius_errors_by_message_code{instance=~\"$deployment\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"radius_errors\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"radius_errors\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"radius_errors\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"radius_errors\"} == 1))) == 1))), \"message_code\", \"12300 \u00b7 last step: proposed PEAP to the client\", \"message_code\", \"12300\"), \"message_code\", \"12321 \u00b7 PEAP handshake failed, client rejected the ISE certificate\", \"message_code\", \"12321\"), \"message_code\", \"12500 \u00b7 last step: proposed EAP-TLS to the client\", \"message_code\", \"12500\"), \"message_code\", \"12511 \u00b7 unexpected TLS alert, treated as client rejection\", \"message_code\", \"12511\"), \"message_code\", \"5400 \u00b7 authentication failed\", \"message_code\", \"5400\"), \"message_code\", \"5411 \u00b7 supplicant stopped responding to ISE\", \"message_code\", \"5411\"), \"message_code\", \"5440 \u00b7 endpoint abandoned the EAP session and started a new one\", \"message_code\", \"5440\"), \"message_code\", \"11007 \u00b7 could not locate network device or AAA client\", \"message_code\", \"11007\"), \"message_code\", \"11036 \u00b7 invalid RADIUS Message-Authenticator attribute\", \"message_code\", \"11036\"), \"message_code\", \"15039 \u00b7 rejected by the matched authorization profile\", \"message_code\", \"15039\"), \"message_code\", \"22040 \u00b7 wrong password or invalid shared secret\", \"message_code\", \"22040\"), \"message_code\", \"22056 \u00b7 subject not found in the identity store\", \"message_code\", \"22056\"), \"message_code\", \"24408 \u00b7 Active Directory authentication failed, wrong password\", \"message_code\", \"24408\"))",
           "instant": true,
           "legendFormat": "{{message_code}}",
           "range": false,
@@ -627,7 +627,7 @@
         "type": "prometheus",
         "uid": "${prometheus}"
       },
-      "description": "When did this error start: the same message-code distribution as the bar above, plotted over time. These are window gauges rather than counters, so a line is the volume seen in each reporting window and its onset is the moment the failure began.",
+      "description": "When did this error start: the same message-code distribution as the bar above, plotted over time. These are window gauges rather than counters, so a line is the volume seen in each reporting window and its onset is the moment the failure began. Well-known codes are annotated with what they mean; a code this exporter cannot name is shown bare.",
       "fieldConfig": {
         "defaults": {
           "custom": {
@@ -661,7 +661,7 @@
       "repeatDirection": "h",
       "targets": [
         {
-          "expr": "sum by (message_code) ((ise3_radius_errors_by_message_code{instance=~\"$deployment\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"radius_errors\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"radius_errors\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"radius_errors\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"radius_errors\"} == 1))) == 1)))",
+          "expr": "label_replace(label_replace(label_replace(label_replace(label_replace(label_replace(label_replace(label_replace(label_replace(label_replace(label_replace(label_replace(label_replace(sum by (message_code) ((ise3_radius_errors_by_message_code{instance=~\"$deployment\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"radius_errors\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"radius_errors\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"radius_errors\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"radius_errors\"} == 1))) == 1))), \"message_code\", \"12300 \u00b7 last step: proposed PEAP to the client\", \"message_code\", \"12300\"), \"message_code\", \"12321 \u00b7 PEAP handshake failed, client rejected the ISE certificate\", \"message_code\", \"12321\"), \"message_code\", \"12500 \u00b7 last step: proposed EAP-TLS to the client\", \"message_code\", \"12500\"), \"message_code\", \"12511 \u00b7 unexpected TLS alert, treated as client rejection\", \"message_code\", \"12511\"), \"message_code\", \"5400 \u00b7 authentication failed\", \"message_code\", \"5400\"), \"message_code\", \"5411 \u00b7 supplicant stopped responding to ISE\", \"message_code\", \"5411\"), \"message_code\", \"5440 \u00b7 endpoint abandoned the EAP session and started a new one\", \"message_code\", \"5440\"), \"message_code\", \"11007 \u00b7 could not locate network device or AAA client\", \"message_code\", \"11007\"), \"message_code\", \"11036 \u00b7 invalid RADIUS Message-Authenticator attribute\", \"message_code\", \"11036\"), \"message_code\", \"15039 \u00b7 rejected by the matched authorization profile\", \"message_code\", \"15039\"), \"message_code\", \"22040 \u00b7 wrong password or invalid shared secret\", \"message_code\", \"22040\"), \"message_code\", \"22056 \u00b7 subject not found in the identity store\", \"message_code\", \"22056\"), \"message_code\", \"24408 \u00b7 Active Directory authentication failed, wrong password\", \"message_code\", \"24408\")",
           "instant": false,
           "legendFormat": "{{message_code}}",
           "range": true,
@@ -1508,7 +1508,7 @@
         "type": "prometheus",
         "uid": "${prometheus}"
       },
-      "description": "Per-NAD authentication volume by outcome. Capped to the 25 highest-valued bars so the gauge stays readable in a deployment with hundreds of network devices. The exporter still publishes the complete per-device marginal: the exact deployment-wide totals it sums to are the \"Authentication outcome\" and \"Failed authentications\" panels above. The Network device variable also brings any device outside the cap into this panel.",
+      "description": "Per-NAD authentication volume by outcome. Capped to the 25 highest-valued bars so the gauge stays readable in a deployment with hundreds of network devices. The complete sortable per-device list is the \"Per-NAD authentication volume\" table beside this gauge. The Network device variable also brings any device outside the cap into this panel.",
       "fieldConfig": {
         "defaults": {
           "links": [
@@ -1553,6 +1553,90 @@
       "transformations": [],
       "transparent": false,
       "type": "bargauge"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${prometheus}"
+      },
+      "description": "The complete per-device marginal behind the capped gauge: passed and failed volume for every selected network device in the reporting window, with no top-K applied.",
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "nad"
+            },
+            "properties": [
+              {
+                "id": "links",
+                "value": [
+                  {
+                    "targetBlank": false,
+                    "title": "This network device on Endpoints and devices",
+                    "url": "/d/ise3-endpoints?${__url_time_range}&${deployment:queryparam}&var-nad=${__data.fields.nad}"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 106
+      },
+      "options": null,
+      "repeatDirection": "h",
+      "targets": [
+        {
+          "expr": "sum by (instance,nad,status) ((ise3_radius_authentications_by_nad{instance=~\"$deployment\",nad=~\"$nad\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"radius_reporting\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"radius_reporting\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"radius_reporting\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"radius_reporting\"} == 1))) == 1)))",
+          "format": "table",
+          "instant": true,
+          "legendFormat": "{{nad}} \u00b7 {{status}}",
+          "range": false,
+          "refId": "A"
+        }
+      ],
+      "title": "Per-NAD authentication volume",
+      "transformations": [
+        {
+          "id": "filterFieldsByName",
+          "options": {
+            "exclude": {
+              "names": [
+                "Time",
+                "__name__",
+                "job"
+              ]
+            }
+          }
+        },
+        {
+          "id": "organize",
+          "options": {
+            "renameByName": {
+              "Value": "authentications"
+            }
+          }
+        },
+        {
+          "id": "sortBy",
+          "options": {
+            "sort": [
+              {
+                "desc": true,
+                "field": "authentications"
+              }
+            ]
+          }
+        }
+      ],
+      "transparent": false,
+      "type": "table"
     },
     {
       "datasource": {
@@ -1617,7 +1701,7 @@
       "gridPos": {
         "h": 8,
         "w": 12,
-        "x": 0,
+        "x": 12,
         "y": 106
       },
       "options": {
@@ -2076,7 +2160,7 @@
           "repeatDirection": "h",
           "targets": [
             {
-              "expr": "sort_desc(label_replace(label_replace(label_replace(label_replace(label_replace(label_replace(label_replace(label_replace(label_replace(label_replace(label_replace(label_replace(label_replace(label_replace(label_replace(sum by (reason_code,ops_owner) ((ise3_session_failure_reason_endpoints{instance=~\"$deployment\",ops_owner=~\"$ops_owner\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"session_authorization\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"session_authorization\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"session_authorization\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"session_authorization\"} == 1))) == 1))), \"reason_code\", \"12300 \u00b7 PEAP certificate/PKI failure\", \"reason_code\", \"12300\"), \"reason_code\", \"12321 \u00b7 PEAP handshake failed, client rejected the ISE certificate\", \"reason_code\", \"12321\"), \"reason_code\", \"12500 \u00b7 EAP-TLS certificate/PKI failure\", \"reason_code\", \"12500\"), \"reason_code\", \"12501 \u00b7 EAP-TLS certificate/PKI failure\", \"reason_code\", \"12501\"), \"reason_code\", \"12511 \u00b7 EAP-TLS certificate/PKI failure\", \"reason_code\", \"12511\"), \"reason_code\", \"12625 \u00b7 EAP certificate/PKI failure\", \"reason_code\", \"12625\"), \"reason_code\", \"5400 \u00b7 authentication failed\", \"reason_code\", \"5400\"), \"reason_code\", \"5411 \u00b7 supplicant stopped responding to ISE\", \"reason_code\", \"5411\"), \"reason_code\", \"5440 \u00b7 endpoint abandoned the EAP session and started a new one\", \"reason_code\", \"5440\"), \"reason_code\", \"11007 \u00b7 could not locate network device or AAA client\", \"reason_code\", \"11007\"), \"reason_code\", \"11036 \u00b7 invalid RADIUS Message-Authenticator attribute\", \"reason_code\", \"11036\"), \"reason_code\", \"15039 \u00b7 rejected by the matched authorization profile\", \"reason_code\", \"15039\"), \"reason_code\", \"22040 \u00b7 wrong password or invalid shared secret\", \"reason_code\", \"22040\"), \"reason_code\", \"22056 \u00b7 subject not found in the identity store\", \"reason_code\", \"22056\"), \"reason_code\", \"24408 \u00b7 Active Directory authentication failed, wrong password\", \"reason_code\", \"24408\"))",
+              "expr": "sort_desc(label_replace(label_replace(label_replace(label_replace(label_replace(label_replace(label_replace(label_replace(label_replace(label_replace(label_replace(label_replace(label_replace(sum by (reason_code,ops_owner) ((ise3_session_failure_reason_endpoints{instance=~\"$deployment\",ops_owner=~\"$ops_owner\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"session_authorization\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"session_authorization\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"session_authorization\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"session_authorization\"} == 1))) == 1))), \"reason_code\", \"12300 \u00b7 last step: proposed PEAP to the client\", \"reason_code\", \"12300\"), \"reason_code\", \"12321 \u00b7 PEAP handshake failed, client rejected the ISE certificate\", \"reason_code\", \"12321\"), \"reason_code\", \"12500 \u00b7 last step: proposed EAP-TLS to the client\", \"reason_code\", \"12500\"), \"reason_code\", \"12511 \u00b7 unexpected TLS alert, treated as client rejection\", \"reason_code\", \"12511\"), \"reason_code\", \"5400 \u00b7 authentication failed\", \"reason_code\", \"5400\"), \"reason_code\", \"5411 \u00b7 supplicant stopped responding to ISE\", \"reason_code\", \"5411\"), \"reason_code\", \"5440 \u00b7 endpoint abandoned the EAP session and started a new one\", \"reason_code\", \"5440\"), \"reason_code\", \"11007 \u00b7 could not locate network device or AAA client\", \"reason_code\", \"11007\"), \"reason_code\", \"11036 \u00b7 invalid RADIUS Message-Authenticator attribute\", \"reason_code\", \"11036\"), \"reason_code\", \"15039 \u00b7 rejected by the matched authorization profile\", \"reason_code\", \"15039\"), \"reason_code\", \"22040 \u00b7 wrong password or invalid shared secret\", \"reason_code\", \"22040\"), \"reason_code\", \"22056 \u00b7 subject not found in the identity store\", \"reason_code\", \"22056\"), \"reason_code\", \"24408 \u00b7 Active Directory authentication failed, wrong password\", \"reason_code\", \"24408\"))",
               "instant": true,
               "legendFormat": "{{reason_code}} \u00b7 {{ops_owner}}",
               "range": false,

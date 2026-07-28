@@ -35,7 +35,7 @@
           "uid": "${prometheus}"
         },
         "enable": true,
-        "expr": "changes(ise3_exporter_build_info{instance=~\"$deployment\"}[15m]) > 0",
+        "expr": "ise3_exporter_build_info{instance=~\"$deployment\"} unless (ise3_exporter_build_info{instance=~\"$deployment\"} offset 5m)",
         "hide": false,
         "iconColor": "blue",
         "name": "Exporter build changed",
@@ -304,7 +304,7 @@
       "repeatDirection": "h",
       "targets": [
         {
-          "expr": "ise3_dataset_enabled{instance=~\"$deployment\",dataset=~\"$dataset\"}",
+          "expr": "(ise3_dataset_provider_active{instance=~\"$deployment\",dataset=~\"$dataset\"} * 0) + on(instance, dataset) group_left() ise3_dataset_enabled{instance=~\"$deployment\",dataset=~\"$dataset\"}",
           "format": "table",
           "instant": true,
           "legendFormat": "{{dataset}} enabled",

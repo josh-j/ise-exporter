@@ -172,19 +172,18 @@ def capped(purpose, complete, *, lowest=False):
     )
 
 
-# ISE message codes seen in the RADIUS error view. The certificate/PKI group is
-# the one PKI_MESSAGE_CODES counts; 123xx is the PEAP family and 125xx the
-# EAP-TLS family, so those entries are deliberately worded at family level
-# rather than quoting a catalogue string that is not confidently known. The rest
-# are the common authentication failures from Cisco's ISE message catalogue.
-# Anything absent here renders as the bare code, which is the honest default.
+# ISE message codes seen in the RADIUS error view, worded from Cisco's
+# catalogue where the string could be sourced. 12300 and 12500 are not failure
+# descriptions but the last recorded flow step ("Prepared EAP-Request proposing
+# <method> with challenge"): an error row carrying one died while proposing
+# that method, usually because the client walked away from the TLS exchange.
+# A code without a confidently sourced string is left out and renders bare,
+# which is the honest default.
 ISE_MESSAGE_CODES = {
-    "12300": "PEAP certificate/PKI failure",
+    "12300": "last step: proposed PEAP to the client",
     "12321": "PEAP handshake failed, client rejected the ISE certificate",
-    "12500": "EAP-TLS certificate/PKI failure",
-    "12501": "EAP-TLS certificate/PKI failure",
-    "12511": "EAP-TLS certificate/PKI failure",
-    "12625": "EAP certificate/PKI failure",
+    "12500": "last step: proposed EAP-TLS to the client",
+    "12511": "unexpected TLS alert, treated as client rejection",
     "5400": "authentication failed",
     "5411": "supplicant stopped responding to ISE",
     "5440": "endpoint abandoned the EAP session and started a new one",
@@ -505,8 +504,14 @@ def change_annotations():
             colour="orange",
         ),
         annotation(
+            # changes() can never see a build change: the version is a label,
+            # so an upgrade retires the old series and starts a new one whose
+            # value never changed. Presence-churn does fire: the new series
+            # exists where its five-minute-older self does not, and Grafana
+            # folds the contiguous samples into one region annotation.
             "Exporter build changed",
-            f"changes({metric('ise3_exporter_build_info')}[15m]) > 0",
+            f"{metric('ise3_exporter_build_info')} unless "
+            f"({metric('ise3_exporter_build_info')} offset 5m)",
             title="Exporter build changed",
             text="exporter {{version}} targeting ISE {{target_ise_release}}",
             colour="blue",
@@ -1422,11 +1427,14 @@ def access_dashboard():
                             "distribution as the bar above, plotted over time. "
                             "These are window gauges rather than counters, so a "
                             "line is the volume seen in each reporting window and "
-                            "its onset is the moment the failure began.",
+                            "its onset is the moment the failure began."
+                            + NAMED_CODES_NOTE,
                             [
                                 query(
-                                    "sum by (message_code) "
-                                    f"({gate(metric('ise3_radius_errors_by_message_code'), 'radius_errors')})",
+                                    named_codes(
+                                        "sum by (message_code) "
+                                        f"({gate(metric('ise3_radius_errors_by_message_code'), 'radius_errors')})"
+                                    ),
                                     "{{message_code}}",
                                 )
                             ],
@@ -1787,11 +1795,9 @@ def access_dashboard():
                             "Authentication by network device",
                             capped(
                                 "Per-NAD authentication volume by outcome.",
-                                "The exporter still publishes the complete "
-                                "per-device marginal: the exact deployment-wide "
-                                "totals it sums to are the \"Authentication "
-                                "outcome\" and \"Failed authentications\" panels "
-                                "above.",
+                                "The complete sortable per-device list is the "
+                                "\"Per-NAD authentication volume\" table beside "
+                                "this gauge.",
                             ),
                             [
                                 instant(
@@ -1813,6 +1819,34 @@ def access_dashboard():
                                 )
                             ],
                             data_links=(nad_series_drilldown,),
+                        )
+                    ),
+                    sized(
+                        tbl(
+                            "Per-NAD authentication volume",
+                            "The complete per-device marginal behind the capped "
+                            "gauge: passed and failed volume for every selected "
+                            "network device in the reporting window, with no "
+                            "top-K applied.",
+                            [
+                                instant(
+                                    "sum by (instance,nad,status) ("
+                                    + gate(
+                                        metric(
+                                            "ise3_radius_authentications_by_nad",
+                                            'nad=~"$nad"',
+                                        ),
+                                        "radius_reporting",
+                                    )
+                                    + ")",
+                                    "{{nad}} · {{status}}",
+                                )
+                            ],
+                            columns=("authentications",),
+                            sort=("authentications", True),
+                            column_overrides=(
+                                by_column("nad", links=(nad_row_drilldown,)),
+                            ),
                         )
                     ),
                     sized(
@@ -2836,7 +2870,19 @@ def health_dashboard():
                             "state for every selected dataset.",
                             [
                                 instant(
-                                    metric(
+                                    # ise3_dataset_enabled carries no provider
+                                    # label, and merge attaches an unbroadcast
+                                    # value only to the first provider row of
+                                    # each dataset; multiplying it onto the
+                                    # per-provider active series gives every
+                                    # provider row its enabled cell.
+                                    "("
+                                    + metric(
+                                        "ise3_dataset_provider_active",
+                                        'dataset=~"$dataset"',
+                                    )
+                                    + " * 0) + on(instance, dataset) group_left() "
+                                    + metric(
                                         "ise3_dataset_enabled",
                                         'dataset=~"$dataset"',
                                     ),
@@ -4287,6 +4333,7 @@ def pan_mnt_dashboard():
                                     "B",
                                 ),
                             ],
+                            no_value=NO_DATA_STALE,
                         ),
                         5,
                         12,
@@ -4584,6 +4631,9 @@ def secureclient_dashboard():
         "ise3_posture_endpoints",
         "ops_owner",
     )
+    psn_drilldown = drilldown(
+        "This node on PSN troubleshooting", "ise3-psn", node=by_series("psn")
+    )
     current = metric("ise3_posture_endpoints", 'ops_owner=~"$ops_owner"')
     compliant = metric(
         "ise3_posture_endpoints",
@@ -4646,6 +4696,7 @@ def secureclient_dashboard():
                             thresholds=RATIO_HIGH_IS_GOOD,
                             minimum=0,
                             maximum=1,
+                            no_value=NO_DATA_STALE,
                         ),
                         5,
                         8,
@@ -4691,6 +4742,7 @@ def secureclient_dashboard():
                                 )
                             ],
                             thresholds=NONZERO_WARNING,
+                            no_value=NO_DATA_STALE,
                         ),
                         5,
                         8,
@@ -4859,6 +4911,7 @@ def secureclient_dashboard():
                                     "{{psn}} · {{status}}",
                                 )
                             ],
+                            data_links=(psn_drilldown,),
                         )
                     ),
                     sized(
@@ -4921,6 +4974,7 @@ def secureclient_dashboard():
                             thresholds=RATIO_HIGH_IS_GOOD,
                             minimum=0,
                             maximum=1,
+                            no_value=NO_DATA_STALE,
                         ),
                         5,
                         12,
@@ -4941,6 +4995,7 @@ def secureclient_dashboard():
                                     "B",
                                 ),
                             ],
+                            no_value=NO_DATA_STALE,
                         ),
                         5,
                         12,
@@ -5092,6 +5147,7 @@ def secureclient_dashboard():
                                     "{{psn}} · {{status}}",
                                 )
                             ],
+                            data_links=(psn_drilldown,),
                         )
                     ),
                     sized(
@@ -5158,6 +5214,13 @@ def tacacs_dashboard():
         "Username",
         "ise3_tacacs_internal_account_enabled",
         "username",
+    )
+    # A TACACS device is the same NAD the endpoints dashboard classifies; the
+    # activity metrics carry its name in the generic `value` dimension label.
+    device_drilldown = drilldown(
+        "This device on Endpoints and devices",
+        "ise3-endpoints",
+        nad=by_series("value"),
     )
     return assemble(
         "ISE 3 — TACACS Device Administration",
@@ -5541,6 +5604,7 @@ def tacacs_dashboard():
                                     "{{value}} · {{status}}",
                                 )
                             ],
+                            data_links=(device_drilldown,),
                         )
                     ),
                     sized(
@@ -5595,6 +5659,7 @@ def tacacs_dashboard():
                                     "{{value}} · {{status}}",
                                 )
                             ],
+                            data_links=(device_drilldown,),
                         )
                     ),
                     sized(
@@ -5695,6 +5760,7 @@ def tacacs_dashboard():
                                     "{{value}}",
                                 )
                             ],
+                            data_links=(device_drilldown,),
                         )
                     ),
                     sized(

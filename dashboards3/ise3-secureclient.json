@@ -35,7 +35,7 @@
           "uid": "${prometheus}"
         },
         "enable": true,
-        "expr": "changes(ise3_exporter_build_info{instance=~\"$deployment\"}[15m]) > 0",
+        "expr": "ise3_exporter_build_info{instance=~\"$deployment\"} unless (ise3_exporter_build_info{instance=~\"$deployment\"} offset 5m)",
         "hide": false,
         "iconColor": "blue",
         "name": "Exporter build changed",
@@ -148,6 +148,7 @@
         "defaults": {
           "max": 1,
           "min": 0,
+          "noValue": "no data \u2014 stale, see readiness",
           "thresholds": {
             "mode": "absolute",
             "steps": [
@@ -240,6 +241,7 @@
       "description": "Distinct active endpoints with a failed, error, or non-compliant current posture state.",
       "fieldConfig": {
         "defaults": {
+          "noValue": "no data \u2014 stale, see readiness",
           "thresholds": {
             "mode": "absolute",
             "steps": [
@@ -686,6 +688,13 @@
       "description": "Distinct current posture endpoints by serving policy service node and posture status.",
       "fieldConfig": {
         "defaults": {
+          "links": [
+            {
+              "targetBlank": false,
+              "title": "This node on PSN troubleshooting",
+              "url": "/d/ise3-psn?${__url_time_range}&${deployment:queryparam}&var-node=${__field.labels.psn}"
+            }
+          ],
           "unit": "short"
         },
         "overrides": []
@@ -852,6 +861,7 @@
         "defaults": {
           "max": 1,
           "min": 0,
+          "noValue": "no data \u2014 stale, see readiness",
           "thresholds": {
             "mode": "absolute",
             "steps": [
@@ -903,6 +913,7 @@
       "description": "Distinct assessed endpoints and conclusive failures in the historical reporting window.",
       "fieldConfig": {
         "defaults": {
+          "noValue": "no data \u2014 stale, see readiness",
           "unit": "short"
         },
         "overrides": []
@@ -1307,6 +1318,13 @@
       "description": "Distinct assessed endpoints grouped by serving PSN and posture outcome.",
       "fieldConfig": {
         "defaults": {
+          "links": [
+            {
+              "targetBlank": false,
+              "title": "This node on PSN troubleshooting",
+              "url": "/d/ise3-psn?${__url_time_range}&${deployment:queryparam}&var-node=${__field.labels.psn}"
+            }
+          ],
           "unit": "short"
         },
         "overrides": []

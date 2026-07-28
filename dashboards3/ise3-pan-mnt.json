@@ -35,7 +35,7 @@
           "uid": "${prometheus}"
         },
         "enable": true,
-        "expr": "changes(ise3_exporter_build_info{instance=~\"$deployment\"}[15m]) > 0",
+        "expr": "ise3_exporter_build_info{instance=~\"$deployment\"} unless (ise3_exporter_build_info{instance=~\"$deployment\"} offset 5m)",
         "hide": false,
         "iconColor": "blue",
         "name": "Exporter build changed",
@@ -733,6 +733,7 @@
       "description": "Current live-session count and distinct endpoints from the selected active provider.",
       "fieldConfig": {
         "defaults": {
+          "noValue": "no data \u2014 stale, see readiness",
           "unit": "short"
         },
         "overrides": []
