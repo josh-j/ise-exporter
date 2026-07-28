@@ -24,6 +24,7 @@ from .credentials import (
     CredentialsError,
     load_credentials,
 )
+from .explore import Explorer
 from .plan import build_plan, render_plan
 from .scale_discovery import discover_scale, render_scale_discovery
 from .scheduler import Scheduler
@@ -196,13 +197,18 @@ def command_run(args):
 
     registry = LockedCollectorRegistry()
     scheduler = Scheduler(config, plan, transports)
+    # The explorer shares the scheduler's transport rather than building its
+    # own: two transports would mean two in-process cooldowns, and the gate
+    # file would be the only thing left keeping them apart.
+    oracle = transports.get("oracle")
+    explorer = Explorer(oracle) if oracle is not None else None
     # Two listeners, not one: Prometheus must reach /metrics from off-host, and
     # the operator API must not leave the host. Binding them together would mean
     # choosing one of those, and neither is the right thing to give up.
     metrics_http = HttpServer("0.0.0.0", config.exporter.port, registry)
     api_http = HttpServer(
         config.exporter.api_host, config.exporter.api_port, registry,
-        routes=OperatorApi(config, plan, scheduler).routes())
+        routes=OperatorApi(config, plan, scheduler, explorer).routes())
     try:
         metrics_http.start()
         api_http.start()

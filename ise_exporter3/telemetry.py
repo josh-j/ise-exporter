@@ -173,6 +173,14 @@ dataconnect_query_cooldown_seconds = Gauge(
 dataconnect_effective_duty_cycle_percent = Gauge(
     "ise3_dataconnect_effective_duty_cycle_percent",
     "Duty cycle the running process is enforcing, from the oracle budget")
+# Ad-hoc operator statements charge the same duty cycle as a scheduled
+# collection, so an unexplained cooldown on the reporting datasets has to be
+# attributable to the person who spent it. The per-view families above already
+# count what the statements cost; this counts who asked and what they got.
+dataconnect_explorer_queries_total = Counter(
+    "ise3_dataconnect_explorer_queries_total",
+    "Ad-hoc Data Connect statements requested through the operator API, by "
+    "outcome", ["result"])
 
 # --- bounded breakdowns ---
 # A top-K breakdown that silently drops the tail is indistinguishable from a

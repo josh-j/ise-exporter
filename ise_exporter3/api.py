@@ -6,8 +6,15 @@ and it holds them behind the pacing gate and the authentication guard. Serving
 them from the running process means the operator surface cannot bypass those
 guards, because there is no second process to bypass them from.
 
-It binds to localhost by default and is strictly read-only: every route reports
-state the exporter already computed. Nothing here reaches ISE.
+It binds to localhost by default and is strictly read-only. Every route but one
+namespace reports state the exporter already computed and reaches nothing.
+
+The exception is ``/api/v1/dataconnect``, and it is stated rather than papered
+over: those routes run bounded SELECTs against the reporting views through the
+same ``DataConnectTransport`` the scheduler uses -- same pacing gate, same
+adaptive cooldown, same ceilings, same authentication guard. That is the point.
+Ad-hoc navigation either happens here, inside the process that owns the budget,
+or it happens in a second process that owns nothing.
 """
 from __future__ import annotations
 
@@ -16,6 +23,7 @@ import time
 
 from . import __version__
 from .config import format_duration
+from .explore import ExploreError, unconfigured_error, unconfigured_status
 from .plan import render_plan
 
 
@@ -30,10 +38,14 @@ def _json(payload, status=200):
 class OperatorApi:
     """Builds the route table from live scheduler state."""
 
-    def __init__(self, config, plan, scheduler=None, clock=time.time):
+    def __init__(self, config, plan, scheduler=None, explorer=None,
+                 clock=time.time):
         self.config = config
         self.plan = plan
         self.scheduler = scheduler
+        # Absent whenever no oracle target is configured, which is why every
+        # dataconnect route has to answer without one.
+        self.explorer = explorer
         self.clock = clock
 
     # --- views ------------------------------------------------------------
@@ -124,22 +136,53 @@ class OperatorApi:
         when = self.scheduler.next_run.get(name)
         return round(max(0.0, when - now), 1) if when else None
 
+    # --- data connect -----------------------------------------------------
+
+    def dataconnect_views(self, _query):
+        return self._explored(lambda explorer: explorer.views())
+
+    def dataconnect_query(self, query):
+        return self._explored(lambda explorer: explorer.query(query))
+
+    def dataconnect_status(self, _query):
+        if self.explorer is None:
+            return _json(unconfigured_status())
+        return _json(self.explorer.status())
+
+    def _explored(self, work):
+        """One place where an explorer refusal becomes a status and a body."""
+        try:
+            if self.explorer is None:
+                raise unconfigured_error()
+            return _json(work(self.explorer))
+        except ExploreError as error:
+            return _json(error.payload(), error.status)
+
     # --- routes -----------------------------------------------------------
 
     def routes(self):
+        # Every handler takes the parsed query string, whether it reads it or
+        # not: one signature means the listener never has to know which routes
+        # take parameters.
         return {
-            "/api/v1/health": lambda: _json(self.health()),
-            "/api/v1/datasets": lambda: _json(self.datasets()),
-            "/api/v1/providers": lambda: _json(self.providers()),
-            "/api/v1/targets": lambda: _json(self.targets()),
-            "/api/v1/plan": lambda: _json(self.plan_view()),
-            "/api/v1/plan.txt": lambda: (
+            "/api/v1/health": lambda query: _json(self.health()),
+            "/api/v1/datasets": lambda query: _json(self.datasets()),
+            "/api/v1/providers": lambda query: _json(self.providers()),
+            "/api/v1/targets": lambda query: _json(self.targets()),
+            "/api/v1/plan": lambda query: _json(self.plan_view()),
+            "/api/v1/plan.txt": lambda query: (
                 200, render_plan(self.plan).encode("utf-8"),
                 "text/plain; charset=utf-8"),
-            "/api/v1": lambda: _json({
+            "/api/v1/dataconnect/views": self.dataconnect_views,
+            "/api/v1/dataconnect/query": self.dataconnect_query,
+            "/api/v1/dataconnect/status": self.dataconnect_status,
+            "/api/v1": lambda query: _json({
                 "version": __version__,
                 "routes": ["/api/v1/health", "/api/v1/datasets",
                            "/api/v1/providers", "/api/v1/targets",
-                           "/api/v1/plan", "/api/v1/plan.txt"],
+                           "/api/v1/plan", "/api/v1/plan.txt",
+                           "/api/v1/dataconnect/views",
+                           "/api/v1/dataconnect/query",
+                           "/api/v1/dataconnect/status"],
             }),
         }

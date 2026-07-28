@@ -122,6 +122,54 @@ def test_an_implausibly_distant_deadline_is_refused(transport):
     assert raised.value.reason == "state_unavailable"
 
 
+def test_the_pacing_hint_reads_both_clocks_without_taking_the_gate(transport):
+    # The operator API asks "may I query yet" on every status page. Answering
+    # by taking the flock would let a page refresh block a collection, so this
+    # is a peek: no lock, no lease, no sleep.
+    assert transport.pacing_wait_hint() == 0.0
+
+    os.makedirs(os.path.dirname(transport.pacing_file), exist_ok=True)
+    with open(transport.pacing_file, "w") as handle:
+        handle.write(f"{time.time() + 90:.6f}\n")
+    # Another process published a wall-clock deadline; this process has its own
+    # monotonic one. A statement issued now waits out whichever is longer.
+    assert transport.pacing_wait_hint() == pytest.approx(90, abs=2)
+    transport._next_query_at = time.monotonic() + 300
+    assert transport.pacing_wait_hint() == pytest.approx(300, abs=2)
+
+
+def test_the_pacing_hint_still_answers_while_the_gate_is_held(transport):
+    # Which is exactly when an operator wants to know.
+    descriptor = transport._acquire_gate(view="test")
+    try:
+        assert transport.pacing_wait_hint() > 0
+    finally:
+        transport._release_gate(descriptor, 1.0)
+
+
+def test_an_unreadable_pacing_gate_is_a_zero_hint_not_an_exception(transport):
+    # A torn read of a file another process is rewriting, or no file at all.
+    # Neither is worth failing a status page over -- the real gate is taken
+    # under a flock by whoever actually queries.
+    os.makedirs(os.path.dirname(transport.pacing_file), exist_ok=True)
+    with open(transport.pacing_file, "w") as handle:
+        handle.write("half-written")
+    assert transport.pacing_wait_hint() == 0.0
+
+
+def test_the_pacing_hint_never_moves_the_gate(transport):
+    descriptor = transport._acquire_gate(view="test")
+    try:
+        with open(transport.pacing_file) as handle:
+            before = handle.read()
+        for _ in range(5):
+            transport.pacing_wait_hint()
+        with open(transport.pacing_file) as handle:
+            assert handle.read() == before
+    finally:
+        transport._release_gate(descriptor, 1.0)
+
+
 def test_the_crash_lease_covers_both_bounded_periods_of_both_attempts(tmp_path):
     # One attempt costs one bounded logon and one bounded statement (the session
     # precondition runs under the statement's deadline), and the single permitted

@@ -1,7 +1,14 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!-- Default table views so the common cmdlets read well without piping to
      Format-Table. The dataset view leads with the source, because "which one
-     is answering" is the first thing an operator needs to know. -->
+     is answering" is the first thing an operator needs to know.
+
+     The Data Connect views select on the PSTypeName Invoke-IseDcQuery stamps on
+     each row. They name the columns an operator reads first, not every column
+     the view returns: a table wide enough to wrap is less legible than the raw
+     object, and everything else is one Format-List away. A column the current
+     projection does not carry renders blank rather than failing, which is what
+     -Column and a narrower view are for. -->
 <Configuration>
   <ViewDefinitions>
     <View>
@@ -27,6 +34,352 @@
               <TableColumnItem><PropertyName>last_success_age_seconds</PropertyName></TableColumnItem>
               <TableColumnItem><PropertyName>consecutive_failures</PropertyName></TableColumnItem>
               <TableColumnItem><PropertyName>failure_reason</PropertyName></TableColumnItem>
+            </TableColumnItems>
+          </TableRowEntry>
+        </TableRowEntries>
+      </TableControl>
+    </View>
+
+    <View>
+      <Name>IseDcView</Name>
+      <ViewSelectedBy><TypeName>Ise.Dc.View</TypeName></ViewSelectedBy>
+      <TableControl>
+        <TableHeaders>
+          <TableColumnHeader><Label>Name</Label><Width>36</Width></TableColumnHeader>
+          <TableColumnHeader><Label>Time</Label><Width>14</Width></TableColumnHeader>
+          <TableColumnHeader><Label>Cols</Label><Width>5</Width></TableColumnHeader>
+          <TableColumnHeader><Label>Avail</Label><Width>6</Width></TableColumnHeader>
+          <TableColumnHeader><Label>Description</Label></TableColumnHeader>
+        </TableHeaders>
+        <TableRowEntries>
+          <TableRowEntry>
+            <TableColumnItems>
+              <TableColumnItem><PropertyName>name</PropertyName></TableColumnItem>
+              <TableColumnItem><PropertyName>time_column</PropertyName></TableColumnItem>
+              <TableColumnItem><ScriptBlock>@($_.columns).Count</ScriptBlock></TableColumnItem>
+              <TableColumnItem><PropertyName>available</PropertyName></TableColumnItem>
+              <TableColumnItem><PropertyName>description</PropertyName></TableColumnItem>
+            </TableColumnItems>
+          </TableRowEntry>
+        </TableRowEntries>
+      </TableControl>
+    </View>
+
+    <View>
+      <Name>IseDcColumn</Name>
+      <ViewSelectedBy><TypeName>Ise.Dc.Column</TypeName></ViewSelectedBy>
+      <TableControl>
+        <TableHeaders>
+          <TableColumnHeader><Label>View</Label><Width>36</Width></TableColumnHeader>
+          <TableColumnHeader><Label>Column</Label><Width>32</Width></TableColumnHeader>
+          <TableColumnHeader><Label>Default</Label><Width>8</Width></TableColumnHeader>
+        </TableHeaders>
+        <TableRowEntries>
+          <TableRowEntry>
+            <TableColumnItems>
+              <TableColumnItem><PropertyName>View</PropertyName></TableColumnItem>
+              <TableColumnItem><PropertyName>Column</PropertyName></TableColumnItem>
+              <TableColumnItem><PropertyName>Default</PropertyName></TableColumnItem>
+            </TableColumnItems>
+          </TableRowEntry>
+        </TableRowEntries>
+      </TableControl>
+    </View>
+
+    <View>
+      <Name>IseDcStatus</Name>
+      <ViewSelectedBy><TypeName>Ise.Dc.Status</TypeName></ViewSelectedBy>
+      <ListControl>
+        <ListEntries>
+          <ListEntry>
+            <ListItems>
+              <ListItem><PropertyName>configured</PropertyName></ListItem>
+              <ListItem><PropertyName>schema_discovered</PropertyName></ListItem>
+              <ListItem><PropertyName>views_available</PropertyName></ListItem>
+              <ListItem><PropertyName>views_total</PropertyName></ListItem>
+              <ListItem><PropertyName>duty_cycle_percent</PropertyName></ListItem>
+              <ListItem><PropertyName>cooldown_remaining_seconds</PropertyName></ListItem>
+              <ListItem><PropertyName>busy</PropertyName></ListItem>
+              <ListItem><PropertyName>last_query</PropertyName></ListItem>
+            </ListItems>
+          </ListEntry>
+        </ListEntries>
+      </ListControl>
+    </View>
+
+    <!-- -AsSql is read, not scanned: SQL in a table column is unreadable at any
+         width, so it gets a list. -->
+    <View>
+      <Name>IseDcSql</Name>
+      <ViewSelectedBy><TypeName>Ise.Dc.Sql</TypeName></ViewSelectedBy>
+      <ListControl>
+        <ListEntries>
+          <ListEntry>
+            <ListItems>
+              <ListItem><PropertyName>View</PropertyName></ListItem>
+              <ListItem><PropertyName>Sql</PropertyName></ListItem>
+              <ListItem><PropertyName>Binds</PropertyName></ListItem>
+            </ListItems>
+          </ListEntry>
+        </ListEntries>
+      </ListControl>
+    </View>
+
+    <View>
+      <Name>IseDcRadiusAuthentications</Name>
+      <ViewSelectedBy><TypeName>Ise.Dc.RadiusAuthentications</TypeName></ViewSelectedBy>
+      <TableControl>
+        <TableHeaders>
+          <TableColumnHeader><Label>Time</Label><Width>26</Width></TableColumnHeader>
+          <TableColumnHeader><Label>User</Label><Width>20</Width></TableColumnHeader>
+          <TableColumnHeader><Label>Mac</Label><Width>18</Width></TableColumnHeader>
+          <TableColumnHeader><Label>Nad</Label><Width>20</Width></TableColumnHeader>
+          <TableColumnHeader><Label>Failed</Label><Width>6</Width></TableColumnHeader>
+          <TableColumnHeader><Label>Reason</Label></TableColumnHeader>
+        </TableHeaders>
+        <TableRowEntries>
+          <TableRowEntry>
+            <TableColumnItems>
+              <TableColumnItem><PropertyName>timestamp</PropertyName></TableColumnItem>
+              <TableColumnItem><PropertyName>username</PropertyName></TableColumnItem>
+              <TableColumnItem><PropertyName>calling_station_id</PropertyName></TableColumnItem>
+              <TableColumnItem><PropertyName>device_name</PropertyName></TableColumnItem>
+              <TableColumnItem><PropertyName>failed</PropertyName></TableColumnItem>
+              <TableColumnItem><PropertyName>failure_reason</PropertyName></TableColumnItem>
+            </TableColumnItems>
+          </TableRowEntry>
+        </TableRowEntries>
+      </TableControl>
+    </View>
+
+    <View>
+      <Name>IseDcRadiusAccounting</Name>
+      <ViewSelectedBy><TypeName>Ise.Dc.RadiusAccounting</TypeName></ViewSelectedBy>
+      <TableControl>
+        <TableHeaders>
+          <TableColumnHeader><Label>Time</Label><Width>26</Width></TableColumnHeader>
+          <TableColumnHeader><Label>User</Label><Width>20</Width></TableColumnHeader>
+          <TableColumnHeader><Label>Nad</Label><Width>20</Width></TableColumnHeader>
+          <TableColumnHeader><Label>Status</Label><Width>8</Width></TableColumnHeader>
+          <TableColumnHeader><Label>Sec</Label><Width>8</Width></TableColumnHeader>
+          <TableColumnHeader><Label>Node</Label></TableColumnHeader>
+        </TableHeaders>
+        <TableRowEntries>
+          <TableRowEntry>
+            <TableColumnItems>
+              <TableColumnItem><PropertyName>timestamp</PropertyName></TableColumnItem>
+              <TableColumnItem><PropertyName>username</PropertyName></TableColumnItem>
+              <TableColumnItem><PropertyName>device_name</PropertyName></TableColumnItem>
+              <TableColumnItem><PropertyName>acct_status_type</PropertyName></TableColumnItem>
+              <TableColumnItem><PropertyName>acct_session_time</PropertyName></TableColumnItem>
+              <TableColumnItem><PropertyName>ise_node</PropertyName></TableColumnItem>
+            </TableColumnItems>
+          </TableRowEntry>
+        </TableRowEntries>
+      </TableControl>
+    </View>
+
+    <View>
+      <Name>IseDcRadiusErrorsView</Name>
+      <ViewSelectedBy><TypeName>Ise.Dc.RadiusErrorsView</TypeName></ViewSelectedBy>
+      <TableControl>
+        <TableHeaders>
+          <TableColumnHeader><Label>Time</Label><Width>26</Width></TableColumnHeader>
+          <TableColumnHeader><Label>Code</Label><Width>10</Width></TableColumnHeader>
+          <TableColumnHeader><Label>Nad</Label><Width>24</Width></TableColumnHeader>
+          <TableColumnHeader><Label>Method</Label><Width>16</Width></TableColumnHeader>
+          <TableColumnHeader><Label>Node</Label></TableColumnHeader>
+        </TableHeaders>
+        <TableRowEntries>
+          <TableRowEntry>
+            <TableColumnItems>
+              <TableColumnItem><PropertyName>timestamp</PropertyName></TableColumnItem>
+              <TableColumnItem><PropertyName>message_code</PropertyName></TableColumnItem>
+              <TableColumnItem><PropertyName>network_device_name</PropertyName></TableColumnItem>
+              <TableColumnItem><PropertyName>authentication_method</PropertyName></TableColumnItem>
+              <TableColumnItem><PropertyName>ise_node</PropertyName></TableColumnItem>
+            </TableColumnItems>
+          </TableRowEntry>
+        </TableRowEntries>
+      </TableControl>
+    </View>
+
+    <View>
+      <Name>IseDcEndpointsData</Name>
+      <ViewSelectedBy><TypeName>Ise.Dc.EndpointsData</TypeName></ViewSelectedBy>
+      <TableControl>
+        <TableHeaders>
+          <TableColumnHeader><Label>Mac</Label><Width>18</Width></TableColumnHeader>
+          <TableColumnHeader><Label>Policy</Label><Width>28</Width></TableColumnHeader>
+          <TableColumnHeader><Label>IdentityGroup</Label><Width>22</Width></TableColumnHeader>
+          <TableColumnHeader><Label>Posture</Label><Width>7</Width></TableColumnHeader>
+          <TableColumnHeader><Label>Updated</Label></TableColumnHeader>
+        </TableHeaders>
+        <TableRowEntries>
+          <TableRowEntry>
+            <TableColumnItems>
+              <TableColumnItem><PropertyName>mac_address</PropertyName></TableColumnItem>
+              <TableColumnItem><PropertyName>endpoint_policy</PropertyName></TableColumnItem>
+              <TableColumnItem><PropertyName>identity_group_id</PropertyName></TableColumnItem>
+              <TableColumnItem><PropertyName>posture_applicable</PropertyName></TableColumnItem>
+              <TableColumnItem><PropertyName>update_time</PropertyName></TableColumnItem>
+            </TableColumnItems>
+          </TableRowEntry>
+        </TableRowEntries>
+      </TableControl>
+    </View>
+
+    <!-- The TACACS views time on EPOCH_TIME in seconds. Rendering that raw is
+         technically honest and practically useless, so it is shown as local
+         time when it is there and left blank when it is not. -->
+    <View>
+      <Name>IseDcTacacsAuthentication</Name>
+      <ViewSelectedBy><TypeName>Ise.Dc.TacacsAuthenticationLastTwoDays</TypeName></ViewSelectedBy>
+      <TableControl>
+        <TableHeaders>
+          <TableColumnHeader><Label>Time</Label><Width>20</Width></TableColumnHeader>
+          <TableColumnHeader><Label>User</Label><Width>20</Width></TableColumnHeader>
+          <TableColumnHeader><Label>Nad</Label><Width>24</Width></TableColumnHeader>
+          <TableColumnHeader><Label>Status</Label></TableColumnHeader>
+        </TableHeaders>
+        <TableRowEntries>
+          <TableRowEntry>
+            <TableColumnItems>
+              <TableColumnItem><ScriptBlock>if ($_.epoch_time) { [System.DateTimeOffset]::FromUnixTimeSeconds([long]$_.epoch_time).LocalDateTime.ToString('yyyy-MM-dd HH:mm:ss') }</ScriptBlock></TableColumnItem>
+              <TableColumnItem><PropertyName>username</PropertyName></TableColumnItem>
+              <TableColumnItem><PropertyName>device_name</PropertyName></TableColumnItem>
+              <TableColumnItem><PropertyName>status</PropertyName></TableColumnItem>
+            </TableColumnItems>
+          </TableRowEntry>
+        </TableRowEntries>
+      </TableControl>
+    </View>
+
+    <View>
+      <Name>IseDcTacacsAccounting</Name>
+      <ViewSelectedBy><TypeName>Ise.Dc.TacacsAccountingLastTwoDays</TypeName></ViewSelectedBy>
+      <TableControl>
+        <TableHeaders>
+          <TableColumnHeader><Label>Time</Label><Width>20</Width></TableColumnHeader>
+          <TableColumnHeader><Label>User</Label><Width>16</Width></TableColumnHeader>
+          <TableColumnHeader><Label>Nad</Label><Width>20</Width></TableColumnHeader>
+          <TableColumnHeader><Label>Command</Label><Width>16</Width></TableColumnHeader>
+          <TableColumnHeader><Label>Args</Label></TableColumnHeader>
+        </TableHeaders>
+        <TableRowEntries>
+          <TableRowEntry>
+            <TableColumnItems>
+              <TableColumnItem><ScriptBlock>if ($_.epoch_time) { [System.DateTimeOffset]::FromUnixTimeSeconds([long]$_.epoch_time).LocalDateTime.ToString('yyyy-MM-dd HH:mm:ss') }</ScriptBlock></TableColumnItem>
+              <TableColumnItem><PropertyName>username</PropertyName></TableColumnItem>
+              <TableColumnItem><PropertyName>device_name</PropertyName></TableColumnItem>
+              <TableColumnItem><PropertyName>command</PropertyName></TableColumnItem>
+              <TableColumnItem><PropertyName>command_args</PropertyName></TableColumnItem>
+            </TableColumnItems>
+          </TableRowEntry>
+        </TableRowEntries>
+      </TableControl>
+    </View>
+
+    <View>
+      <Name>IseDcTacacsAuthorization</Name>
+      <ViewSelectedBy><TypeName>Ise.Dc.TacacsAuthorizationLastTwoDays</TypeName></ViewSelectedBy>
+      <TableControl>
+        <TableHeaders>
+          <TableColumnHeader><Label>Time</Label><Width>20</Width></TableColumnHeader>
+          <TableColumnHeader><Label>User</Label><Width>16</Width></TableColumnHeader>
+          <TableColumnHeader><Label>Nad</Label><Width>20</Width></TableColumnHeader>
+          <TableColumnHeader><Label>Status</Label><Width>8</Width></TableColumnHeader>
+          <TableColumnHeader><Label>ShellProfile</Label><Width>18</Width></TableColumnHeader>
+          <TableColumnHeader><Label>CommandSet</Label></TableColumnHeader>
+        </TableHeaders>
+        <TableRowEntries>
+          <TableRowEntry>
+            <TableColumnItems>
+              <TableColumnItem><ScriptBlock>if ($_.epoch_time) { [System.DateTimeOffset]::FromUnixTimeSeconds([long]$_.epoch_time).LocalDateTime.ToString('yyyy-MM-dd HH:mm:ss') }</ScriptBlock></TableColumnItem>
+              <TableColumnItem><PropertyName>username</PropertyName></TableColumnItem>
+              <TableColumnItem><PropertyName>device_name</PropertyName></TableColumnItem>
+              <TableColumnItem><PropertyName>status</PropertyName></TableColumnItem>
+              <TableColumnItem><PropertyName>shell_profile</PropertyName></TableColumnItem>
+              <TableColumnItem><PropertyName>matched_command_set</PropertyName></TableColumnItem>
+            </TableColumnItems>
+          </TableRowEntry>
+        </TableRowEntries>
+      </TableControl>
+    </View>
+
+    <View>
+      <Name>IseDcPostureByEndpoint</Name>
+      <ViewSelectedBy><TypeName>Ise.Dc.PostureAssessmentByEndpoint</TypeName></ViewSelectedBy>
+      <TableControl>
+        <TableHeaders>
+          <TableColumnHeader><Label>Time</Label><Width>26</Width></TableColumnHeader>
+          <TableColumnHeader><Label>Mac</Label><Width>18</Width></TableColumnHeader>
+          <TableColumnHeader><Label>Status</Label><Width>14</Width></TableColumnHeader>
+          <TableColumnHeader><Label>Policy</Label><Width>24</Width></TableColumnHeader>
+          <TableColumnHeader><Label>Node</Label></TableColumnHeader>
+        </TableHeaders>
+        <TableRowEntries>
+          <TableRowEntry>
+            <TableColumnItems>
+              <TableColumnItem><PropertyName>timestamp</PropertyName></TableColumnItem>
+              <TableColumnItem><PropertyName>endpoint_mac_address</PropertyName></TableColumnItem>
+              <TableColumnItem><PropertyName>posture_status</PropertyName></TableColumnItem>
+              <TableColumnItem><PropertyName>posture_policy_matched</PropertyName></TableColumnItem>
+              <TableColumnItem><PropertyName>ise_node</PropertyName></TableColumnItem>
+            </TableColumnItems>
+          </TableRowEntry>
+        </TableRowEntries>
+      </TableControl>
+    </View>
+
+    <View>
+      <Name>IseDcSystemSummary</Name>
+      <ViewSelectedBy><TypeName>Ise.Dc.SystemSummary</TypeName></ViewSelectedBy>
+      <TableControl>
+        <TableHeaders>
+          <TableColumnHeader><Label>Time</Label><Width>26</Width></TableColumnHeader>
+          <TableColumnHeader><Label>Node</Label><Width>20</Width></TableColumnHeader>
+          <TableColumnHeader><Label>Cpu%</Label><Width>6</Width></TableColumnHeader>
+          <TableColumnHeader><Label>Mem%</Label><Width>6</Width></TableColumnHeader>
+          <TableColumnHeader><Label>Root%</Label><Width>6</Width></TableColumnHeader>
+          <TableColumnHeader><Label>Opt%</Label></TableColumnHeader>
+        </TableHeaders>
+        <TableRowEntries>
+          <TableRowEntry>
+            <TableColumnItems>
+              <TableColumnItem><PropertyName>timestamp</PropertyName></TableColumnItem>
+              <TableColumnItem><PropertyName>ise_node</PropertyName></TableColumnItem>
+              <TableColumnItem><PropertyName>cpu_utilization</PropertyName></TableColumnItem>
+              <TableColumnItem><PropertyName>memory_utilization</PropertyName></TableColumnItem>
+              <TableColumnItem><PropertyName>diskspace_root</PropertyName></TableColumnItem>
+              <TableColumnItem><PropertyName>diskspace_opt</PropertyName></TableColumnItem>
+            </TableColumnItems>
+          </TableRowEntry>
+        </TableRowEntries>
+      </TableControl>
+    </View>
+
+    <View>
+      <Name>IseDcKeyPerformanceMetrics</Name>
+      <ViewSelectedBy><TypeName>Ise.Dc.KeyPerformanceMetrics</TypeName></ViewSelectedBy>
+      <TableControl>
+        <TableHeaders>
+          <TableColumnHeader><Label>Logged</Label><Width>26</Width></TableColumnHeader>
+          <TableColumnHeader><Label>Node</Label><Width>20</Width></TableColumnHeader>
+          <TableColumnHeader><Label>Req/hr</Label><Width>10</Width></TableColumnHeader>
+          <TableColumnHeader><Label>Tps</Label><Width>8</Width></TableColumnHeader>
+          <TableColumnHeader><Label>Load</Label><Width>8</Width></TableColumnHeader>
+          <TableColumnHeader><Label>LatencyMs</Label></TableColumnHeader>
+        </TableHeaders>
+        <TableRowEntries>
+          <TableRowEntry>
+            <TableColumnItems>
+              <TableColumnItem><PropertyName>logged_time</PropertyName></TableColumnItem>
+              <TableColumnItem><PropertyName>ise_node</PropertyName></TableColumnItem>
+              <TableColumnItem><PropertyName>radius_requests_hr</PropertyName></TableColumnItem>
+              <TableColumnItem><PropertyName>avg_tps</PropertyName></TableColumnItem>
+              <TableColumnItem><PropertyName>avg_load</PropertyName></TableColumnItem>
+              <TableColumnItem><PropertyName>avg_latency_per_req</PropertyName></TableColumnItem>
             </TableColumnItems>
           </TableRowEntry>
         </TableRowEntries>

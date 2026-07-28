@@ -1,0 +1,484 @@
+#!/usr/bin/env pwsh
+# Contract test for the ise-cli3 PowerShell module.
+#
+# The module is a thin client for routes the exporter serves, so the thing worth
+# testing is the wire: does an operator's parameter become the query string the
+# server documents, and does the server's refusal become a sentence. Both halves
+# of docs/ise-cli3-plan.md are built against that contract independently, so a
+# stub that answers exactly what the contract says is a real check on this half
+# rather than a mirror of it -- the recorded URLs below are what the Python
+# route handlers must accept.
+#
+# Self-contained: it starts an HttpListener on a free loopback port, points the
+# module at it, and exits non-zero on any failure, so CI can run it behind
+# `command -v pwsh`.
+[CmdletBinding()]
+param()
+
+$ErrorActionPreference = 'Stop'
+$script:Passed = 0
+$script:Failed = 0
+
+function Assert-That {
+    param([string]$Name, [bool]$Condition, [string]$Detail = '')
+    if ($Condition) {
+        $script:Passed++
+        Write-Host "  ok   $Name" -ForegroundColor Green
+    }
+    else {
+        $script:Failed++
+        Write-Host "  FAIL $Name" -ForegroundColor Red
+        if ($Detail) { Write-Host "       $Detail" -ForegroundColor DarkRed }
+    }
+}
+
+function Assert-Equal {
+    param([string]$Name, $Expected, $Actual)
+    Assert-That $Name ("$Expected" -eq "$Actual") "expected: $Expected`n       actual:   $Actual"
+}
+
+function Assert-Like {
+    param([string]$Name, [string]$Pattern, [string]$Actual)
+    Assert-That $Name ($Actual -like $Pattern) "pattern: $Pattern`n       actual:  $Actual"
+}
+
+# --- the stub exporter -------------------------------------------------------
+
+# Canned contract JSON. The catalogue deliberately spells the RADIUS accounting
+# user column USER_NAME and the authentication one USERNAME: ISE is not
+# consistent across views, and the typed cmdlets are supposed to resolve the
+# spelling against the descriptor rather than hard-code one and hope.
+$views = @(
+    @{
+        name = 'radius_authentications'; view = 'RADIUS_AUTHENTICATIONS'
+        description = 'one row per RADIUS authentication event'
+        time_column = 'TIMESTAMP'; time_kind = 'timestamp'
+        default_columns = @('TIMESTAMP', 'USERNAME', 'CALLING_STATION_ID', 'DEVICE_NAME', 'FAILED')
+        columns = @('AUTHENTICATION_METHOD', 'CALLING_STATION_ID', 'DEVICE_NAME', 'FAILED',
+                    'FAILURE_REASON', 'ISE_NODE', 'RESPONSE_TIME', 'TIMESTAMP', 'USERNAME')
+        available = $true
+    },
+    @{
+        name = 'radius_accounting'; view = 'RADIUS_ACCOUNTING'
+        description = 'RADIUS accounting starts and stops'
+        time_column = 'TIMESTAMP'; time_kind = 'timestamp'
+        default_columns = @('TIMESTAMP', 'USER_NAME', 'DEVICE_NAME', 'ACCT_STATUS_TYPE')
+        columns = @('ACCT_SESSION_TIME', 'ACCT_STATUS_TYPE', 'CALLING_STATION_ID',
+                    'DEVICE_NAME', 'ISE_NODE', 'TIMESTAMP', 'USER_NAME')
+        available = $true
+    },
+    @{
+        name = 'endpoints_data'; view = 'ENDPOINTS_DATA'
+        description = 'the endpoint database, current state'
+        time_column = $null; time_kind = $null
+        default_columns = @('MAC_ADDRESS', 'ENDPOINT_POLICY', 'UPDATE_TIME')
+        columns = @('ENDPOINT_POLICY', 'IDENTITY_GROUP_ID', 'MAC_ADDRESS',
+                    'POSTURE_APPLICABLE', 'UPDATE_TIME')
+        available = $true
+    },
+    @{
+        name = 'tacacs_accounting_last_two_days'; view = 'TACACS_ACCOUNTING_LAST_TWO_DAYS'
+        description = 'device-administration commands, 48 h retention'
+        time_column = 'EPOCH_TIME'; time_kind = 'epoch'
+        default_columns = @('EPOCH_TIME', 'USERNAME', 'DEVICE_NAME', 'COMMAND', 'COMMAND_ARGS')
+        columns = @('COMMAND', 'COMMAND_ARGS', 'DEVICE_NAME', 'EPOCH_TIME', 'USERNAME')
+        available = $true
+    },
+    @{
+        name = 'posture_assessment_by_condition'; view = 'POSTURE_ASSESSMENT_BY_CONDITION'
+        description = 'per-condition posture results'
+        time_column = 'LOGGED_AT'; time_kind = 'timestamp'
+        default_columns = @(); columns = @(); available = $false
+    }
+)
+
+$status = @{
+    configured = $true; schema_discovered = $true
+    views_total = 5; views_available = 4
+    duty_cycle_percent = 5.0; cooldown_remaining_seconds = 12.3; busy = $false
+    last_query = @{ view = 'radius_authentications'; rows = 100
+                    elapsed_seconds = 1.9; at_age_seconds = 42.0; result = 'success' }
+}
+
+$rows = @{
+    radius_authentications = @(
+        @{ timestamp = '2026-07-27 19:48:01'; username = 'jdoe'
+           calling_station_id = 'AA:BB:CC:11:22:33'; device_name = 'core-1'
+           failed = 1; failure_reason = '22056 Subject not found' },
+        @{ timestamp = '2026-07-27 19:47:55'; username = 'asmith'
+           calling_station_id = 'AA:BB:CC:44:55:66'; device_name = 'core-2'
+           failed = 0; failure_reason = $null }
+    )
+    radius_accounting = @(
+        @{ timestamp = '2026-07-27 19:40:00'; user_name = 'jdoe'
+           device_name = 'core-1'; acct_status_type = 'Start' }
+    )
+    endpoints_data = @(
+        @{ mac_address = 'AA:BB:CC:11:22:33'; endpoint_policy = 'Cisco-IP-Phone'
+           update_time = '2026-07-26 07:19:00' }
+    )
+}
+
+$listenerState = [hashtable]::Synchronized(@{
+    Requests   = [System.Collections.ArrayList]::Synchronized([System.Collections.ArrayList]::new())
+    FlakyCalls = 0
+    Ready      = $false
+    Error      = $null
+})
+
+# A free port, released immediately: HttpListener wants a prefix, not a socket,
+# and racing for one is cheaper than picking a number and hoping.
+$probe = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, 0)
+$probe.Start()
+$port = $probe.LocalEndpoint.Port
+$probe.Stop()
+$root = "http://127.0.0.1:$port"
+
+$serverScript = {
+    function Write-Json {
+        param($Context, [int]$Status, $Payload)
+        $body = [System.Text.Encoding]::UTF8.GetBytes(($Payload | ConvertTo-Json -Depth 8 -Compress))
+        $Context.Response.StatusCode = $Status
+        $Context.Response.ContentType = 'application/json'
+        $Context.Response.ContentLength64 = $body.Length
+        $Context.Response.OutputStream.Write($body, 0, $body.Length)
+        $Context.Response.Close()
+    }
+
+    try {
+        $listener = [System.Net.HttpListener]::new()
+        $listener.Prefixes.Add("$root/")
+        $listener.Start()
+        $state['Ready'] = $true
+
+        $running = $true
+        while ($running -and $listener.IsListening) {
+            $context = $listener.GetContext()
+            $request = $context.Request
+            # RawUrl is the request line verbatim: the assertions are about what
+            # the client put on the wire, not what .NET would normalise it to.
+            [void]$state.Requests.Add($request.RawUrl)
+            $path = $request.Url.AbsolutePath
+            $view = $request.QueryString['view']
+
+            # One response per request, and one branch per response: an unanswered
+            # or twice-answered request would hang the client for its 90 s query
+            # timeout rather than failing an assertion.
+            if ($path -eq '/shutdown') {
+                $running = $false
+                Write-Json $context 200 @{ ok = $true }
+            }
+            elseif ($path -eq '/api/v1/dataconnect/views') {
+                Write-Json $context 200 $views
+            }
+            elseif ($path -eq '/api/v1/dataconnect/status') {
+                Write-Json $context 200 $status
+            }
+            elseif ($path -eq '/api/v1/dataconnect/query') {
+                $refusal = switch ($view) {
+                    'busy_view' {
+                        @{ code = 429; body = @{
+                            error = 'busy'; detail = 'another explorer query is in flight' } }
+                    }
+                    'cooldown_view' {
+                        @{ code = 503; body = @{ error = 'cooldown'; retry_after_seconds = 38 } }
+                    }
+                    'pending_view' {
+                        @{ code = 503; body = @{
+                            error = 'schema_pending'
+                            detail = 'catalog discovery has not completed' } }
+                    }
+                    'nosuch_view' {
+                        @{ code = 404; body = @{ error = 'unknown_view'; detail = 'nosuch_view' } }
+                    }
+                    'flaky_view' {
+                        $state['FlakyCalls'] = [int]$state['FlakyCalls'] + 1
+                        if ([int]$state['FlakyCalls'] -eq 1) {
+                            @{ code = 503; body = @{ error = 'cooldown'; retry_after_seconds = 1 } }
+                        }
+                    }
+                }
+                if ($refusal) {
+                    Write-Json $context $refusal.code $refusal.body
+                }
+                else {
+                    $payload = [ordered]@{
+                        view = $view
+                        sql = "SELECT * FROM $view FETCH FIRST :limit ROWS ONLY"
+                        binds = @{ limit = 100 }
+                    }
+                    if ($request.QueryString['explain'] -eq '1') {
+                        $payload['rows'] = $null
+                        $payload['row_count'] = $null
+                        $payload['truncated'] = $null
+                        $payload['elapsed_seconds'] = $null
+                        $payload['cooldown_seconds'] = $null
+                    }
+                    else {
+                        $result = @($rows[$view])
+                        if (-not $result -or $null -eq $result[0]) { $result = @(@{ view = $view }) }
+                        $first = $request.QueryString['first']
+                        $payload['rows'] = $result
+                        $payload['row_count'] = $result.Count
+                        $payload['truncated'] = ($first -and [int]$first -le $result.Count)
+                        $payload['elapsed_seconds'] = 1.9
+                        $payload['cooldown_seconds'] = 36.4
+                    }
+                    Write-Json $context 200 $payload
+                }
+            }
+            else {
+                Write-Json $context 404 @{ error = 'not_found'; detail = $path }
+            }
+        }
+        $listener.Stop()
+        $listener.Close()
+    }
+    catch {
+        $state['Error'] = $_.ToString()
+        $state['Ready'] = $true
+    }
+}
+
+$runspace = [runspacefactory]::CreateRunspace()
+$runspace.Open()
+foreach ($pair in @{ state = $listenerState; root = $root; views = $views;
+                     status = $status; rows = $rows }.GetEnumerator()) {
+    $runspace.SessionStateProxy.SetVariable($pair.Key, $pair.Value)
+}
+$server = [powershell]::Create()
+$server.Runspace = $runspace
+[void]$server.AddScript($serverScript)
+$serverHandle = $server.BeginInvoke()
+
+$deadline = (Get-Date).AddSeconds(10)
+while (-not $listenerState['Ready'] -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 50 }
+if ($listenerState['Error']) { throw "stub listener failed to start: $($listenerState['Error'])" }
+if (-not $listenerState['Ready']) { throw 'stub listener did not start within 10s' }
+
+# --- the tests ---------------------------------------------------------------
+
+$manifestPath = Join-Path $PSScriptRoot '../powershell/Ise.Cli3/Ise.Cli3.psd1'
+$manifestPath = (Resolve-Path $manifestPath).Path
+
+try {
+    Write-Host ''
+    Write-Host "stub exporter on $root" -ForegroundColor DarkGray
+    Write-Host ''
+    Write-Host 'module' -ForegroundColor Cyan
+
+    # The env var is the documented way to point a shell at another exporter, so
+    # it is what the test uses to reach the stub; Set-IseApiRoot is exercised too.
+    $env:ISE_EXPORTER_API = $root
+    Import-Module $manifestPath -Force
+    $module = Get-Module Ise.Cli3
+    Assert-That 'manifest imports' ($null -ne $module)
+    Assert-Equal 'ModuleVersion is 3.1.0' '3.1.0' $module.Version
+
+    $manifest = Import-PowerShellDataFile $manifestPath
+    $declared = @($manifest.FunctionsToExport | Sort-Object)
+    $exported = @($module.ExportedFunctions.Keys | Sort-Object)
+    Assert-Equal 'exports match the manifest' ($declared -join ',') ($exported -join ',')
+    Assert-That 'every Dc cmdlet the plan lists is exported' (
+        @('Get-IseDcView', 'Get-IseDcColumn', 'Get-IseDcStatus', 'Invoke-IseDcQuery',
+          'Get-IseDcRadiusAuth', 'Get-IseDcRadiusAccounting', 'Get-IseDcRadiusError',
+          'Get-IseDcEndpoint', 'Get-IseDcTacacsAuth', 'Get-IseDcTacacsCommand',
+          'Get-IseDcTacacsAuthorization', 'Get-IseDcPosture', 'Get-IseDcNodeHealth',
+          'Get-IseDcNodePerformance' | Where-Object { $exported -notcontains $_ }).Count -eq 0)
+    Assert-Equal 'Set-IseApiRoot points the session at the stub' $root (Set-IseApiRoot -Uri $root).ApiRoot
+
+    Write-Host ''
+    Write-Host 'discovery' -ForegroundColor Cyan
+
+    $all = @(Get-IseDcView)
+    Assert-Equal 'Get-IseDcView returns every descriptor' 5 $all.Count
+    Assert-Equal 'descriptors are typed' 'Ise.Dc.View' $all[0].PSObject.TypeNames[0]
+    Assert-Equal 'descriptors carry their row type' 'Ise.Dc.RadiusAuthentications' $all[0].TypeName
+    Assert-Equal 'Get-IseDcView filters on wildcards' 2 @(Get-IseDcView radius*).Count
+    Assert-Equal 'an unavailable view still lists' $false @(Get-IseDcView posture*)[0].available
+
+    $before = $listenerState.Requests.Count
+    $null = Get-IseDcView
+    Assert-Equal 'descriptors are cached for the session' $before $listenerState.Requests.Count
+    $null = Get-IseDcView -Refresh
+    Assert-Equal '-Refresh re-fetches' ($before + 1) $listenerState.Requests.Count
+
+    $columns = @(Get-IseDcColumn -View radius_authentications)
+    Assert-Equal 'Get-IseDcColumn lists the catalogue' 9 $columns.Count
+    Assert-Equal 'columns are typed' 'Ise.Dc.Column' $columns[0].PSObject.TypeNames[0]
+    Assert-That 'columns say which are default' (
+        (@($columns | Where-Object { $_.Default }).Count) -eq 5)
+    Assert-Equal 'Get-IseDcColumn filters on wildcards' 1 @(Get-IseDcColumn radius_authentications *station*).Count
+
+    $dcStatus = Get-IseDcStatus
+    Assert-Equal 'Get-IseDcStatus is typed' 'Ise.Dc.Status' $dcStatus.PSObject.TypeNames[0]
+    Assert-Equal 'Get-IseDcStatus carries the cooldown' 12.3 $dcStatus.cooldown_remaining_seconds
+
+    $line = 'Invoke-IseDcQuery -View radius'
+    $completion = (TabExpansion2 -inputScript $line -cursorColumn $line.Length).CompletionMatches
+    Assert-Equal '-View completes from the cache' 2 @($completion).Count
+
+    Write-Host ''
+    Write-Host 'the generic verb' -ForegroundColor Cyan
+
+    $result = @(Invoke-IseDcQuery -View radius_authentications -Last 2h)
+    Assert-Equal 'rows come back' 2 $result.Count
+    Assert-Equal 'rows carry the view PSTypeName' 'Ise.Dc.RadiusAuthentications' $result[0].PSObject.TypeNames[0]
+    Assert-Equal 'rows keep their columns' 'jdoe' $result[0].username
+    Assert-Equal 'the window travels as last=' '/api/v1/dataconnect/query?last=2h&view=radius_authentications' $listenerState.Requests[-1]
+
+    $null = Invoke-IseDcQuery -View radius_authentications `
+        -Filter @{ ISE_NODE = 'laba-ise-001'; DEVICE_NAME = 'core-1' } `
+        -Match @{ USERNAME = 'admin*' } -Column TIMESTAMP, USERNAME `
+        -OrderBy TIMESTAMP -Descending -First 25
+    Assert-Equal 'every parameter maps onto the documented query string' (
+        '/api/v1/dataconnect/query?cols=TIMESTAMP%2CUSERNAME&desc=1' +
+        '&eq=DEVICE_NAME%3Acore-1&eq=ISE_NODE%3Alaba-ise-001&first=25' +
+        '&like=USERNAME%3Aadmin%2A&order=TIMESTAMP&view=radius_authentications'
+    ) $listenerState.Requests[-1]
+
+    $null = Invoke-IseDcQuery -View radius_authentications -OrderBy TIMESTAMP
+    Assert-Like '-OrderBy without -Descending asks for ascending' '*desc=0*' $listenerState.Requests[-1]
+
+    $sql = Invoke-IseDcQuery -View radius_authentications -Last 1d -AsSql
+    Assert-Like '-AsSql hits explain=1' '*explain=1*' $listenerState.Requests[-1]
+    Assert-Equal '-AsSql is typed' 'Ise.Dc.Sql' $sql.PSObject.TypeNames[0]
+    Assert-Like '-AsSql returns the statement' '*FETCH FIRST :limit ROWS ONLY' $sql.Sql
+    Assert-Equal '-AsSql returns binds, not rows' 100 $sql.Binds.limit
+
+    $warnings = @()
+    $null = Invoke-IseDcQuery -View radius_authentications -First 2 `
+        -WarningVariable warnings -WarningAction SilentlyContinue
+    Assert-Like 'truncation warns and names -First' '*-First*' ($warnings -join ' ')
+
+    Write-Host ''
+    Write-Host 'typed cmdlets' -ForegroundColor Cyan
+
+    $null = Get-IseDcRadiusAuth -User jdoe -Mac 'AA:BB:*' -Nad core-1 -Failed -Last 1h
+    Assert-Equal 'Get-IseDcRadiusAuth maps its filters' (
+        '/api/v1/dataconnect/query?eq=DEVICE_NAME%3Acore-1&eq=FAILED%3A1' +
+        '&eq=USERNAME%3Ajdoe&last=1h&like=CALLING_STATION_ID%3AAA%3ABB%3A%2A' +
+        '&view=radius_authentications'
+    ) $listenerState.Requests[-1]
+
+    $null = Get-IseDcRadiusAuth -Passed -First 5
+    Assert-Equal '-Passed is the same flag, inverted' (
+        '/api/v1/dataconnect/query?eq=FAILED%3A0&first=5&view=radius_authentications'
+    ) $listenerState.Requests[-1]
+
+    $failure = try { Get-IseDcRadiusAuth -Failed -Passed; '' } catch { $_.Exception.Message }
+    Assert-Like '-Failed and -Passed together are refused' '*not both*' $failure
+
+    # The stub's accounting catalogue spells it USER_NAME; the cmdlet must follow
+    # the catalogue rather than the spelling its sibling view uses.
+    $null = Get-IseDcRadiusAccounting -User jdoe -Last 1d
+    Assert-Equal 'the user column comes from the catalogue, not a guess' (
+        '/api/v1/dataconnect/query?eq=USER_NAME%3Ajdoe&last=1d&view=radius_accounting'
+    ) $listenerState.Requests[-1]
+
+    $null = Get-IseDcRadiusError -Nad 'core-*' -Last 4h
+    Assert-Equal 'Get-IseDcRadiusError uses NETWORK_DEVICE_NAME' (
+        '/api/v1/dataconnect/query?last=4h&like=NETWORK_DEVICE_NAME%3Acore-%2A' +
+        '&view=radius_errors_view'
+    ) $listenerState.Requests[-1]
+
+    $endpoints = @(Get-IseDcEndpoint -Policy 'Cisco-IP-Phone*' -First 500)
+    Assert-Equal 'Get-IseDcEndpoint maps -Policy' (
+        '/api/v1/dataconnect/query?first=500&like=ENDPOINT_POLICY%3ACisco-IP-Phone%2A' +
+        '&view=endpoints_data'
+    ) $listenerState.Requests[-1]
+    Assert-Equal 'endpoint rows are typed' 'Ise.Dc.EndpointsData' $endpoints[0].PSObject.TypeNames[0]
+    Assert-That 'endpoints_data has no -Last, because it has no time column' (
+        -not (Get-Command Get-IseDcEndpoint).Parameters.ContainsKey('Last'))
+
+    $null = Get-IseDcTacacsAuth -User jdoe -Nad 'sw-*' -Failed -Last 1d
+    Assert-Equal 'Get-IseDcTacacsAuth maps -Failed onto STATUS' (
+        '/api/v1/dataconnect/query?eq=USERNAME%3Ajdoe&last=1d&like=DEVICE_NAME%3Asw-%2A' +
+        '&like=STATUS%3AFail%2A&view=tacacs_authentication_last_two_days'
+    ) $listenerState.Requests[-1]
+
+    $null = Get-IseDcTacacsCommand -User jdoe -Command 'conf*' -Last 1d
+    Assert-Equal 'Get-IseDcTacacsCommand maps -Command' (
+        '/api/v1/dataconnect/query?eq=USERNAME%3Ajdoe&last=1d&like=COMMAND%3Aconf%2A' +
+        '&view=tacacs_accounting_last_two_days'
+    ) $listenerState.Requests[-1]
+
+    $null = Get-IseDcTacacsAuthorization -User jdoe
+    Assert-Equal 'Get-IseDcTacacsAuthorization maps -User' (
+        '/api/v1/dataconnect/query?eq=USERNAME%3Ajdoe&view=tacacs_authorization_last_two_days'
+    ) $listenerState.Requests[-1]
+
+    $null = Get-IseDcPosture -Mac 'AA:*' -Status NonCompliant -Last 1d
+    Assert-Equal 'Get-IseDcPosture maps -Mac and -Status' (
+        '/api/v1/dataconnect/query?eq=POSTURE_STATUS%3ANonCompliant&last=1d' +
+        '&like=ENDPOINT_MAC_ADDRESS%3AAA%3A%2A&view=posture_assessment_by_endpoint'
+    ) $listenerState.Requests[-1]
+
+    $null = Get-IseDcNodeHealth -Node laba-ise-002 -Last 1h
+    Assert-Equal 'Get-IseDcNodeHealth maps -Node' (
+        '/api/v1/dataconnect/query?eq=ISE_NODE%3Alaba-ise-002&last=1h&view=system_summary'
+    ) $listenerState.Requests[-1]
+
+    $null = Get-IseDcNodePerformance -Node 'laba-*' -Column ISE_NODE, AVG_TPS
+    Assert-Equal 'Get-IseDcNodePerformance passes -Column through' (
+        '/api/v1/dataconnect/query?cols=ISE_NODE%2CAVG_TPS&like=ISE_NODE%3Alaba-%2A' +
+        '&view=key_performance_metrics'
+    ) $listenerState.Requests[-1]
+
+    Write-Host ''
+    Write-Host 'refusals' -ForegroundColor Cyan
+
+    $message = try { Invoke-IseDcQuery -View cooldown_view; '' } catch { $_.Exception.Message }
+    Assert-Like 'a cooldown says how long to wait' '*cooling down; retry in 38s*' $message
+
+    $record = try { Invoke-IseDcQuery -View cooldown_view; $null } catch { $_ }
+    Assert-Equal 'the refusal rides on the error record' 38 $record.TargetObject.retry_after_seconds
+
+    $message = try { Invoke-IseDcQuery -View busy_view; '' } catch { $_.Exception.Message }
+    Assert-Like 'busy explains single flight' '*one at a time*' $message
+
+    $message = try { Invoke-IseDcQuery -View pending_view; '' } catch { $_.Exception.Message }
+    Assert-Like 'schema_pending names the catalog' '*catalog*' $message
+    Assert-Like 'schema_pending keeps the server detail' '*discovery has not completed*' $message
+
+    $message = try { Invoke-IseDcQuery -View nosuch_view; '' } catch { $_.Exception.Message }
+    Assert-Like 'unknown_view points at Get-IseDcView' '*Get-IseDcView*' $message
+
+    $unreachable = try {
+        Invoke-IseApi -Path '/api/v1/health' -TimeoutSec 2 -ErrorAction Stop
+        ''
+    } catch { $_.Exception.Message }
+    Assert-Like 'a 404 is not mistaken for an unreachable exporter' '*HTTP 404*' $unreachable
+
+    $before = $listenerState.Requests.Count
+    $waited = @(Invoke-IseDcQuery -View flaky_view -Wait)
+    Assert-Equal '-Wait retries after a cooldown' 2 ($listenerState.Requests.Count - $before)
+    Assert-Equal '-Wait returns the rows it waited for' 1 $waited.Count
+
+    Write-Host ''
+    Write-Host 'formatting' -ForegroundColor Cyan
+
+    $table = @(Get-IseDcView | Format-Table | Out-String -Width 200) -join ''
+    Assert-Like 'the view table renders its own columns' '*Avail*' $table
+    $table = @(Invoke-IseDcQuery -View radius_authentications | Format-Table | Out-String -Width 200) -join ''
+    Assert-Like 'the auth table leads with time and user' '*Time*User*Mac*Nad*' $table
+    Assert-That 'the auth table does not wrap' (
+        (($table -split "`n" | Measure-Object -Property Length -Maximum).Maximum) -le 120)
+}
+finally {
+    try { Invoke-RestMethod -Uri "$root/shutdown" -TimeoutSec 5 | Out-Null } catch { }
+    try { $server.EndInvoke($serverHandle) } catch { }
+    $server.Dispose()
+    $runspace.Dispose()
+    Remove-Item Env:\ISE_EXPORTER_API -ErrorAction SilentlyContinue
+}
+
+Write-Host ''
+if ($listenerState['Error']) {
+    Write-Host "stub listener error: $($listenerState['Error'])" -ForegroundColor Red
+    $script:Failed++
+}
+Write-Host "$script:Passed passed, $script:Failed failed" -ForegroundColor $(
+    if ($script:Failed) { 'Red' } else { 'Green' })
+Write-Host ''
+exit ([int]($script:Failed -gt 0))

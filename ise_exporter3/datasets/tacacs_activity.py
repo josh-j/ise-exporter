@@ -150,9 +150,7 @@ OPTIONS = (
 
 def _epoch_bound(hours, limits):
     """These views expose a numeric epoch rather than a timestamp column."""
-    hours = max(1, min(limits.window_hours, int(hours)))
-    return (f"epoch_time >= (CAST(SYSTIMESTAMP AS DATE) - DATE '1970-01-01') "
-            f"* 86400 - {hours * 3600}")
+    return reporting.recent_epoch("epoch_time", hours, limits)
 
 
 def _optional(schema, view, column):

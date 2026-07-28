@@ -25,6 +25,7 @@ from __future__ import annotations
 import gzip
 import logging
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import parse_qs, urlsplit
 
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 
@@ -63,14 +64,21 @@ def accepts_gzip(header):
 
 
 def make_handler(registry, routes=None):
-    """Build a handler serving /metrics plus any additional JSON routes."""
+    """Build a handler serving /metrics plus any additional JSON routes.
+
+    Every route handler takes the parsed query string, whether it reads it or
+    not. The alternative -- handing the raw path to the handlers that take
+    parameters -- would put a second query-string parser in the operator API,
+    and the two would eventually disagree about what ``?view=a&view=b`` means.
+    """
     extra = dict(routes or {})
 
     class Handler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
 
         def do_GET(self):       # noqa: N802 - BaseHTTPRequestHandler contract
-            path = self.path.split("?", 1)[0]
+            request = urlsplit(self.path)
+            path = request.path
             if path == "/metrics":
                 # Generated under snapshot_lock; compressed in _respond, after
                 # the lock is released.
@@ -82,7 +90,7 @@ def make_handler(registry, routes=None):
                 return
             handler = extra.get(path)
             if handler is not None:
-                status, body, content_type = handler()
+                status, body, content_type = handler(parse_qs(request.query))
                 self._respond(status, body, content_type)
                 return
             self._respond(404, b"not found\n", "text/plain; charset=utf-8")

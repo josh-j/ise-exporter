@@ -48,6 +48,49 @@ def test_metrics_are_served_after_a_collection(served):
     assert "ise3_load_measured_requests_total" in body
 
 
+def test_a_route_handler_is_given_the_parsed_query_string():
+    # The operator API's dataconnect namespace takes repeatable parameters, so
+    # the listener parses once and every handler is handed the same dict. A
+    # handler that parsed self.path itself would be a second parser to disagree
+    # with this one.
+    seen = []
+
+    def handler(query):
+        seen.append(query)
+        return 200, b"{}", "application/json"
+
+    server = HttpServer(
+        "127.0.0.1", 0, LockedCollectorRegistry(), routes={"/probe": handler})
+    server.start()
+    try:
+        base = f"http://127.0.0.1:{server.address[1]}"
+        _get(f"{base}/probe?view=radius_accounting&eq=A:1&eq=B:2")
+        _get(f"{base}/probe")
+    finally:
+        server.stop(timeout=5)
+
+    assert seen[0] == {"view": ["radius_accounting"], "eq": ["A:1", "B:2"]}
+    # No query string is an empty dict, never None: a handler must not have to
+    # tell "absent" from "empty".
+    assert seen[1] == {}
+
+
+def test_a_fragment_or_query_string_never_changes_which_route_answers():
+    # Route lookup keys on the path alone. ?x=1 selecting a 404 would make
+    # every parameterised route unreachable.
+    server = HttpServer(
+        "127.0.0.1", 0, LockedCollectorRegistry(),
+        routes={"/probe": lambda query: (200, b"ok", "text/plain")})
+    server.start()
+    try:
+        base = f"http://127.0.0.1:{server.address[1]}"
+        assert _get(f"{base}/probe?a=1&a=2")[0] == 200
+        assert _get(f"{base}/metrics?x=y")[0] == 200
+        assert _get(f"{base}/healthz?x=y")[0] == 200
+    finally:
+        server.stop(timeout=5)
+
+
 def test_health_and_unknown_paths(served):
     _server, base = served
     assert _get(f"{base}/healthz")[0] == 200
@@ -113,7 +156,7 @@ def test_compression_does_not_change_the_body_it_delivers():
                b"# TYPE ise3_probe gauge\n") + b"ise3_probe 1.0\n" * 500
     server = HttpServer(
         "127.0.0.1", 0, LockedCollectorRegistry(),
-        routes={"/probe": lambda: (200, payload, "text/plain; charset=utf-8")})
+        routes={"/probe": lambda query: (200, payload, "text/plain; charset=utf-8")})
     server.start()
     try:
         base = f"http://127.0.0.1:{server.address[1]}"

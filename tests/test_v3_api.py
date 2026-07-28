@@ -130,9 +130,17 @@ def test_a_degraded_dataset_is_visible_through_the_api():
 
 def test_every_route_is_reachable_and_returns_json(served):
     for path in ("/api/v1", "/api/v1/health", "/api/v1/datasets",
-                 "/api/v1/providers", "/api/v1/targets", "/api/v1/plan"):
+                 "/api/v1/providers", "/api/v1/targets", "/api/v1/plan",
+                 "/api/v1/dataconnect/status"):
         payload = _get(f"{served}{path}")
         assert payload is not None
+
+
+def test_the_index_names_every_route_it_serves(served):
+    index = _get(f"{served}/api/v1")
+    for path in index["routes"]:
+        assert path.startswith("/api/v1")
+    assert "/api/v1/dataconnect/query" in index["routes"]
 
 
 def test_the_plain_text_plan_is_the_same_report_the_command_prints(served):
@@ -154,11 +162,13 @@ def test_an_unknown_route_is_a_404_not_a_stack_trace(served):
 
 
 def test_the_api_serves_state_and_never_reaches_ise():
-    # Every route must answer from what the exporter already computed. If one
-    # of them queried ISE, an operator refreshing a page would be load.
+    # Every route outside the dataconnect namespace must answer from what the
+    # exporter already computed. If one of them queried ISE, an operator
+    # refreshing a page would be load. The dataconnect routes do reach ISE by
+    # design, and refuse without an explorer -- which is the case here.
     transport = ScriptedTransport()
     api, _scheduler = _api(transport)
     before = len(transport.calls)
     for route in api.routes().values():
-        route()
+        route({})
     assert len(transport.calls) == before

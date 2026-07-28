@@ -238,18 +238,55 @@ Every provider also declares how much of the fleet it measures — `complete`,
 
 `/metrics` on port 9618 for Prometheus — gzipped when the client offers it,
 which it always does, taking a ~6.4 MiB scrape to well under a megabyte on the
-wire — and a read-only operator API bound to localhost on 9619 that answers from
-state the exporter already computed and never reaches ISE:
+wire — and a read-only operator API bound to localhost on 9619:
 
 ```
 /api/v1/health   /api/v1/datasets   /api/v1/providers
 /api/v1/targets  /api/v1/plan       /api/v1/plan.txt
+/api/v1/dataconnect/views   /api/v1/dataconnect/query
+/api/v1/dataconnect/status
 ```
 
-`powershell/Ise.Cli3/` wraps those routes as cmdlets (`Get-IseHealth`,
-`Get-IseDataset`, `Get-IseProvider`, `Get-IseTarget`, `Get-IsePlan`,
-`Get-IseDegraded`); `powershell/ise-cli3` and `Ise.Cli3.Profile.ps1` are the
-shell entry points.
+The first six answer from state the exporter already computed and never reach
+ISE. The `dataconnect` namespace is the deliberate exception: it runs bounded,
+server-built SELECTs against the reporting views **through the same transport
+the scheduled datasets use** — same pacing gate, same adaptive cooldown, same
+row/byte ceilings, same authentication guard. An ad-hoc operator query charges
+the declared duty cycle exactly like a scheduled collection, so navigation
+cannot out-spend the budget; it can only wait its turn. One explorer query runs
+at a time, and a query that would wait long for its turn is answered with
+"cooling down, retry in Ns" rather than blocking.
+
+`powershell/Ise.Cli3/` wraps those routes as cmdlets; `powershell/ise-cli3` and
+`Ise.Cli3.Profile.ps1` are the shell entry points. The free, local-state
+cmdlets are `Get-IseHealth`, `Get-IseDataset`, `Get-IseProvider`,
+`Get-IseTarget`, `Get-IsePlan`, `Get-IseDegraded`. Everything that reaches
+Oracle carries the `Dc` mark in its noun, so the cost of a command is visible
+in its name.
+
+### Navigating Data Connect
+
+PowerCLI-style navigation of the sixteen reporting views, from the shell:
+
+```powershell
+ise> Get-IseDcView                     # what is there, and is it available
+ise> Get-IseDcColumn -View radius_authentications
+
+ise> Get-IseDcRadiusAuth -Failed -Last 2h |
+       Group-Object failure_reason | Sort-Object Count -Descending
+
+ise> Get-IseDcTacacsCommand -User jdoe -Last 1d
+ise> Get-IseDcEndpoint -Policy 'Cisco-IP-Phone*' -First 500
+
+ise> Invoke-IseDcQuery -View radius_errors_view -Last 4h `
+       -Match @{ NETWORK_DEVICE_NAME = 'core-*' } -First 200
+```
+
+Filters, projections, ordering and row limits are applied server-side through
+bind variables against the discovered catalog — the shell never sends SQL.
+`-AsSql` shows the statement a query would run without spending Oracle time,
+`-Wait` sits out a duty-cycle cooldown, and truncated results say so. The
+operator guide is `docs/ise-cli3.md` in a working checkout.
 
 ## Dashboards
 

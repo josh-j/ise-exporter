@@ -66,6 +66,19 @@ def recent(column, hours, limits):
             f"NUMTODSINTERVAL({hours}, 'HOUR') AS TIMESTAMP)")
 
 
+def recent_epoch(column, hours, limits):
+    """The same bound for a view that times on a NUMBER of epoch seconds.
+
+    Cisco's TACACS two-day views carry ``EPOCH_TIME`` rather than a timestamp,
+    so the comparison is arithmetic. It lives beside ``recent`` because the two
+    are one decision -- how far back any statement may scan -- and a second copy
+    somewhere else is how a window ceiling stops applying to half the views.
+    """
+    hours = max(1, min(limits.window_hours, int(hours)))
+    return (f"{column} >= (CAST(SYSTIMESTAMP AS DATE) - DATE '1970-01-01') "
+            f"* 86400 - {hours * 3600}")
+
+
 def group_limit(limits, limit=0):
     """Resolve a statement's row limit against the declared group ceiling.
 

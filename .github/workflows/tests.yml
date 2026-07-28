@@ -39,6 +39,19 @@ jobs:
             echo "tests/ is not tracked in this repository; skipping"
           fi
 
+      - name: Test the PowerShell operator module against a stub API
+        # The module is a thin client over the operator API's pinned wire
+        # contract; this asserts the literal request URLs it emits and how it
+        # surfaces the API's refusals. GitHub's ubuntu runners ship pwsh, but
+        # the guard keeps a bare environment green rather than failing on a
+        # missing shell the Python exporter never needs.
+        run: |
+          if command -v pwsh >/dev/null 2>&1; then
+            pwsh -NoProfile -File tools/test_powershell3.ps1
+          else
+            echo "pwsh is not available; skipping the module contract test"
+          fi
+
       - name: Verify the generated dashboards are not stale
         # Dashboards are built from tools/build_dashboards3.py and committed.
         # This fails if someone edited the JSON by hand or changed the generator

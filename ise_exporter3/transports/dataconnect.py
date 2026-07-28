@@ -573,6 +573,34 @@ class DataConnectTransport(Transport):
                 "state_unavailable",
                 f"the Data Connect pacing gate is unavailable at {path}") from error
 
+    def pacing_wait_hint(self):
+        """How long a statement issued now would wait, without taking the gate.
+
+        An operator asking "may I query yet" must not be able to answer that by
+        blocking a collection: this takes no flock, writes no lease, and never
+        sleeps. It is a hint by construction -- another process can move the
+        deadline between this read and the next statement -- which is why it is
+        only ever used to refuse an ad-hoc query early, never to skip a wait.
+
+        The two deadlines are on different clocks: ``_next_query_at`` is this
+        process's monotonic cooldown, the gate file carries a wall-clock time
+        another process published. Both are compared on their own clock.
+        """
+        remaining = self._next_query_at - time.monotonic()
+        try:
+            with open(os.path.abspath(os.path.expanduser(self.pacing_file)),
+                      "rb") as handle:
+                raw = handle.read(64).decode("ascii").strip()
+            deadline = float(raw) if raw else 0.0
+            if math.isfinite(deadline):
+                remaining = max(remaining, deadline - time.time())
+        except (OSError, ValueError, UnicodeDecodeError):
+            # No gate yet, or a torn read of one being rewritten. Neither is
+            # worth failing an operator's status page over; the real gate is
+            # taken under a flock by whoever actually queries.
+            pass
+        return max(0.0, remaining)
+
     def _crash_lease(self, adaptive=True, elapsed=0.0):
         worst_case = elapsed + MAX_STATEMENT_TIMEOUT_PERIODS * self.timeout
         cooldown = max(

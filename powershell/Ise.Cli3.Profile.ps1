@@ -4,19 +4,28 @@ Import-Module (Join-Path $PSScriptRoot 'Ise.Cli3/Ise.Cli3.psd1') -Force
 
 function prompt { "ise> " }
 
-# Default table views, so the common commands read well without piping.
-Update-FormatData -PrependPath (Join-Path $PSScriptRoot 'Ise.Cli3/Ise.Cli3.format.ps1xml')
-
 Write-Host ''
 Write-Host '  ise-exporter3 operator shell' -ForegroundColor Cyan
 Write-Host "  api: $((Get-IseApiRoot).ApiRoot)" -ForegroundColor DarkGray
 Write-Host ''
+# Two groups, because they cost different things. The split is the point: the
+# first answers from state the exporter already computed, the second spends the
+# same Oracle budget a scheduled collection does.
+Write-Host '  local state (free)' -ForegroundColor Cyan
 Write-Host '  Get-IseHealth              is it healthy and inside its budget'
 Write-Host '  Get-IseDataset -Unhealthy  what is failing, degraded, or unscheduled'
 Write-Host '  Get-IseDegraded            what fell back, and to what'
 Write-Host '  Get-IseProvider -Active    which source is supplying each dataset'
 Write-Host '  Get-IseTarget              planned load against the declared budget'
 Write-Host '  Get-IsePlan -AsText        the full plan report'
+Write-Host ''
+Write-Host '  Data Connect (paced Oracle reads)' -ForegroundColor Cyan
+Write-Host '  Get-IseDcStatus            configured, discovered, busy, cooling down'
+Write-Host '  Get-IseDcView              the reporting views, with their columns'
+Write-Host '  Get-IseDcRadiusAuth -Failed -Last 2h        who failed, and why'
+Write-Host '  Invoke-IseDcQuery -View <name> -Last 1h     anything else'
+Write-Host '  ...every Dc cmdlet charges the declared duty cycle; -AsSql is free' `
+    -ForegroundColor DarkGray
 Write-Host ''
 
 try {
