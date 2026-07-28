@@ -1,5 +1,50 @@
 {
-  "annotations": {},
+  "annotations": {
+    "list": [
+      {
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${prometheus}"
+        },
+        "enable": true,
+        "expr": "changes(ise3_dataset_provider_active{instance=~\"$deployment\"}[5m]) > 0",
+        "hide": false,
+        "iconColor": "purple",
+        "name": "Provider changed",
+        "step": "1m",
+        "textFormat": "{{dataset}} is now served by {{provider}}",
+        "titleFormat": "Provider changed: {{dataset}}"
+      },
+      {
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${prometheus}"
+        },
+        "enable": true,
+        "expr": "max by (instance,node) (changes(ise3_deployment_node_state{instance=~\"$deployment\"}[10m])) > 0",
+        "hide": false,
+        "iconColor": "orange",
+        "name": "Node state changed",
+        "step": "1m",
+        "textFormat": "{{node}} changed deployment state",
+        "titleFormat": "Node state changed: {{node}}"
+      },
+      {
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${prometheus}"
+        },
+        "enable": true,
+        "expr": "changes(ise3_exporter_build_info{instance=~\"$deployment\"}[15m]) > 0",
+        "hide": false,
+        "iconColor": "blue",
+        "name": "Exporter build changed",
+        "step": "1m",
+        "textFormat": "exporter {{version}} targeting ISE {{target_ise_release}}",
+        "titleFormat": "Exporter build changed"
+      }
+    ]
+  },
   "description": "Endpoint inventory and attributes alongside authoritative NAD classification, detail coverage, and authentication activity.",
   "editable": true,
   "fiscalYearStartMonth": 0,
@@ -39,9 +84,27 @@
         "type": "prometheus",
         "uid": "${prometheus}"
       },
-      "description": "Availability and freshness of inventory, profiling events, and optional live endpoint attributes.",
+      "description": "Availability and freshness of inventory, profiling events, and optional live endpoint attributes. NOT READY means the panels fed by that dataset stay blank.",
       "fieldConfig": {
         "defaults": {
+          "mappings": [
+            {
+              "options": {
+                "0": {
+                  "color": "red",
+                  "index": 1,
+                  "text": "NOT READY"
+                },
+                "1": {
+                  "color": "green",
+                  "index": 0,
+                  "text": "OK"
+                }
+              },
+              "type": "value"
+            }
+          ],
+          "noValue": "no data \u2014 exporter absent?",
           "unit": "short"
         },
         "overrides": []
@@ -56,21 +119,21 @@
       "repeatDirection": "h",
       "targets": [
         {
-          "expr": "((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"endpoint_inventory\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"endpoint_inventory\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"endpoint_inventory\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"endpoint_inventory\"} == 1))) == 1)",
+          "expr": "((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"endpoint_inventory\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"endpoint_inventory\"} == 1))) == bool 1) * ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"endpoint_inventory\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"endpoint_inventory\"} == 1))) == bool 1)",
           "instant": true,
           "legendFormat": "inventory",
           "range": false,
           "refId": "A"
         },
         {
-          "expr": "((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"endpoint_attributes\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"endpoint_attributes\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"endpoint_attributes\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"endpoint_attributes\"} == 1))) == 1)",
+          "expr": "((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"endpoint_attributes\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"endpoint_attributes\"} == 1))) == bool 1) * ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"endpoint_attributes\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"endpoint_attributes\"} == 1))) == bool 1)",
           "instant": true,
           "legendFormat": "live attributes",
           "range": false,
           "refId": "B"
         },
         {
-          "expr": "((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"profile_events\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"profile_events\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"profile_events\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"profile_events\"} == 1))) == 1)",
+          "expr": "((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"profile_events\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"profile_events\"} == 1))) == bool 1) * ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"profile_events\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"profile_events\"} == 1))) == bool 1)",
           "instant": true,
           "legendFormat": "profile events",
           "range": false,
@@ -131,6 +194,7 @@
       "description": "Authoritative endpoint database total from the active inventory provider.",
       "fieldConfig": {
         "defaults": {
+          "noValue": "no data \u2014 stale, see readiness",
           "unit": "short"
         },
         "overrides": []
@@ -165,6 +229,7 @@
       "description": "Endpoint counts needing profile attention and those eligible for posture assessment.",
       "fieldConfig": {
         "defaults": {
+          "noValue": "no data \u2014 stale, see readiness",
           "unit": "short"
         },
         "overrides": []
@@ -206,6 +271,7 @@
       "description": "Number of non-empty endpoint profile and identity-group categories currently represented in inventory.",
       "fieldConfig": {
         "defaults": {
+          "noValue": "no data \u2014 stale, see readiness",
           "unit": "short"
         },
         "overrides": []
@@ -335,6 +401,25 @@
       "description": "Fraction of endpoint inventory rows carrying profile, identity-group, and posture-applicability fields.",
       "fieldConfig": {
         "defaults": {
+          "max": 1,
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 0.8
+              },
+              {
+                "color": "green",
+                "value": 0.95
+              }
+            ]
+          },
           "unit": "percentunit"
         },
         "overrides": []
@@ -845,6 +930,7 @@
       "targets": [
         {
           "expr": "ise3_network_device_assignment{instance=~\"$deployment\",nad=~\"$nad\"}",
+          "format": "table",
           "instant": true,
           "legendFormat": "{{nad}} \u00b7 {{location}} \u00b7 {{ops_owner}}",
           "range": false,
@@ -852,7 +938,21 @@
         }
       ],
       "title": "Network device assignments",
-      "transformations": [],
+      "transformations": [
+        {
+          "id": "filterFieldsByName",
+          "options": {
+            "exclude": {
+              "names": [
+                "Time",
+                "__name__",
+                "job",
+                "Value"
+              ]
+            }
+          }
+        }
+      ],
       "transparent": false,
       "type": "table"
     },
@@ -942,9 +1042,43 @@
       "description": "Configured network devices with no recent activity beside the inventory surface reached by the scan.",
       "fieldConfig": {
         "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 1
+              }
+            ]
+          },
           "unit": "short"
         },
-        "overrides": []
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byFrameRefID",
+              "options": "B"
+            },
+            "properties": [
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "text",
+                      "value": null
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        ]
       },
       "gridPos": {
         "h": 5,
@@ -983,7 +1117,20 @@
       "description": "Seconds since each selected NAD last authenticated anything in the reporting scan window.",
       "fieldConfig": {
         "defaults": {},
-        "overrides": []
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "age s"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "s"
+              }
+            ]
+          }
+        ]
       },
       "gridPos": {
         "h": 8,
@@ -996,6 +1143,7 @@
       "targets": [
         {
           "expr": "sort_desc((ise3_nad_last_authentication_age_seconds{instance=~\"$deployment\",nad=~\"$nad\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"nad_health\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"nad_health\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"nad_health\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"nad_health\"} == 1))) == 1)))",
+          "format": "table",
           "instant": true,
           "legendFormat": "{{nad}}",
           "range": false,
@@ -1003,7 +1151,28 @@
         }
       ],
       "title": "Stalest network devices",
-      "transformations": [],
+      "transformations": [
+        {
+          "id": "filterFieldsByName",
+          "options": {
+            "exclude": {
+              "names": [
+                "Time",
+                "__name__",
+                "job"
+              ]
+            }
+          }
+        },
+        {
+          "id": "organize",
+          "options": {
+            "renameByName": {
+              "Value": "age s"
+            }
+          }
+        }
+      ],
       "transparent": false,
       "type": "table"
     },
@@ -1028,6 +1197,7 @@
       "targets": [
         {
           "expr": "sum by (instance,nad) ((ise3_nad_authentications{instance=~\"$deployment\",nad=~\"$nad\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"nad_health\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"nad_health\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"nad_health\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"nad_health\"} == 1))) == 1))) == 0",
+          "format": "table",
           "instant": true,
           "legendFormat": "{{nad}}",
           "range": false,
@@ -1035,7 +1205,28 @@
         }
       ],
       "title": "Never-authenticated network devices",
-      "transformations": [],
+      "transformations": [
+        {
+          "id": "filterFieldsByName",
+          "options": {
+            "exclude": {
+              "names": [
+                "Time",
+                "__name__",
+                "job"
+              ]
+            }
+          }
+        },
+        {
+          "id": "organize",
+          "options": {
+            "renameByName": {
+              "Value": "authentications"
+            }
+          }
+        }
+      ],
       "transparent": false,
       "type": "table"
     },
@@ -1088,12 +1279,37 @@
         "type": "prometheus",
         "uid": "${prometheus}"
       },
-      "description": "Session-bearing NADs matched and unmatched against the authoritative network-device directory.",
+      "description": "Session-bearing NADs matched and unmatched against the authoritative network-device directory. Unmatched devices carry sessions but no location or ops owner.",
       "fieldConfig": {
         "defaults": {
           "unit": "short"
         },
-        "overrides": []
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byFrameRefID",
+              "options": "B"
+            },
+            "properties": [
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "green",
+                      "value": null
+                    },
+                    {
+                      "color": "orange",
+                      "value": 1
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        ]
       },
       "gridPos": {
         "h": 5,
@@ -1105,11 +1321,18 @@
       "repeatDirection": "h",
       "targets": [
         {
-          "expr": "ise3_nad_directory_attributed{instance=~\"$deployment\"}",
+          "expr": "ise3_nad_directory_attributed{instance=~\"$deployment\",matched=\"yes\"}",
           "instant": true,
-          "legendFormat": "{{matched}}",
+          "legendFormat": "matched",
           "range": false,
           "refId": "A"
+        },
+        {
+          "expr": "ise3_nad_directory_attributed{instance=~\"$deployment\",matched=\"no\"}",
+          "instant": true,
+          "legendFormat": "unmatched",
+          "range": false,
+          "refId": "B"
         }
       ],
       "title": "Session attribution coverage",

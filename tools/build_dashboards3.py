@@ -25,13 +25,24 @@ from grafana_foundation_sdk.builders import (
 from grafana_foundation_sdk.cog.encoder import JSONEncoder
 from grafana_foundation_sdk.models.common import (
     BarGaugeDisplayMode,
+    GraphTresholdsStyleMode,
+    TableCellBackgroundDisplayMode,
+    TableColoredBackgroundCellOptions,
     VizOrientation,
 )
 from grafana_foundation_sdk.models.dashboard import (
+    AnnotationQuery,
     DashboardCursorSync,
     DashboardLinkType,
     DataSourceRef,
+    DataTransformerConfig,
+    DynamicConfigValue,
+    Threshold,
+    ThresholdsMode,
+    ValueMap,
+    ValueMappingResult,
 )
+from grafana_foundation_sdk.models.prometheus import PromQueryFormat
 
 
 DATASOURCE = DataSourceRef(type_val="prometheus", uid="${prometheus}")
@@ -93,9 +104,310 @@ def ready(dataset):
     )
 
 
+def ready_bool(dataset):
+    """Readiness as an explicit 0/1 series, for display only.
+
+    ready() filters with `== 1`, so an unready dataset returns no series and a
+    stat renders "No data" rather than a failure. This form always returns a
+    value. It must never be used by gate(): a 0-valued series still matches
+    `and on(instance)`, which would silently stop stale data being hidden.
+    """
+    return (
+        f"(({active_health('ise3_dataset_up', dataset)}) == bool 1) * "
+        f"(({active_health('ise3_dataset_fresh', dataset)}) == bool 1)"
+    )
+
+
 def gate(expr, dataset):
     """Drop stale data instead of showing it as current."""
     return f"({expr}) and on(instance) ({ready(dataset)})"
+
+
+# A converging cache is not a failure, so `ready` stays 1 while it fills. Panels
+# fed from the whole active list and panels fed from cached per-entity detail
+# therefore disagree about how many endpoints exist until it is warm -- honest,
+# but it reads as a bug. Gate the detail-fed ones on coverage so they blank
+# rather than under-report next to a complete neighbour.
+DETAIL_COVERAGE_FLOOR = 0.99
+
+
+def covered(expr, dataset, cache):
+    """Drop a detail-fed panel while its cache is still filling."""
+    return (
+        f"({gate(expr, dataset)}) and on(instance) "
+        f"((max by (instance) (ise3_detail_cache_coverage{{instance=~\"$deployment\","
+        f"cache=\"{cache}\"}})) >= {DETAIL_COVERAGE_FLOOR})"
+    )
+
+
+# A bar gauge draws one bar per series and cannot scroll, so a complete per-NAD
+# breakdown is unreadable in a deployment with hundreds of them. Capping is only
+# acceptable because the cap is named in the panel description and the complete
+# data stays reachable -- see capped() below.
+TOP_SERIES = 25
+
+
+def top(expr, limit=TOP_SERIES, *, lowest=False):
+    """Cap a bar gauge's visual query to its most interesting series.
+
+    Which end that is depends on the metric: volume is read from the top, but a
+    coverage fraction is read from the bottom, and topk() there would hide
+    exactly the devices worth looking at.
+    """
+    return f"{'bottomk' if lowest else 'topk'}({limit}, {expr})"
+
+
+def capped(purpose, complete, *, lowest=False):
+    """Description for a top-K capped visual: what it shows, and what it hides.
+
+    Silent truncation is the failure mode this project refuses everywhere else,
+    so the cap and the route back to the complete data are both on screen.
+    """
+    end = "lowest" if lowest else "highest"
+    return (
+        f"{purpose} Capped to the {TOP_SERIES} {end}-valued bars so the gauge "
+        f"stays readable in a deployment with hundreds of network devices. "
+        f"{complete} The Network device variable also brings any device outside "
+        "the cap into this panel."
+    )
+
+
+# ISE message codes seen in the RADIUS error view. The certificate/PKI group is
+# the one PKI_MESSAGE_CODES counts; 123xx is the PEAP family and 125xx the
+# EAP-TLS family, so those entries are deliberately worded at family level
+# rather than quoting a catalogue string that is not confidently known. The rest
+# are the common authentication failures from Cisco's ISE message catalogue.
+# Anything absent here renders as the bare code, which is the honest default.
+ISE_MESSAGE_CODES = {
+    "12300": "PEAP certificate/PKI failure",
+    "12321": "PEAP handshake failed, client rejected the ISE certificate",
+    "12500": "EAP-TLS certificate/PKI failure",
+    "12501": "EAP-TLS certificate/PKI failure",
+    "12511": "EAP-TLS certificate/PKI failure",
+    "12625": "EAP certificate/PKI failure",
+    "5400": "authentication failed",
+    "5411": "supplicant stopped responding to ISE",
+    "5440": "endpoint abandoned the EAP session and started a new one",
+    "11007": "could not locate network device or AAA client",
+    "11036": "invalid RADIUS Message-Authenticator attribute",
+    "15039": "rejected by the matched authorization profile",
+    "22040": "wrong password or invalid shared secret",
+    "22056": "subject not found in the identity store",
+    "24408": "Active Directory authentication failed, wrong password",
+}
+
+# The certificate, trust, and public-key codes the PKI stat panel counts.
+PKI_MESSAGE_CODES = ("12300", "12321", "12500", "12501", "12511", "12625",
+                     "22056")
+
+
+def named_codes(expr, label="message_code"):
+    """Rewrite a bare ISE code label into "<code> · <meaning>".
+
+    One label_replace per known code, nested: label_replace matches the whole
+    label value, so a rewritten value can no longer match a later code, and an
+    unknown code falls through every layer and stays bare.
+    """
+    for code, meaning in ISE_MESSAGE_CODES.items():
+        expr = (
+            f'label_replace({expr}, "{label}", "{code} · {meaning}", '
+            f'"{label}", "{code}")'
+        )
+    return expr
+
+
+# Appended to every panel whose code labels named_codes() rewrites.
+NAMED_CODES_NOTE = (
+    " Well-known codes are annotated with what they mean; a code this "
+    "exporter cannot name is shown bare."
+)
+
+
+def attention(issue, expr):
+    """One row of a triage table: a count, labelled with what it means.
+
+    Unioning unlike metrics into one table needs a label they all share, and
+    the aggregation that makes each row a comparable count drops every label
+    the metric carried, so the meaning has to be attached afterwards.
+    """
+    return f'label_replace({expr}, "issue", "{issue}", "", "")'
+
+
+# Threshold vocabularies, as absolute (value, colour) steps. The first step is
+# the base and must carry None, which serialises to the -Infinity bound.
+NONZERO_CRITICAL = ((None, "green"), (1, "red"))
+NONZERO_WARNING = ((None, "green"), (1, "orange"))
+REQUIRED_BOOLEAN = ((None, "red"), (1, "green"))
+NEUTRAL = ((None, "text"),)
+UTILISATION = ((None, "green"), (80, "orange"), (90, "red"))
+RATIO_HIGH_IS_GOOD = ((None, "red"), (0.85, "orange"), (0.95, "green"))
+COVERAGE = ((None, "red"), (0.8, "orange"), (0.95, "green"))
+BUDGET_USED = ((None, "green"), (0.8, "orange"), (1.0, "red"))
+# A daily backup that has not run is the first sign of a stalled PAN, so the
+# triage table and the age panel must agree on when "yesterday" has passed.
+BACKUP_STALE_HOURS = 26
+BACKUP_AGE_HOURS = ((None, "green"), (BACKUP_STALE_HOURS, "orange"), (50, "red"))
+
+# Value mappings for the booleans ISE reports as 1 and 0.
+YES_NO = ((1, "Yes", "green"), (0, "No", "orange"))
+CONFIGURED = ((1, "Configured", "green"), (0, "Not configured", "red"))
+SUPPORTED = ((1, "Supported", "green"), (0, "Unsupported", "red"))
+ENABLED = ((1, "Yes", "green"), (0, "No", "red"))
+TRUNCATED = ((1, "Truncated", "orange"), (0, "Complete", "green"))
+READINESS = ((1, "OK", "green"), (0, "NOT READY", "red"))
+RISK = ((1, "At risk", "red"), (0, "Clear", "green"))
+
+# Blank panels are ambiguous on call: these say which kind of blank it is.
+NO_DATA_EXPORTER = "no data — exporter absent?"
+NO_DATA_STALE = "no data — stale, see readiness"
+
+
+def _thresholds(steps):
+    return (
+        db.ThresholdsConfig()
+        .mode(ThresholdsMode.ABSOLUTE)
+        .steps([Threshold(value=value, color=color) for value, color in steps])
+    )
+
+
+def _mappings(entries):
+    return [
+        ValueMap(
+            options={
+                str(value): ValueMappingResult(
+                    text=text, color=color, index=index
+                )
+                for index, (value, text, color) in enumerate(entries)
+            }
+        )
+    ]
+
+
+class _DataLink:
+    """One field-level link out of a panel.
+
+    The SDK types field links as DashboardLink, which serialises the
+    dashboard-menu fields (tags, asDropdown, includeVars) Grafana ignores on a
+    data link. A data link is only a title, a URL, and a target.
+    """
+
+    def __init__(self, title, url):
+        self._json = {"title": title, "url": url, "targetBlank": False}
+
+    def build(self):
+        # data_links() expects a builder; this model is its own.
+        return self
+
+    def to_json(self):
+        return dict(self._json)
+
+
+def drilldown(title, uid, **variables):
+    """A link into another dashboard that carries the current context.
+
+    `${__url_time_range}` reproduces the window being looked at, and the
+    `:queryparam` format expands the multi-value deployment variable into one
+    `var-deployment=` pair per selected deployment rather than one comma-joined
+    value, which Grafana would read as a single deployment name.
+    """
+    parameters = ["${__url_time_range}", "${deployment:queryparam}"]
+    parameters += [f"var-{name}={value}" for name, value in variables.items()]
+    return _DataLink(title, f"/d/{uid}?" + "&".join(parameters))
+
+
+# The two ways a clicked value names an entity. A bar gauge clicks a series, so
+# the label is read off the field; a table clicks a row, so it is read off the
+# named column of that row.
+def by_series(label):
+    return "${__field.labels." + label + "}"
+
+
+def by_row(column):
+    return "${__data.fields." + column + "}"
+
+
+def by_ref(ref, *, unit=None, thresholds=None, mappings=None,
+           minimum=None, maximum=None):
+    """Field config for one query refId.
+
+    Stat and bar-gauge panels share one field config across every target, so a
+    panel that shows a boolean beside an age, or a latency beside a coverage
+    fraction, needs the differing target overridden rather than a second panel.
+    """
+    properties = []
+    if unit is not None:
+        properties.append(DynamicConfigValue("unit", unit))
+    if thresholds is not None:
+        properties.append(
+            DynamicConfigValue("thresholds", _thresholds(thresholds).build())
+        )
+    if mappings is not None:
+        properties.append(DynamicConfigValue("mappings", _mappings(mappings)))
+    if minimum is not None:
+        properties.append(DynamicConfigValue("min", minimum))
+    if maximum is not None:
+        properties.append(DynamicConfigValue("max", maximum))
+    return ref, properties
+
+
+def by_column(name, *, unit=None, thresholds=None, mappings=None,
+              colour_cells=False, links=()):
+    """Field config for one named table column.
+
+    A table's columns are matched by the name they carry after transformation,
+    so by_ref() stops working the moment several queries are merged into one
+    frame: every column then belongs to the same refId.
+    """
+    properties = []
+    if unit is not None:
+        properties.append(DynamicConfigValue("unit", unit))
+    if thresholds is not None:
+        properties.append(
+            DynamicConfigValue("thresholds", _thresholds(thresholds).build())
+        )
+    if mappings is not None:
+        properties.append(DynamicConfigValue("mappings", _mappings(mappings)))
+    if colour_cells:
+        properties.append(
+            DynamicConfigValue(
+                "custom.cellOptions",
+                TableColoredBackgroundCellOptions(
+                    mode=TableCellBackgroundDisplayMode.BASIC
+                ),
+            )
+        )
+    if links:
+        # Scoped to one column so only the identifying cell is clickable; a
+        # panel-wide data link turns every cell of every row into the same link.
+        properties.append(DynamicConfigValue("links", list(links)))
+    return name, properties
+
+
+# The two column shapes that repeat across the table set: a 1/0 flag, which is
+# unreadable as a bare number in a grid of them, and an age in seconds.
+BOOLEAN_CELL = {
+    "mappings": ENABLED,
+    "thresholds": REQUIRED_BOOLEAN,
+    "colour_cells": True,
+}
+SECONDS_CELL = {"unit": "s"}
+
+
+def _visual_state(panel, thresholds, mappings, minimum, maximum, overrides,
+                  data_links=()):
+    if data_links:
+        panel = panel.data_links(list(data_links))
+    if thresholds is not None:
+        panel = panel.thresholds(_thresholds(thresholds))
+    if mappings is not None:
+        panel = panel.mappings(_mappings(mappings))
+    if minimum is not None:
+        panel = panel.min(minimum)
+    if maximum is not None:
+        panel = panel.max(maximum)
+    for ref, properties in overrides:
+        panel = panel.override_by_query(ref, properties)
+    return panel
 
 
 def datasource_variable():
@@ -132,6 +444,76 @@ def label_variable(name, label, source_metric, source_label, selectors=""):
     )
 
 
+class _PrometheusAnnotationQuery(AnnotationQuery):
+    """An annotation query carrying the Prometheus-only formatting fields.
+
+    The generated model stops at `expr`, but Grafana reads titleFormat and
+    textFormat off the annotation object itself: without them a marker says
+    only that something happened, not to which dataset, node, or build.
+    """
+
+    def __init__(self, formats, **fields):
+        super().__init__(**fields)
+        self._formats = formats
+
+    def to_json(self):
+        return {**super().to_json(), **self._formats}
+
+    def build(self):
+        # Dashboard.annotation() expects a builder; this model is its own.
+        return self
+
+
+def annotation(name, expr, *, title, text, colour, step="1m"):
+    """One class of change event, painted across every panel of a dashboard."""
+    return _PrometheusAnnotationQuery(
+        {"titleFormat": title, "textFormat": text, "step": step},
+        name=name,
+        datasource=DATASOURCE,
+        enable=True,
+        # hide=False keeps each annotation's own toggle in the dashboard bar,
+        # so one class of event can be switched off without editing anything.
+        hide=False,
+        icon_color=colour,
+        expr=expr,
+    )
+
+
+def change_annotations():
+    """The exporter-side changes that explain a discontinuity in a graph.
+
+    Every dashboard gets these, because the first question about a step in any
+    line here is whether ISE changed or the exporter's view of ISE changed.
+    """
+    return (
+        annotation(
+            "Provider changed",
+            f"changes({metric('ise3_dataset_provider_active')}[5m]) > 0",
+            title="Provider changed: {{dataset}}",
+            text="{{dataset}} is now served by {{provider}}",
+            colour="purple",
+        ),
+        annotation(
+            # Aggregated to the node: node_state is one series per state, so an
+            # unaggregated changes() fires twice for a single transition, and
+            # again whenever the roles or services labels churn.
+            "Node state changed",
+            "max by (instance,node) (changes("
+            f"{metric('ise3_deployment_node_state')}[10m])) > 0",
+            title="Node state changed: {{node}}",
+            text="{{node}} changed deployment state",
+            colour="orange",
+        ),
+        annotation(
+            "Exporter build changed",
+            f"changes({metric('ise3_exporter_build_info')}[15m]) > 0",
+            title="Exporter build changed",
+            text="exporter {{version}} targeting ISE {{target_ise_release}}",
+            colour="blue",
+        ),
+    )
+
+
 def base(title, uid, description, *, refresh="5m", variables=()):
     navigation = (
         db.DashboardLink("ISE Exporter 3 dashboards")
@@ -154,12 +536,16 @@ def base(title, uid, description, *, refresh="5m", variables=()):
         .with_variable(datasource_variable())
         .with_variable(deployment_variable())
     )
+    for change in change_annotations():
+        dashboard = dashboard.annotation(change)
     for variable in variables:
         dashboard = dashboard.with_variable(variable)
     return dashboard
 
 
-def ts(title, description, targets, *, unit="short", stacking=False):
+def ts(title, description, targets, *, unit="short", stacking=False,
+       thresholds=None, mappings=None, minimum=None, maximum=None,
+       overrides=()):
     panel = (
         timeseries.Panel()
         .title(title)
@@ -174,24 +560,110 @@ def ts(title, description, targets, *, unit="short", stacking=False):
             .calcs(["lastNotNull", "max"])
         )
     )
+    if thresholds is not None:
+        # A time series only draws its thresholds when a style asks it to.
+        panel = panel.thresholds_style(
+            common.GraphThresholdsStyleConfig().mode(
+                GraphTresholdsStyleMode.DASHED
+            )
+        )
     for target in targets:
         panel = panel.with_target(target)
-    return panel
+    return _visual_state(
+        panel, thresholds, mappings, minimum, maximum, overrides
+    )
 
 
-def tbl(title, description, targets):
+# Prometheus table format emits these beside the label columns. `instance` is
+# deliberately not here: it is the deployment boundary every dashboard is scoped
+# by, so on a multi-deployment selection it is the first thing to read.
+NOISE_COLUMNS = ("Time", "__name__", "job")
+
+# Targets are declared in refId order everywhere in this file, as query() and
+# instant() default to "A" and each extra target names the next letter.
+REF_IDS = "ABCDEFGH"
+
+
+def _value_column(index, total):
+    """What the Prometheus datasource calls one target's value column.
+
+    It is "Value" for a lone query and "Value #<refId>" as soon as a panel has
+    more than one, which is also the name the merge and organize
+    transformations match on.
+    """
+    return "Value" if total == 1 else f"Value #{REF_IDS[index]}"
+
+
+def _table_transformations(count, columns, sort):
+    """Turn one frame per query into a single joined, labelled table.
+
+    Without this a multi-target table renders as a frame picker showing one
+    query at a time. `merge` joins the frames on every column they share, which
+    is why the noise columns are filtered off first: an instant query carries a
+    Time column, and a shared column is part of the join key.
+    """
+    hidden = list(NOISE_COLUMNS)
+    renamed = {}
+    for index, name in enumerate(columns):
+        column = _value_column(index, count)
+        if name is None:
+            # An info metric's value is always 1; its labels carry the meaning.
+            hidden.append(column)
+        else:
+            renamed[column] = name
+    transformations = [
+        DataTransformerConfig(
+            id_val="filterFieldsByName", options={"exclude": {"names": hidden}}
+        )
+    ]
+    if count > 1:
+        transformations.append(DataTransformerConfig(id_val="merge", options={}))
+    if renamed:
+        transformations.append(
+            DataTransformerConfig(
+                id_val="organize", options={"renameByName": renamed}
+            )
+        )
+    if sort is not None:
+        column, descending = sort
+        transformations.append(
+            DataTransformerConfig(
+                id_val="sortBy",
+                options={"sort": [{"field": column, "desc": descending}]},
+            )
+        )
+    return transformations
+
+
+def tbl(title, description, targets, *, columns, sort=None, thresholds=None,
+        mappings=None, overrides=(), column_overrides=()):
+    """A joined table.
+
+    `columns` names one value column per target, in refId order, or None to
+    drop that target's value and keep only the labels it joins in. `sort`
+    reorders rows worst-first where the query itself does not already.
+    """
+    assert len(columns) == len(targets), title
     panel = (
         table.Panel()
         .title(title)
         .description(description)
         .datasource(DATASOURCE)
+        .transformations(_table_transformations(len(targets), columns, sort))
     )
     for target in targets:
-        panel = panel.with_target(target)
+        # Label columns only exist in table format; time_series format gives
+        # the panel one series per row and nothing to join on.
+        panel = panel.with_target(target.format(PromQueryFormat.TABLE))
+    panel = _visual_state(panel, thresholds, mappings, None, None, overrides)
+    for column, properties in column_overrides:
+        panel = panel.override_by_name(column, properties)
     return panel
 
 
-def stat_panel(title, description, targets, *, unit="short"):
+def stat_panel(title, description, targets, *, unit="short", thresholds=None,
+               mappings=None, minimum=None, maximum=None, overrides=(),
+               no_value=None, data_links=()):
     panel = (
         stat.Panel()
         .title(title)
@@ -199,12 +671,18 @@ def stat_panel(title, description, targets, *, unit="short"):
         .datasource(DATASOURCE)
         .unit(unit)
     )
+    if no_value is not None:
+        panel = panel.no_value(no_value)
     for target in targets:
         panel = panel.with_target(target)
-    return panel
+    return _visual_state(
+        panel, thresholds, mappings, minimum, maximum, overrides, data_links
+    )
 
 
-def bar(title, description, targets, *, unit="short"):
+def bar(title, description, targets, *, unit="short", thresholds=None,
+        mappings=None, minimum=None, maximum=None, overrides=(),
+        data_links=()):
     panel = (
         bargauge.Panel()
         .title(title)
@@ -217,25 +695,83 @@ def bar(title, description, targets, *, unit="short"):
     )
     for target in targets:
         panel = panel.with_target(target)
-    return panel
+    return _visual_state(
+        panel, thresholds, mappings, minimum, maximum, overrides, data_links
+    )
 
 
 def sized(panel, height=8, span=12):
     return panel.height(height).span(span)
 
 
+# A third element on a section marks the row as folded away on load, for
+# material that is needed during an investigation but not to start one.
+COLLAPSED = "collapsed"
+
+
 def assemble(title, uid, description, sections, *, variables=(), refresh="5m"):
     dashboard = base(
         title, uid, description, refresh=refresh, variables=variables
     )
-    for row_title, panels in sections:
-        dashboard = dashboard.with_row(db.Row(row_title))
+    for section in sections:
+        row_title, panels = section[:2]
+        row = db.Row(row_title)
+        if COLLAPSED in section[2:]:
+            # Grafana drops a collapsed row's panels unless they are nested
+            # inside the row object itself; Row.with_panel() nests them there
+            # and sets the collapsed flag, and with_row() then lays them out.
+            for panel in panels:
+                row = row.with_panel(panel)
+            dashboard = dashboard.with_row(row)
+            continue
+        dashboard = dashboard.with_row(row)
         for panel in panels:
             dashboard = dashboard.with_panel(panel)
     return dashboard
 
 
 def overview_dashboard():
+    # The union that answers "is anything wrong?" before anything is read. Each
+    # row counts one class of problem and says what it is, so an empty table is
+    # the healthy state and needs no interpretation. ISE-sourced rows are gated
+    # so a stale collection cannot raise an alarm that has already been fixed.
+    attention_needed = " or ".join(
+        (
+            attention(
+                "Datasets on a fallback provider",
+                "count by (instance) "
+                f"({metric('ise3_dataset_provider_degraded')} > 0)",
+            ),
+            attention(
+                "Certificates already expired",
+                "sum by (instance) "
+                f"(({gate(metric('ise3_certificates_expired'), 'certificates')}) > 0)",
+            ),
+            attention(
+                f"Deployments whose backup is older than {BACKUP_STALE_HOURS} hours",
+                "count by (instance) "
+                f"(({gate(metric('ise3_backup_age_hours'), 'backup')}) "
+                f"> {BACKUP_STALE_HOURS})",
+            ),
+            attention(
+                "Deployments running an unsupported ISE version",
+                "count by (instance) "
+                f"(({gate(metric('ise3_version_supported'), 'patches')}) == 0)",
+            ),
+            attention(
+                "Enabled licence tiers out of compliance",
+                "count by (instance) "
+                f"((({gate(metric('ise3_license_compliant'), 'licensing')}) == 0) "
+                "and on(instance,provider,tier) "
+                f"(({metric('ise3_license_enabled')}) == 1))",
+            ),
+            attention(
+                "Datasets whose latest collection attempt failed",
+                "count by (instance) "
+                f"({metric('ise3_dataset_last_failure_detail_info')} == 1)",
+            ),
+        )
+    )
     return assemble(
         "ISE 3 — Overview",
         "ise3-overview",
@@ -245,6 +781,24 @@ def overview_dashboard():
             (
                 "Platform status",
                 (
+                    sized(
+                        tbl(
+                            "Attention needed",
+                            "Every condition on this dashboard that warrants "
+                            "action, counted and named. An empty table is the "
+                            "healthy state; each row says which panel below "
+                            "explains it.",
+                            [instant(attention_needed, "attention")],
+                            columns=("count",),
+                            sort=("count", True),
+                            column_overrides=(
+                                by_column("count", thresholds=NONZERO_CRITICAL,
+                                          colour_cells=True),
+                            ),
+                        ),
+                        6,
+                        24,
+                    ),
                     sized(
                         stat_panel(
                             "Ready datasets",
@@ -273,6 +827,12 @@ def overview_dashboard():
                                     "degraded",
                                 )
                             ],
+                            thresholds=NONZERO_CRITICAL,
+                            data_links=(
+                                drilldown(
+                                    "Which source, and why", "ise3-sources"
+                                ),
+                            ),
                         ),
                         5,
                         8,
@@ -288,6 +848,7 @@ def overview_dashboard():
                                     "sessions",
                                 )
                             ],
+                            no_value=NO_DATA_STALE,
                         ),
                         5,
                         8,
@@ -324,6 +885,7 @@ def overview_dashboard():
                                     "{{node}} · {{roles}} · {{state}}",
                                 )
                             ],
+                            columns=(None,),
                         )
                     ),
                     sized(
@@ -337,6 +899,7 @@ def overview_dashboard():
                                     "{{instance}}",
                                 )
                             ],
+                            mappings=YES_NO,
                         ),
                         5,
                         12,
@@ -357,6 +920,7 @@ def overview_dashboard():
                                     "B",
                                 ),
                             ],
+                            no_value=NO_DATA_STALE,
                         ),
                         5,
                         12,
@@ -382,6 +946,9 @@ def overview_dashboard():
                                     "B",
                                 ),
                             ],
+                            thresholds=NONZERO_CRITICAL,
+                            overrides=(by_ref("B", thresholds=NONZERO_WARNING),),
+                            no_value=NO_DATA_STALE,
                         ),
                         5,
                         8,
@@ -402,6 +969,16 @@ def overview_dashboard():
                                 ),
                             ],
                             unit="h",
+                            thresholds=BACKUP_AGE_HOURS,
+                            # The configured flag is a boolean, not an age.
+                            overrides=(
+                                by_ref(
+                                    "A",
+                                    unit="short",
+                                    mappings=CONFIGURED,
+                                    thresholds=REQUIRED_BOOLEAN,
+                                ),
+                            ),
                         ),
                         5,
                         8,
@@ -419,6 +996,13 @@ def overview_dashboard():
                                     "B",
                                 ),
                             ],
+                            overrides=(
+                                by_ref(
+                                    "B",
+                                    mappings=SUPPORTED,
+                                    thresholds=REQUIRED_BOOLEAN,
+                                ),
+                            ),
                         ),
                         5,
                         8,
@@ -436,6 +1020,7 @@ def overview_dashboard():
                                     "{{node}} · {{store}} · {{certificate}}",
                                 )
                             ],
+                            columns=("days to expiry",),
                         )
                     ),
                     sized(
@@ -449,6 +1034,8 @@ def overview_dashboard():
                                     "patch {{patch_number}}",
                                 )
                             ],
+                            columns=("installed",),
+                            column_overrides=(by_column("installed", **BOOLEAN_CELL),),
                         )
                     ),
                 ),
@@ -486,6 +1073,12 @@ def overview_dashboard():
                                     "B",
                                 ),
                             ],
+                            columns=("enabled", "compliant"),
+                            column_overrides=(
+                                by_column("enabled", colour_cells=True),
+                                by_column("compliant", colour_cells=True),
+                            ),
+                            mappings=ENABLED,
                         )
                     ),
                 ),
@@ -507,6 +1100,28 @@ def access_dashboard():
         "ise3_session_status_endpoints",
         "ops_owner",
     )
+    # Every NAD or PSN named on this dashboard is a place the next question is
+    # asked somewhere else, so each one is a link to where that question lives.
+    nad_series_drilldown = drilldown(
+        "This network device on Endpoints and devices",
+        "ise3-endpoints",
+        nad=by_series("nad"),
+    )
+    nad_row_drilldown = drilldown(
+        "This network device on Endpoints and devices",
+        "ise3-endpoints",
+        nad=by_row("nad"),
+    )
+    # The accounting metrics carry the device in a generic `value` label, since
+    # one metric serves every breakdown dimension, so they need their own link.
+    nad_value_drilldown = drilldown(
+        "This network device on Endpoints and devices",
+        "ise3-endpoints",
+        nad=by_series("value"),
+    )
+    psn_drilldown = drilldown(
+        "This node on PSN troubleshooting", "ise3-psn", node=by_series("psn")
+    )
     auth = metric("ise3_radius_authentications")
     passed = metric("ise3_radius_authentications", 'status="passed"')
     failed = metric("ise3_radius_authentications", 'status="failed"')
@@ -517,6 +1132,21 @@ def access_dashboard():
     assignments = metric(
         "ise3_network_device_assignment",
         'nad=~"$nad",ops_owner=~"$ops_owner"',
+    )
+    # One union rather than three targets: profile, rule, and policy set share
+    # only ops_owner, so joining them into one table would pair an unrelated
+    # profile, rule, and policy set onto the same row.
+    failed_context = " or ".join(
+        "("
+        + gate(
+            metric(name, 'ops_owner=~"$ops_owner"'), "session_authorization"
+        )
+        + ")"
+        for name in (
+            "ise3_session_failed_authz_profile_endpoints",
+            "ise3_session_failed_authz_rule_endpoints",
+            "ise3_session_failed_policy_set_endpoints",
+        )
     )
     return assemble(
         "ISE 3 — Access Troubleshooting",
@@ -531,22 +1161,27 @@ def access_dashboard():
                         stat_panel(
                             "Dataset readiness",
                             "Freshness of reporting, accounting, error, live-session, "
-                            "and session-authorization datasets used below.",
+                            "and session-authorization datasets used below. NOT "
+                            "READY means the panels fed by that dataset stay blank.",
                             [
-                                instant(ready("radius_reporting"), "reporting"),
-                                instant(ready("radius_errors"), "errors", "B"),
-                                instant(ready("active_sessions"), "sessions", "C"),
+                                instant(ready_bool("radius_reporting"), "reporting"),
+                                instant(ready_bool("radius_errors"), "errors", "B"),
                                 instant(
-                                    ready("session_authorization"),
+                                    ready_bool("active_sessions"), "sessions", "C"
+                                ),
+                                instant(
+                                    ready_bool("session_authorization"),
                                     "authorization",
                                     "D",
                                 ),
                                 instant(
-                                    ready("radius_accounting"),
+                                    ready_bool("radius_accounting"),
                                     "accounting",
                                     "E",
                                 ),
                             ],
+                            mappings=READINESS,
+                            no_value=NO_DATA_EXPORTER,
                         ),
                         5,
                         8,
@@ -564,6 +1199,10 @@ def access_dashboard():
                                 )
                             ],
                             unit="percentunit",
+                            thresholds=RATIO_HIGH_IS_GOOD,
+                            minimum=0,
+                            maximum=1,
+                            no_value=NO_DATA_STALE,
                         ),
                         5,
                         8,
@@ -608,6 +1247,30 @@ def access_dashboard():
                     ),
                     sized(
                         stat_panel(
+                            "Reporting windows",
+                            "Exact time span each window gauge on this dashboard "
+                            "represents. Authentication and accounting totals are "
+                            "not counters: they are the volume seen in these "
+                            "windows, so a total only means what the window says.",
+                            [
+                                instant(
+                                    metric("ise3_radius_reporting_window_seconds"),
+                                    "authentication window",
+                                ),
+                                instant(
+                                    metric("ise3_radius_accounting_window_seconds"),
+                                    "accounting window",
+                                    "B",
+                                ),
+                            ],
+                            unit="s",
+                            no_value=NO_DATA_EXPORTER,
+                        ),
+                        5,
+                        8,
+                    ),
+                    sized(
+                        stat_panel(
                             "Failed authentications",
                             "Exact failed-authentication total for the reporting "
                             "window, independent of dimensional breakdowns.",
@@ -617,6 +1280,7 @@ def access_dashboard():
                                     "failed",
                                 )
                             ],
+                            no_value=NO_DATA_STALE,
                         ),
                         5,
                         8,
@@ -641,6 +1305,7 @@ def access_dashboard():
                                     "attempts per endpoint",
                                 )
                             ],
+                            no_value=NO_DATA_STALE,
                         ),
                         5,
                         8,
@@ -680,6 +1345,346 @@ def access_dashboard():
                                     ref="B",
                                 ),
                             ],
+                        )
+                    ),
+                ),
+            ),
+            (
+                "Failure isolation",
+                (
+                    sized(
+                        stat_panel(
+                            "RADIUS errors",
+                            "Exact number of error-view rows in the current "
+                            "reporting window from the selected provider.",
+                            [
+                                instant(
+                                    f"sum({gate(metric('ise3_radius_errors_total'), 'radius_errors')})",
+                                    "errors",
+                                )
+                            ],
+                            no_value=NO_DATA_STALE,
+                        ),
+                        5,
+                        12,
+                    ),
+                    sized(
+                        stat_panel(
+                            "Certificate and PKI errors",
+                            "RADIUS error events carrying ISE message codes "
+                            "associated with certificate validation, trust, or "
+                            "public-key infrastructure failures.",
+                            [
+                                instant(
+                                    "sum("
+                                    + gate(
+                                        metric(
+                                            "ise3_radius_errors_by_message_code",
+                                            "message_code=~\""
+                                            + "|".join(PKI_MESSAGE_CODES)
+                                            + "\"",
+                                        ),
+                                        "radius_errors",
+                                    )
+                                    + ")",
+                                    "PKI errors",
+                                )
+                            ],
+                            thresholds=NONZERO_WARNING,
+                            no_value=NO_DATA_STALE,
+                        ),
+                        5,
+                        12,
+                    ),
+                    sized(
+                        bar(
+                            "Top error codes",
+                            "ISE message-code distribution for the current error "
+                            "window, sorted from most to least frequent."
+                            + NAMED_CODES_NOTE,
+                            [
+                                instant(
+                                    "sort_desc("
+                                    + named_codes(
+                                        "sum by (message_code) "
+                                        f"({gate(metric('ise3_radius_errors_by_message_code'), 'radius_errors')})"
+                                    )
+                                    + ")",
+                                    "{{message_code}}",
+                                )
+                            ],
+                        )
+                    ),
+                    sized(
+                        ts(
+                            "Errors by message code over time",
+                            "When did this error start: the same message-code "
+                            "distribution as the bar above, plotted over time. "
+                            "These are window gauges rather than counters, so a "
+                            "line is the volume seen in each reporting window and "
+                            "its onset is the moment the failure began.",
+                            [
+                                query(
+                                    "sum by (message_code) "
+                                    f"({gate(metric('ise3_radius_errors_by_message_code'), 'radius_errors')})",
+                                    "{{message_code}}",
+                                )
+                            ],
+                        )
+                    ),
+                    sized(
+                        bar(
+                            "Failure classes",
+                            "Historical failed authentications classified into "
+                            "bounded operational causes from ISE failure text.",
+                            [
+                                instant(
+                                    "sort_desc("
+                                    + gate(
+                                        metric(
+                                            "ise3_radius_failure_summary",
+                                            'dimension="failure_class"',
+                                        ),
+                                        "radius_reporting",
+                                    )
+                                    + ")",
+                                    "{{value}}",
+                                )
+                            ],
+                        )
+                    ),
+                    sized(
+                        ts(
+                            "Failure classes over time",
+                            "When did this class of failure start: the bounded "
+                            "operational causes from the bar above, plotted over "
+                            "time. The window gauge makes onset and recovery "
+                            "visible, which a single current value cannot show.",
+                            [
+                                query(
+                                    gate(
+                                        metric(
+                                            "ise3_radius_failure_summary",
+                                            'dimension="failure_class"',
+                                        ),
+                                        "radius_reporting",
+                                    ),
+                                    "{{value}}",
+                                )
+                            ],
+                        )
+                    ),
+                    sized(
+                        bar(
+                            "Failed authorization and identity summary",
+                            "Historical failed authentications by authorization "
+                            "profile, identity store/group, device type, and "
+                            "security group. These are marginals and are not "
+                            "additive across dimensions.",
+                            [
+                                instant(
+                                    "sort_desc("
+                                    + gate(
+                                        metric(
+                                            "ise3_radius_failure_summary",
+                                            'dimension=~"authorization_profile|identity_store|identity_group|device_type|security_group"',
+                                        ),
+                                        "radius_reporting",
+                                    )
+                                    + ")",
+                                    "{{dimension}} · {{value}}",
+                                )
+                            ],
+                        )
+                    ),
+                    sized(
+                        bar(
+                            "Failing network devices",
+                            capped(
+                                "Network devices represented in the RADIUS "
+                                "error view, worst first.",
+                                "The complete per-device error list, including "
+                                "every low-volume device, is the \"RADIUS "
+                                "failure work queue\" table below.",
+                            ),
+                            [
+                                instant(
+                                    "sort_desc("
+                                    + top(
+                                        "sum by (nad) "
+                                        "("
+                                        + gate(
+                                            metric(
+                                                "ise3_radius_errors_by_nad",
+                                                'nad=~"$nad"',
+                                            ),
+                                            "radius_errors",
+                                        )
+                                        + ")"
+                                    )
+                                    + ")",
+                                    "{{nad}}",
+                                )
+                            ],
+                            data_links=(nad_series_drilldown,),
+                        )
+                    ),
+                    sized(
+                        bar(
+                            "Failure methods",
+                            "Authentication methods represented in RADIUS errors, "
+                            "which separates protocol issues from device issues.",
+                            [
+                                instant(
+                                    "sort_desc(sum by (method) "
+                                    f"({gate(metric('ise3_radius_errors_by_method'), 'radius_errors')}))",
+                                    "{{method}}",
+                                )
+                            ],
+                        )
+                    ),
+                    sized(
+                        bar(
+                            "Authentication methods at failing NADs",
+                            "The deliberately bounded NAD-by-method failure "
+                            "correlation. Unlike separate marginals, this retains "
+                            "which method failed at which network device.",
+                            [
+                                instant(
+                                    "sort_desc("
+                                    + gate(
+                                        metric(
+                                            "ise3_radius_failures_by_nad_method",
+                                            'nad=~"$nad"',
+                                        ),
+                                        "radius_reporting",
+                                    )
+                                    + ")",
+                                    "{{nad}} · {{method}}",
+                                )
+                            ],
+                        )
+                    ),
+                    sized(
+                        stat_panel(
+                            "Failure-context coverage",
+                            "Published versus existing NAD-by-method failure "
+                            "groups, making the troubleshooting bound explicit.",
+                            [
+                                instant(
+                                    metric(
+                                        "ise3_topk_groups_returned",
+                                        'dataset="radius_reporting",breakdown="failure_context"',
+                                    ),
+                                    "published",
+                                ),
+                                instant(
+                                    metric(
+                                        "ise3_topk_groups_total",
+                                        'dataset="radius_reporting",breakdown="failure_context"',
+                                    ),
+                                    "total",
+                                    "B",
+                                ),
+                                instant(
+                                    metric(
+                                        "ise3_topk_truncated",
+                                        'dataset="radius_reporting",breakdown="failure_context"',
+                                    ),
+                                    "truncated",
+                                    "C",
+                                ),
+                            ],
+                            overrides=(
+                                by_ref(
+                                    "C",
+                                    mappings=TRUNCATED,
+                                    thresholds=NONZERO_WARNING,
+                                ),
+                            ),
+                        ),
+                        5,
+                        12,
+                    ),
+                    sized(
+                        bar(
+                            "Errors by PSN",
+                            "RADIUS error volume by policy service node for the "
+                            "currently selected PSN scope.",
+                            [
+                                instant(
+                                    "sort_desc(sum by (psn) "
+                                    "("
+                                    + gate(
+                                        metric(
+                                            "ise3_radius_errors_by_psn",
+                                            'psn=~"$psn"',
+                                        ),
+                                        "radius_errors",
+                                    )
+                                    + "))",
+                                    "{{psn}}",
+                                )
+                            ],
+                            data_links=(psn_drilldown,),
+                        )
+                    ),
+                    sized(
+                        bar(
+                            "Failure locations",
+                            "RADIUS error volume joined to authoritative NAD "
+                            "location assignments for operational routing.",
+                            [
+                                instant(
+                                    "sort_desc(sum by (location) (("
+                                    + error_nads
+                                    + ") * on(instance,nad) "
+                                    "group_left(location) ("
+                                    + assignments
+                                    + ")))",
+                                    "{{location}}",
+                                )
+                            ],
+                        )
+                    ),
+                    sized(
+                        bar(
+                            "Errors by ops owner",
+                            "RADIUS error volume joined to the operations group "
+                            "responsible for each network device.",
+                            [
+                                instant(
+                                    "sort_desc(sum by (ops_owner) (("
+                                    + error_nads
+                                    + ") * on(instance,nad) "
+                                    "group_left(ops_owner) ("
+                                    + assignments
+                                    + ")))",
+                                    "{{ops_owner}}",
+                                )
+                            ],
+                        )
+                    ),
+                    sized(
+                        tbl(
+                            "RADIUS failure work queue",
+                            "Per-NAD error evidence enriched with location and "
+                            "ops owner so each failure can be routed directly.",
+                            [
+                                instant(
+                                    "sort_desc(("
+                                    + error_nads
+                                    + ") * on(instance,nad) "
+                                    "group_left(location,ops_owner) ("
+                                    + assignments
+                                    + "))",
+                                    "{{nad}} · {{location}} · {{ops_owner}}",
+                                )
+                            ],
+                            columns=("errors",),
+                            column_overrides=(
+                                by_column("nad", links=(nad_row_drilldown,)),
+                            ),
                         )
                     ),
                 ),
@@ -749,6 +1754,7 @@ def access_dashboard():
                                     "{{psn}} · {{status}}",
                                 )
                             ],
+                            data_links=(psn_drilldown,),
                         )
                     ),
                     sized(
@@ -779,23 +1785,34 @@ def access_dashboard():
                     sized(
                         bar(
                             "Authentication by network device",
-                            "Complete per-NAD authentication volume by outcome; "
-                            "quiet devices are retained rather than top-K capped.",
+                            capped(
+                                "Per-NAD authentication volume by outcome.",
+                                "The exporter still publishes the complete "
+                                "per-device marginal: the exact deployment-wide "
+                                "totals it sums to are the \"Authentication "
+                                "outcome\" and \"Failed authentications\" panels "
+                                "above.",
+                            ),
                             [
                                 instant(
-                                    "sort_desc(sum by (nad,status) "
-                                    "("
-                                    + gate(
-                                        metric(
-                                            "ise3_radius_authentications_by_nad",
-                                            'nad=~"$nad"',
-                                        ),
-                                        "radius_reporting",
+                                    "sort_desc("
+                                    + top(
+                                        "sum by (nad,status) "
+                                        "("
+                                        + gate(
+                                            metric(
+                                                "ise3_radius_authentications_by_nad",
+                                                'nad=~"$nad"',
+                                            ),
+                                            "radius_reporting",
+                                        )
+                                        + ")"
                                     )
-                                    + "))",
+                                    + ")",
                                     "{{nad}} · {{status}}",
                                 )
                             ],
+                            data_links=(nad_series_drilldown,),
                         )
                     ),
                     sized(
@@ -821,6 +1838,17 @@ def access_dashboard():
                                 ),
                             ],
                             unit="s",
+                            # Coverage is a fraction, not a latency.
+                            overrides=(
+                                by_ref(
+                                    "B",
+                                    unit="percentunit",
+                                    thresholds=COVERAGE,
+                                    minimum=0,
+                                    maximum=1,
+                                ),
+                            ),
+                            data_links=(psn_drilldown,),
                         )
                     ),
                 ),
@@ -873,6 +1901,7 @@ def access_dashboard():
                                     "C",
                                 ),
                             ],
+                            no_value=NO_DATA_STALE,
                         ),
                         5,
                         24,
@@ -880,44 +1909,62 @@ def access_dashboard():
                     sized(
                         bar(
                             "Accounting events by network device",
-                            "Start and stop accounting volume per selected NAD; "
-                            "the complete marginal retains quiet devices.",
+                            capped(
+                                "Start and stop accounting volume per selected "
+                                "NAD.",
+                                "The exact deployment-wide event totals, "
+                                "unaffected by this cap, are the \"Accounting "
+                                "starts and stops\" panel above.",
+                            ),
                             [
                                 instant(
-                                    "sort_desc(sum by (value,event_type) ("
-                                    + gate(
-                                        metric(
-                                            "ise3_radius_accounting_events",
-                                            'dimension="nad",value=~"$nad"',
-                                        ),
-                                        "radius_accounting",
+                                    "sort_desc("
+                                    + top(
+                                        "sum by (value,event_type) ("
+                                        + gate(
+                                            metric(
+                                                "ise3_radius_accounting_events",
+                                                'dimension="nad",value=~"$nad"',
+                                            ),
+                                            "radius_accounting",
+                                        )
+                                        + ")"
                                     )
-                                    + "))",
+                                    + ")",
                                     "{{value}} · {{event_type}}",
                                 )
                             ],
+                            data_links=(nad_value_drilldown,),
                         )
                     ),
                     sized(
                         bar(
                             "Accounting session duration",
-                            "Mean and maximum completed-session duration per "
-                            "selected NAD, with zero-duration records excluded.",
+                            capped(
+                                "Mean and maximum completed-session duration "
+                                "per selected NAD, with zero-duration records "
+                                "excluded.",
+                                "Coverage for the same records is in "
+                                "\"Accounting duration coverage\" below.",
+                            ),
                             [
                                 instant(
                                     "sort_desc("
-                                    + gate(
-                                        metric(
-                                            "ise3_radius_accounting_session_duration_seconds",
-                                            'dimension="nad",value=~"$nad"',
-                                        ),
-                                        "radius_accounting",
+                                    + top(
+                                        gate(
+                                            metric(
+                                                "ise3_radius_accounting_session_duration_seconds",
+                                                'dimension="nad",value=~"$nad"',
+                                            ),
+                                            "radius_accounting",
+                                        )
                                     )
                                     + ")",
                                     "{{value}} · {{statistic}}",
                                 )
                             ],
                             unit="s",
+                            data_links=(nad_value_drilldown,),
                         )
                     ),
                     sized(
@@ -967,296 +2014,40 @@ def access_dashboard():
                     sized(
                         bar(
                             "Accounting duration coverage",
-                            "Fraction of accounting records with a usable positive "
-                            "session duration for each NAD.",
+                            capped(
+                                "Fraction of accounting records with a usable "
+                                "positive session duration for each NAD, worst "
+                                "coverage first.",
+                                "Devices above the cap are the ones already "
+                                "reporting usable durations.",
+                                lowest=True,
+                            ),
                             [
                                 instant(
-                                    "sort_desc("
-                                    + gate(
-                                        metric(
-                                            "ise3_radius_accounting_duration_coverage",
-                                            'dimension="nad",value=~"$nad"',
+                                    "sort("
+                                    + top(
+                                        gate(
+                                            metric(
+                                                "ise3_radius_accounting_duration_coverage",
+                                                'dimension="nad",value=~"$nad"',
+                                            ),
+                                            "radius_accounting",
                                         ),
-                                        "radius_accounting",
+                                        lowest=True,
                                     )
                                     + ")",
                                     "{{value}}",
                                 )
                             ],
                             unit="percentunit",
+                            thresholds=COVERAGE,
+                            minimum=0,
+                            maximum=1,
+                            data_links=(nad_value_drilldown,),
                         )
                     ),
                 ),
-            ),
-            (
-                "Failure isolation",
-                (
-                    sized(
-                        stat_panel(
-                            "RADIUS errors",
-                            "Exact number of error-view rows in the current "
-                            "reporting window from the selected provider.",
-                            [
-                                instant(
-                                    f"sum({gate(metric('ise3_radius_errors_total'), 'radius_errors')})",
-                                    "errors",
-                                )
-                            ],
-                        ),
-                        5,
-                        12,
-                    ),
-                    sized(
-                        stat_panel(
-                            "Certificate and PKI errors",
-                            "RADIUS error events carrying ISE message codes "
-                            "associated with certificate validation, trust, or "
-                            "public-key infrastructure failures.",
-                            [
-                                instant(
-                                    "sum("
-                                    + gate(
-                                        metric(
-                                            "ise3_radius_errors_by_message_code",
-                                            'message_code=~"12300|12321|12500|12501|12511|12625|22056"',
-                                        ),
-                                        "radius_errors",
-                                    )
-                                    + ")",
-                                    "PKI errors",
-                                )
-                            ],
-                        ),
-                        5,
-                        12,
-                    ),
-                    sized(
-                        bar(
-                            "Top error codes",
-                            "ISE message-code distribution for the current error "
-                            "window, sorted from most to least frequent.",
-                            [
-                                instant(
-                                    "sort_desc(sum by (message_code) "
-                                    f"({gate(metric('ise3_radius_errors_by_message_code'), 'radius_errors')}))",
-                                    "{{message_code}}",
-                                )
-                            ],
-                        )
-                    ),
-                    sized(
-                        bar(
-                            "Failure classes",
-                            "Historical failed authentications classified into "
-                            "bounded operational causes from ISE failure text.",
-                            [
-                                instant(
-                                    "sort_desc("
-                                    + gate(
-                                        metric(
-                                            "ise3_radius_failure_summary",
-                                            'dimension="failure_class"',
-                                        ),
-                                        "radius_reporting",
-                                    )
-                                    + ")",
-                                    "{{value}}",
-                                )
-                            ],
-                        )
-                    ),
-                    sized(
-                        bar(
-                            "Failed authorization and identity summary",
-                            "Historical failed authentications by authorization "
-                            "profile, identity store/group, device type, and "
-                            "security group. These are marginals and are not "
-                            "additive across dimensions.",
-                            [
-                                instant(
-                                    "sort_desc("
-                                    + gate(
-                                        metric(
-                                            "ise3_radius_failure_summary",
-                                            'dimension=~"authorization_profile|identity_store|identity_group|device_type|security_group"',
-                                        ),
-                                        "radius_reporting",
-                                    )
-                                    + ")",
-                                    "{{dimension}} · {{value}}",
-                                )
-                            ],
-                        )
-                    ),
-                    sized(
-                        bar(
-                            "Failing network devices",
-                            "Network devices represented in the RADIUS error view, "
-                            "including low-volume devices rather than only top-K.",
-                            [
-                                instant(
-                                    "sort_desc(sum by (nad) "
-                                    "("
-                                    + gate(
-                                        metric(
-                                            "ise3_radius_errors_by_nad",
-                                            'nad=~"$nad"',
-                                        ),
-                                        "radius_errors",
-                                    )
-                                    + "))",
-                                    "{{nad}}",
-                                )
-                            ],
-                        )
-                    ),
-                    sized(
-                        bar(
-                            "Failure methods",
-                            "Authentication methods represented in RADIUS errors, "
-                            "which separates protocol issues from device issues.",
-                            [
-                                instant(
-                                    "sort_desc(sum by (method) "
-                                    f"({gate(metric('ise3_radius_errors_by_method'), 'radius_errors')}))",
-                                    "{{method}}",
-                                )
-                            ],
-                        )
-                    ),
-                    sized(
-                        bar(
-                            "Authentication methods at failing NADs",
-                            "The deliberately bounded NAD-by-method failure "
-                            "correlation. Unlike separate marginals, this retains "
-                            "which method failed at which network device.",
-                            [
-                                instant(
-                                    "sort_desc("
-                                    + gate(
-                                        metric(
-                                            "ise3_radius_failures_by_nad_method",
-                                            'nad=~"$nad"',
-                                        ),
-                                        "radius_reporting",
-                                    )
-                                    + ")",
-                                    "{{nad}} · {{method}}",
-                                )
-                            ],
-                        )
-                    ),
-                    sized(
-                        stat_panel(
-                            "Failure-context coverage",
-                            "Published versus existing NAD-by-method failure "
-                            "groups, making the troubleshooting bound explicit.",
-                            [
-                                instant(
-                                    metric(
-                                        "ise3_topk_groups_returned",
-                                        'dataset="radius_reporting",breakdown="failure_context"',
-                                    ),
-                                    "published",
-                                ),
-                                instant(
-                                    metric(
-                                        "ise3_topk_groups_total",
-                                        'dataset="radius_reporting",breakdown="failure_context"',
-                                    ),
-                                    "total",
-                                    "B",
-                                ),
-                                instant(
-                                    metric(
-                                        "ise3_topk_truncated",
-                                        'dataset="radius_reporting",breakdown="failure_context"',
-                                    ),
-                                    "truncated",
-                                    "C",
-                                ),
-                            ],
-                        ),
-                        5,
-                        12,
-                    ),
-                    sized(
-                        bar(
-                            "Errors by PSN",
-                            "RADIUS error volume by policy service node for the "
-                            "currently selected PSN scope.",
-                            [
-                                instant(
-                                    "sort_desc(sum by (psn) "
-                                    "("
-                                    + gate(
-                                        metric(
-                                            "ise3_radius_errors_by_psn",
-                                            'psn=~"$psn"',
-                                        ),
-                                        "radius_errors",
-                                    )
-                                    + "))",
-                                    "{{psn}}",
-                                )
-                            ],
-                        )
-                    ),
-                    sized(
-                        bar(
-                            "Failure locations",
-                            "RADIUS error volume joined to authoritative NAD "
-                            "location assignments for operational routing.",
-                            [
-                                instant(
-                                    "sort_desc(sum by (location) (("
-                                    + error_nads
-                                    + ") * on(instance,nad) "
-                                    "group_left(location) ("
-                                    + assignments
-                                    + ")))",
-                                    "{{location}}",
-                                )
-                            ],
-                        )
-                    ),
-                    sized(
-                        bar(
-                            "Errors by ops owner",
-                            "RADIUS error volume joined to the operations group "
-                            "responsible for each network device.",
-                            [
-                                instant(
-                                    "sort_desc(sum by (ops_owner) (("
-                                    + error_nads
-                                    + ") * on(instance,nad) "
-                                    "group_left(ops_owner) ("
-                                    + assignments
-                                    + ")))",
-                                    "{{ops_owner}}",
-                                )
-                            ],
-                        )
-                    ),
-                    sized(
-                        tbl(
-                            "RADIUS failure work queue",
-                            "Per-NAD error evidence enriched with location and "
-                            "ops owner so each failure can be routed directly.",
-                            [
-                                instant(
-                                    "sort_desc(("
-                                    + error_nads
-                                    + ") * on(instance,nad) "
-                                    "group_left(location,ops_owner) ("
-                                    + assignments
-                                    + "))",
-                                    "{{nad}} · {{location}} · {{ops_owner}}",
-                                )
-                            ],
-                        )
-                    ),
-                ),
+                COLLAPSED,
             ),
             (
                 "Live authorization decisions",
@@ -1287,19 +2078,27 @@ def access_dashboard():
                         bar(
                             "Failure reasons by ops owner",
                             "Distinct active endpoints by ISE failure reason code "
-                            "and owning operations group.",
+                            "and owning operations group. The reason code is the "
+                            "leading code of the session's failure reason, which "
+                            "shares ISE's message-code namespace."
+                            + NAMED_CODES_NOTE,
                             [
                                 instant(
-                                    "sort_desc(sum by (reason_code,ops_owner) "
-                                    "("
-                                    + gate(
-                                        metric(
-                                            "ise3_session_failure_reason_endpoints",
-                                            'ops_owner=~"$ops_owner"',
-                                        ),
-                                        "session_authorization",
+                                    "sort_desc("
+                                    + named_codes(
+                                        "sum by (reason_code,ops_owner) "
+                                        "("
+                                        + gate(
+                                            metric(
+                                                "ise3_session_failure_reason_endpoints",
+                                                'ops_owner=~"$ops_owner"',
+                                            ),
+                                            "session_authorization",
+                                        )
+                                        + ")",
+                                        label="reason_code",
                                     )
-                                    + "))",
+                                    + ")",
                                     "{{reason_code}} · {{ops_owner}}",
                                 )
                             ],
@@ -1313,38 +2112,12 @@ def access_dashboard():
                             "grouped by the responsible operations owner.",
                             [
                                 instant(
-                                    gate(
-                                        metric(
-                                            "ise3_session_failed_authz_profile_endpoints",
-                                            'ops_owner=~"$ops_owner"',
-                                        ),
-                                        "session_authorization",
-                                    ),
-                                    "{{ops_owner}} · profile {{authz_profile}}",
-                                ),
-                                instant(
-                                    gate(
-                                        metric(
-                                            "ise3_session_failed_authz_rule_endpoints",
-                                            'ops_owner=~"$ops_owner"',
-                                        ),
-                                        "session_authorization",
-                                    ),
-                                    "{{ops_owner}} · rule {{authz_rule}}",
-                                    "B",
-                                ),
-                                instant(
-                                    gate(
-                                        metric(
-                                            "ise3_session_failed_policy_set_endpoints",
-                                            'ops_owner=~"$ops_owner"',
-                                        ),
-                                        "session_authorization",
-                                    ),
-                                    "{{ops_owner}} · policy set {{policy_set}}",
-                                    "C",
+                                    f"sort_desc({failed_context})",
+                                    "{{ops_owner}} · {{authz_profile}} "
+                                    "{{authz_rule}} {{policy_set}}",
                                 ),
                             ],
+                            columns=("failed endpoints",),
                         )
                     ),
                     sized(
@@ -1454,6 +2227,7 @@ def access_dashboard():
                                     "{{nad}} · {{policy_set}}",
                                 )
                             ],
+                            columns=("endpoints",),
                         )
                     ),
                     sized(
@@ -1481,6 +2255,7 @@ def access_dashboard():
                         )
                     ),
                 ),
+                COLLAPSED,
             ),
         ),
         variables=(psn, nad, owner),
@@ -1504,20 +2279,25 @@ def endpoints_dashboard():
                         stat_panel(
                             "Endpoint inventory readiness",
                             "Availability and freshness of inventory, profiling "
-                            "events, and optional live endpoint attributes.",
+                            "events, and optional live endpoint attributes. NOT "
+                            "READY means the panels fed by that dataset stay blank.",
                             [
-                                instant(ready("endpoint_inventory"), "inventory"),
                                 instant(
-                                    ready("endpoint_attributes"),
+                                    ready_bool("endpoint_inventory"), "inventory"
+                                ),
+                                instant(
+                                    ready_bool("endpoint_attributes"),
                                     "live attributes",
                                     "B",
                                 ),
                                 instant(
-                                    ready("profile_events"),
+                                    ready_bool("profile_events"),
                                     "profile events",
                                     "C",
                                 ),
                             ],
+                            mappings=READINESS,
+                            no_value=NO_DATA_EXPORTER,
                         ),
                         5,
                         8,
@@ -1562,6 +2342,7 @@ def endpoints_dashboard():
                                     "endpoints",
                                 )
                             ],
+                            no_value=NO_DATA_STALE,
                         ),
                         5,
                         8,
@@ -1590,6 +2371,7 @@ def endpoints_dashboard():
                                     "B",
                                 ),
                             ],
+                            no_value=NO_DATA_STALE,
                         ),
                         5,
                         8,
@@ -1622,6 +2404,7 @@ def endpoints_dashboard():
                                     "B",
                                 ),
                             ],
+                            no_value=NO_DATA_STALE,
                         ),
                         5,
                         8,
@@ -1673,6 +2456,9 @@ def endpoints_dashboard():
                                 )
                             ],
                             unit="percentunit",
+                            thresholds=COVERAGE,
+                            minimum=0,
+                            maximum=1,
                         )
                     ),
                     sized(
@@ -1852,6 +2638,7 @@ def endpoints_dashboard():
                                     "{{nad}} · {{location}} · {{ops_owner}}",
                                 )
                             ],
+                            columns=(None,),
                         )
                     ),
                     sized(
@@ -1904,6 +2691,9 @@ def endpoints_dashboard():
                                     "B",
                                 ),
                             ],
+                            thresholds=NONZERO_WARNING,
+                            # Covered NADs are inventory reach, not a finding.
+                            overrides=(by_ref("B", thresholds=NEUTRAL),),
                         ),
                         5,
                         24,
@@ -1927,6 +2717,8 @@ def endpoints_dashboard():
                                     "{{nad}}",
                                 )
                             ],
+                            columns=("age s",),
+                            column_overrides=(by_column("age s", **SECONDS_CELL),),
                         )
                     ),
                     sized(
@@ -1948,6 +2740,7 @@ def endpoints_dashboard():
                                     "{{nad}}",
                                 )
                             ],
+                            columns=("authentications",),
                         )
                     ),
                     sized(
@@ -1976,13 +2769,27 @@ def endpoints_dashboard():
                         stat_panel(
                             "Session attribution coverage",
                             "Session-bearing NADs matched and unmatched against "
-                            "the authoritative network-device directory.",
+                            "the authoritative network-device directory. Unmatched "
+                            "devices carry sessions but no location or ops owner.",
                             [
                                 instant(
-                                    metric("ise3_nad_directory_attributed"),
-                                    "{{matched}}",
-                                )
+                                    metric(
+                                        "ise3_nad_directory_attributed",
+                                        'matched="yes"',
+                                    ),
+                                    "matched",
+                                ),
+                                instant(
+                                    metric(
+                                        "ise3_nad_directory_attributed",
+                                        'matched="no"',
+                                    ),
+                                    "unmatched",
+                                    "B",
+                                ),
                             ],
+                            # Unmatched NADs are a routing gap, matched ones are not.
+                            overrides=(by_ref("B", thresholds=NONZERO_WARNING),),
                         ),
                         5,
                         12,
@@ -2060,6 +2867,13 @@ def health_dashboard():
                                     "D",
                                 ),
                             ],
+                            columns=("enabled", "active", "up", "fresh"),
+                            column_overrides=(
+                                by_column("enabled", **BOOLEAN_CELL),
+                                by_column("active", **BOOLEAN_CELL),
+                                by_column("up", **BOOLEAN_CELL),
+                                by_column("fresh", **BOOLEAN_CELL),
+                            ),
                         )
                     ),
                     sized(
@@ -2076,6 +2890,7 @@ def health_dashboard():
                                     "{{dataset}} · {{provider}} · {{reason}} · {{detail}}",
                                 )
                             ],
+                            columns=(None,),
                         )
                     ),
                     sized(
@@ -2146,6 +2961,7 @@ def health_dashboard():
                                     ref="B",
                                 ),
                             ],
+                            thresholds=NONZERO_CRITICAL,
                         )
                     ),
                     sized(
@@ -2170,6 +2986,8 @@ def health_dashboard():
                                     "B",
                                 ),
                             ],
+                            columns=("available", None),
+                            column_overrides=(by_column("available", **BOOLEAN_CELL),),
                         )
                     ),
                 ),
@@ -2193,6 +3011,12 @@ def health_dashboard():
                                     "B",
                                 ),
                             ],
+                            columns=("recent", "age s"),
+                            sort=("age s", True),
+                            column_overrides=(
+                                by_column("recent", **BOOLEAN_CELL),
+                                by_column("age s", **SECONDS_CELL),
+                            ),
                         )
                     ),
                     sized(
@@ -2202,24 +3026,24 @@ def health_dashboard():
                             "optional columns identify the exact dashboard "
                             "breakdowns this ISE release or account cannot supply.",
                             [
+                                # A union, not two targets: a missing column and
+                                # a missing view are different rows of one gap
+                                # list, and joining them on view would attach a
+                                # missing view to an unrelated column.
                                 instant(
                                     "(1 - "
                                     + metric(
                                         "ise3_dataconnect_schema_column_available"
                                     )
-                                    + ") > 0",
-                                    "{{requirement}} · {{view}}.{{column}}",
-                                ),
-                                instant(
-                                    "(1 - "
+                                    + ") > 0 or (1 - "
                                     + metric(
                                         "ise3_dataconnect_schema_view_available"
                                     )
                                     + ") > 0",
-                                    "missing view · {{view}}",
-                                    "B",
+                                    "{{requirement}} · {{view}}.{{column}}",
                                 ),
                             ],
+                            columns=(None,),
                         )
                     ),
                     sized(
@@ -2320,6 +3144,13 @@ def health_dashboard():
                                     "D",
                                 ),
                             ],
+                            columns=(
+                                "connected", "sessions", "last frame age s", "connections",
+                            ),
+                            column_overrides=(
+                                by_column("connected", **BOOLEAN_CELL),
+                                by_column("last frame age s", **SECONDS_CELL),
+                            ),
                         )
                     ),
                     sized(
@@ -2448,6 +3279,9 @@ def health_dashboard():
                                 )
                             ],
                             unit="percentunit",
+                            thresholds=COVERAGE,
+                            minimum=0,
+                            maximum=1,
                         )
                     ),
                     sized(
@@ -2534,6 +3368,7 @@ def health_dashboard():
                                     "C",
                                 ),
                             ],
+                            overrides=(by_ref("C", thresholds=NONZERO_WARNING),),
                         )
                     ),
                     sized(
@@ -2563,6 +3398,7 @@ def health_dashboard():
                                     "{{version}} · ISE {{target_ise_release}}",
                                 )
                             ],
+                            columns=(None,),
                         ),
                         5,
                         12,
@@ -2592,19 +3428,29 @@ def psn_dashboard():
                         stat_panel(
                             "Dataset readiness",
                             "Freshness of deployment, performance, session, "
-                            "reporting, accounting, and error datasets used here.",
+                            "reporting, accounting, and error datasets used here. "
+                            "NOT READY means the panels fed by that dataset stay "
+                            "blank.",
                             [
-                                instant(ready("deployment"), "deployment"),
-                                instant(ready("psn_performance"), "performance", "B"),
-                                instant(ready("active_sessions"), "sessions", "C"),
-                                instant(ready("radius_reporting"), "RADIUS", "D"),
-                                instant(ready("radius_errors"), "errors", "E"),
+                                instant(ready_bool("deployment"), "deployment"),
                                 instant(
-                                    ready("radius_accounting"),
+                                    ready_bool("psn_performance"), "performance", "B"
+                                ),
+                                instant(
+                                    ready_bool("active_sessions"), "sessions", "C"
+                                ),
+                                instant(
+                                    ready_bool("radius_reporting"), "RADIUS", "D"
+                                ),
+                                instant(ready_bool("radius_errors"), "errors", "E"),
+                                instant(
+                                    ready_bool("radius_accounting"),
                                     "accounting",
                                     "F",
                                 ),
                             ],
+                            mappings=READINESS,
+                            no_value=NO_DATA_EXPORTER,
                         ),
                         5,
                         24,
@@ -2717,6 +3563,10 @@ def psn_dashboard():
                                     "B",
                                 ),
                             ],
+                            thresholds=NONZERO_CRITICAL,
+                            # A diagnostic gap narrows coverage, it does not
+                            # fail performance collection.
+                            overrides=(by_ref("B", thresholds=NONZERO_WARNING),),
                         ),
                         5,
                         12,
@@ -2822,20 +3672,48 @@ def psn_dashboard():
                         )
                     ),
                     sized(
-                        bar(
-                            "RADIUS error codes",
-                            "ISE message-code distribution for the current error "
-                            "window while troubleshooting the selected PSN scope.",
+                        ts(
+                            "RADIUS errors by PSN over time",
+                            "When did this PSN start failing: the same per-PSN "
+                            "error volume as the bar beside it, plotted over "
+                            "time. It separates a PSN that has always been noisy "
+                            "from one that broke at a specific moment.",
                             [
-                                instant(
-                                    "sort_desc(sum by (message_code) ("
+                                query(
+                                    "sum by (psn) ("
                                     + gate(
                                         metric(
-                                            "ise3_radius_errors_by_message_code"
+                                            "ise3_radius_errors_by_psn",
+                                            'psn=~"$node"',
                                         ),
                                         "radius_errors",
                                     )
-                                    + "))",
+                                    + ")",
+                                    "{{psn}}",
+                                )
+                            ],
+                        )
+                    ),
+                    sized(
+                        bar(
+                            "RADIUS error codes",
+                            "ISE message-code distribution for the current error "
+                            "window while troubleshooting the selected PSN scope."
+                            + NAMED_CODES_NOTE,
+                            [
+                                instant(
+                                    "sort_desc("
+                                    + named_codes(
+                                        "sum by (message_code) ("
+                                        + gate(
+                                            metric(
+                                                "ise3_radius_errors_by_message_code"
+                                            ),
+                                            "radius_errors",
+                                        )
+                                        + ")"
+                                    )
+                                    + ")",
                                     "{{message_code}}",
                                 )
                             ],
@@ -2925,6 +3803,16 @@ def psn_dashboard():
                                 ),
                             ],
                             unit="s",
+                            # Coverage is a fraction, not a latency.
+                            overrides=(
+                                by_ref(
+                                    "B",
+                                    unit="percentunit",
+                                    thresholds=COVERAGE,
+                                    minimum=0,
+                                    maximum=1,
+                                ),
+                            ),
                         )
                     ),
                 ),
@@ -2947,6 +3835,9 @@ def psn_dashboard():
                                 )
                             ],
                             unit="percent",
+                            thresholds=UTILISATION,
+                            minimum=0,
+                            maximum=100,
                         )
                     ),
                     sized(
@@ -2964,6 +3855,9 @@ def psn_dashboard():
                                 )
                             ],
                             unit="percent",
+                            thresholds=UTILISATION,
+                            minimum=0,
+                            maximum=100,
                         )
                     ),
                     sized(
@@ -2981,6 +3875,9 @@ def psn_dashboard():
                                 )
                             ],
                             unit="percent",
+                            thresholds=UTILISATION,
+                            minimum=0,
+                            maximum=100,
                         )
                     ),
                     sized(
@@ -3000,6 +3897,9 @@ def psn_dashboard():
                                 )
                             ],
                             unit="percent",
+                            thresholds=UTILISATION,
+                            minimum=0,
+                            maximum=100,
                         )
                     ),
                     sized(
@@ -3049,6 +3949,7 @@ def psn_dashboard():
                                     "{{node}} · {{roles}} · {{state}}",
                                 )
                             ],
+                            columns=(None,),
                         )
                     ),
                     sized(
@@ -3073,6 +3974,12 @@ def psn_dashboard():
                                     "B",
                                 ),
                             ],
+                            columns=("recent", "age s"),
+                            sort=("age s", True),
+                            column_overrides=(
+                                by_column("recent", **BOOLEAN_CELL),
+                                by_column("age s", **SECONDS_CELL),
+                            ),
                         )
                     ),
                     sized(
@@ -3092,6 +3999,7 @@ def psn_dashboard():
                                     "{{category}} · {{message_code}}",
                                 )
                             ],
+                            columns=("events",),
                         )
                     ),
                     sized(
@@ -3131,6 +4039,10 @@ def pan_mnt_dashboard():
     node = label_variable(
         "node", "PAN or MnT node", "ise3_deployment_node_state", "node"
     )
+    # A PSN named here is answered on the PSN dashboard, not this one.
+    psn_drilldown = drilldown(
+        "This node on PSN troubleshooting", "ise3-psn", node=by_series("psn")
+    )
     return assemble(
         "ISE 3 — PAN and MnT Troubleshooting",
         "ise3-pan-mnt",
@@ -3144,15 +4056,24 @@ def pan_mnt_dashboard():
                         stat_panel(
                             "Core dataset readiness",
                             "Freshness of deployment, performance, backup, "
-                            "certificates, patches, and current-posture data.",
+                            "certificates, patches, and current-posture data. NOT "
+                            "READY means the panels fed by that dataset stay blank.",
                             [
-                                instant(ready("deployment"), "deployment"),
-                                instant(ready("psn_performance"), "performance", "B"),
-                                instant(ready("backup"), "backup", "C"),
-                                instant(ready("certificates"), "certificates", "D"),
-                                instant(ready("patches"), "patches", "E"),
-                                instant(ready("posture_current"), "posture", "F"),
+                                instant(ready_bool("deployment"), "deployment"),
+                                instant(
+                                    ready_bool("psn_performance"), "performance", "B"
+                                ),
+                                instant(ready_bool("backup"), "backup", "C"),
+                                instant(
+                                    ready_bool("certificates"), "certificates", "D"
+                                ),
+                                instant(ready_bool("patches"), "patches", "E"),
+                                instant(
+                                    ready_bool("posture_current"), "posture", "F"
+                                ),
                             ],
+                            mappings=READINESS,
+                            no_value=NO_DATA_EXPORTER,
                         ),
                         5,
                         24,
@@ -3240,6 +4161,7 @@ def pan_mnt_dashboard():
                                     "{{node}} · {{roles}} · {{state}}",
                                 )
                             ],
+                            columns=(None,),
                         )
                     ),
                     sized(
@@ -3256,6 +4178,8 @@ def pan_mnt_dashboard():
                                     "{{node}} · {{service}}",
                                 )
                             ],
+                            columns=("enabled",),
+                            column_overrides=(by_column("enabled", **BOOLEAN_CELL),),
                         )
                     ),
                     sized(
@@ -3279,6 +4203,20 @@ def pan_mnt_dashboard():
                                     "C",
                                 ),
                             ],
+                            # Two booleans and an age share one field config.
+                            overrides=(
+                                by_ref("A", mappings=YES_NO),
+                                by_ref(
+                                    "B",
+                                    mappings=CONFIGURED,
+                                    thresholds=REQUIRED_BOOLEAN,
+                                ),
+                                by_ref(
+                                    "C",
+                                    unit="h",
+                                    thresholds=BACKUP_AGE_HOURS,
+                                ),
+                            ),
                         ),
                         5,
                         12,
@@ -3301,6 +4239,10 @@ def pan_mnt_dashboard():
                                     "C",
                                 ),
                             ],
+                            overrides=(
+                                by_ref("B", thresholds=NONZERO_CRITICAL),
+                                by_ref("C", thresholds=NONZERO_WARNING),
+                            ),
                         ),
                         5,
                         12,
@@ -3321,6 +4263,7 @@ def pan_mnt_dashboard():
                                     "{{node}} · {{store}} · {{certificate}}",
                                 )
                             ],
+                            columns=("days to expiry",),
                         )
                     ),
                 ),
@@ -3400,6 +4343,7 @@ def pan_mnt_dashboard():
                                     "{{psn}}",
                                 )
                             ],
+                            data_links=(psn_drilldown,),
                         )
                     ),
                     sized(
@@ -3420,6 +4364,7 @@ def pan_mnt_dashboard():
                                     "{{psn}} · {{status}}",
                                 )
                             ],
+                            data_links=(psn_drilldown,),
                         )
                     ),
                 ),
@@ -3458,6 +4403,9 @@ def pan_mnt_dashboard():
                                 ),
                             ],
                             unit="percent",
+                            thresholds=UTILISATION,
+                            minimum=0,
+                            maximum=100,
                         )
                     ),
                     sized(
@@ -3477,6 +4425,9 @@ def pan_mnt_dashboard():
                                 )
                             ],
                             unit="percent",
+                            thresholds=UTILISATION,
+                            minimum=0,
+                            maximum=100,
                         )
                     ),
                     sized(
@@ -3525,6 +4476,7 @@ def pan_mnt_dashboard():
                                     "{{dataset}} · {{provider}} · {{reason}} · {{detail}}",
                                 )
                             ],
+                            columns=(None,),
                         )
                     ),
                     sized(
@@ -3615,6 +4567,7 @@ def pan_mnt_dashboard():
                                     "{{category}} · {{message_code}}",
                                 )
                             ],
+                            columns=("events",),
                         )
                     ),
                 ),
@@ -3662,11 +4615,16 @@ def secureclient_dashboard():
                         stat_panel(
                             "Posture dataset readiness",
                             "Availability and freshness of current MnT posture and "
-                            "historical Data Connect assessment datasets.",
+                            "historical Data Connect assessment datasets. NOT READY "
+                            "means the panels fed by that dataset stay blank.",
                             [
-                                instant(ready("posture_current"), "current"),
-                                instant(ready("posture_history"), "history", "B"),
+                                instant(ready_bool("posture_current"), "current"),
+                                instant(
+                                    ready_bool("posture_history"), "history", "B"
+                                ),
                             ],
+                            mappings=READINESS,
+                            no_value=NO_DATA_EXPORTER,
                         ),
                         5,
                         8,
@@ -3685,6 +4643,9 @@ def secureclient_dashboard():
                                 )
                             ],
                             unit="percentunit",
+                            thresholds=RATIO_HIGH_IS_GOOD,
+                            minimum=0,
+                            maximum=1,
                         ),
                         5,
                         8,
@@ -3729,6 +4690,7 @@ def secureclient_dashboard():
                                     "non-compliant",
                                 )
                             ],
+                            thresholds=NONZERO_WARNING,
                         ),
                         5,
                         8,
@@ -3795,6 +4757,9 @@ def secureclient_dashboard():
                                 )
                             ],
                             unit="percentunit",
+                            thresholds=COVERAGE,
+                            minimum=0,
+                            maximum=1,
                         )
                     ),
                     sized(
@@ -3805,7 +4770,7 @@ def secureclient_dashboard():
                             [
                                 instant(
                                     "sort_desc(sum by (agent_version) "
-                                    f"({gate(metric('ise3_posture_agent_version_endpoints'), 'posture_current')}))",
+                                    f"({covered(metric('ise3_posture_agent_version_endpoints'), 'posture_current', 'mnt_session_detail')}))",
                                     "{{agent_version}}",
                                 )
                             ],
@@ -3819,7 +4784,7 @@ def secureclient_dashboard():
                             [
                                 instant(
                                     "sort_desc(sum by (os) "
-                                    f"({gate(metric('ise3_posture_endpoints_by_os'), 'posture_current')}))",
+                                    f"({covered(metric('ise3_posture_endpoints_by_os'), 'posture_current', 'mnt_session_detail')}))",
                                     "{{os}}",
                                 )
                             ],
@@ -3833,7 +4798,7 @@ def secureclient_dashboard():
                             [
                                 instant(
                                     "sort_desc(sum by (policy,result) "
-                                    f"({gate(metric('ise3_posture_policy_results'), 'posture_current')}))",
+                                    f"({covered(metric('ise3_posture_policy_results'), 'posture_current', 'mnt_session_detail')}))",
                                     "{{policy}} · {{result}}",
                                 )
                             ],
@@ -3848,12 +4813,13 @@ def secureclient_dashboard():
                                 instant(
                                     "sort_desc(sum by (policy) "
                                     "("
-                                    + gate(
+                                    + covered(
                                         metric(
                                             "ise3_posture_policy_results",
                                             'result=~"(?i)fail(ed)?|error"',
                                         ),
                                         "posture_current",
+                                        "mnt_session_detail",
                                     )
                                     + "))",
                                     "{{policy}}",
@@ -3913,6 +4879,9 @@ def secureclient_dashboard():
                                 )
                             ],
                             unit="percentunit",
+                            thresholds=RATIO_HIGH_IS_GOOD,
+                            minimum=0,
+                            maximum=1,
                         )
                     ),
                     sized(
@@ -3949,6 +4918,9 @@ def secureclient_dashboard():
                                 )
                             ],
                             unit="percentunit",
+                            thresholds=RATIO_HIGH_IS_GOOD,
+                            minimum=0,
+                            maximum=1,
                         ),
                         5,
                         12,
@@ -4000,6 +4972,7 @@ def secureclient_dashboard():
                                     "C",
                                 ),
                             ],
+                            overrides=(by_ref("B", thresholds=NONZERO_WARNING),),
                         ),
                         5,
                         12,
@@ -4023,6 +4996,9 @@ def secureclient_dashboard():
                                 )
                             ],
                             unit="percentunit",
+                            thresholds=COVERAGE,
+                            minimum=0,
+                            maximum=1,
                         ),
                         5,
                         12,
@@ -4067,6 +5043,7 @@ def secureclient_dashboard():
                                     "{{condition}}",
                                 )
                             ],
+                            columns=("endpoints",),
                         )
                     ),
                     sized(
@@ -4141,8 +5118,12 @@ def secureclient_dashboard():
                             "Failed policy and condition evidence for prioritising "
                             "posture remediation without storing endpoint rows.",
                             [
+                                # A union, not two targets: a failed policy and
+                                # a failed condition are separate rows of one
+                                # queue. They share no key, so joining them
+                                # would pair unrelated evidence on one row.
                                 instant(
-                                    "sort_desc("
+                                    "sort_desc(("
                                     + gate(
                                         metric(
                                             "ise3_posture_assessments_by_policy",
@@ -4150,22 +5131,18 @@ def secureclient_dashboard():
                                         ),
                                         "posture_history",
                                     )
-                                    + ")",
-                                    "{{policy}} · {{status}}",
-                                ),
-                                instant(
-                                    "sort_desc("
+                                    + ") or ("
                                     + gate(
                                         metric(
                                             "ise3_posture_failed_conditions"
                                         ),
                                         "posture_history",
                                     )
-                                    + ")",
-                                    "{{condition}}",
-                                    "B",
+                                    + "))",
+                                    "{{policy}} · {{status}} · {{condition}}",
                                 ),
                             ],
+                            columns=("endpoints",),
                         )
                     ),
                 ),
@@ -4196,16 +5173,23 @@ def tacacs_dashboard():
                         stat_panel(
                             "Dataset readiness",
                             "Freshness of TACACS configuration and historical "
-                            "activity datasets used by this workflow.",
+                            "activity datasets used by this workflow. NOT READY "
+                            "means the panels fed by that dataset stay blank.",
                             [
-                                instant(ready("tacacs_config"), "configuration"),
-                                instant(ready("tacacs_activity"), "activity", "B"),
                                 instant(
-                                    ready("tacacs_policy_rules"),
+                                    ready_bool("tacacs_config"), "configuration"
+                                ),
+                                instant(
+                                    ready_bool("tacacs_activity"), "activity", "B"
+                                ),
+                                instant(
+                                    ready_bool("tacacs_policy_rules"),
                                     "policy rules",
                                     "C",
                                 ),
                             ],
+                            mappings=READINESS,
+                            no_value=NO_DATA_EXPORTER,
                         ),
                         5,
                         8,
@@ -4347,6 +5331,7 @@ def tacacs_dashboard():
                                     "{{policy_set}} · {{rule_type}}",
                                 )
                             ],
+                            columns=("rules",),
                         )
                     ),
                     sized(
@@ -4363,6 +5348,8 @@ def tacacs_dashboard():
                                     "{{username}}",
                                 )
                             ],
+                            columns=("enabled",),
+                            column_overrides=(by_column("enabled", **BOOLEAN_CELL),),
                         )
                     ),
                     sized(
@@ -4379,6 +5366,13 @@ def tacacs_dashboard():
                                     "{{username}} · {{risk}}",
                                 )
                             ],
+                            columns=("flagged",),
+                            column_overrides=(
+                                by_column(
+                                    "flagged", mappings=RISK, thresholds=NONZERO_CRITICAL,
+                                    colour_cells=True,
+                                ),
+                            ),
                         )
                     ),
                     sized(
@@ -4402,6 +5396,7 @@ def tacacs_dashboard():
                                     "{{username}}",
                                 )
                             ],
+                            columns=(None,),
                         )
                     ),
                     sized(
@@ -4420,6 +5415,8 @@ def tacacs_dashboard():
                                     "{{username}} · {{event_type}}",
                                 )
                             ],
+                            columns=("age s",),
+                            column_overrides=(by_column("age s", **SECONDS_CELL),),
                         )
                     ),
                     sized(
@@ -4636,6 +5633,7 @@ def tacacs_dashboard():
                                     "{{shell_profile}} · {{command_set}} · {{status}}",
                                 )
                             ],
+                            columns=("authorizations",),
                         ),
                         10,
                         24,
@@ -4747,6 +5745,14 @@ def tacacs_dashboard():
                                     "C",
                                 ),
                             ],
+                            columns=("published", "total", "truncated"),
+                            column_overrides=(
+                                by_column(
+                                    "truncated", mappings=TRUNCATED,
+                                    thresholds=NONZERO_WARNING,
+                                    colour_cells=True,
+                                ),
+                            ),
                         )
                     ),
                     sized(
@@ -4796,6 +5802,7 @@ def sources_dashboard():
                                     "{{dataset}} · {{provider}}",
                                 )
                             ],
+                            columns=(None,),
                         ),
                         9,
                         12,
@@ -4820,6 +5827,7 @@ def sources_dashboard():
                                     ref="B",
                                 ),
                             ],
+                            thresholds=NONZERO_CRITICAL,
                         ),
                         9,
                         12,
@@ -4843,6 +5851,7 @@ def sources_dashboard():
                                     "{{dataset}} · {{provider}} · {{reason}}",
                                 )
                             ],
+                            columns=(None,),
                         )
                     ),
                     sized(
@@ -4859,6 +5868,7 @@ def sources_dashboard():
                                     "{{dataset}} · {{provider}}",
                                 )
                             ],
+                            columns=(None,),
                         )
                     ),
                 ),
@@ -4882,6 +5892,11 @@ def sources_dashboard():
                                     "B",
                                 ),
                             ],
+                            columns=("up", "fresh"),
+                            column_overrides=(
+                                by_column("up", **BOOLEAN_CELL),
+                                by_column("fresh", **BOOLEAN_CELL),
+                            ),
                         )
                     ),
                     sized(
@@ -4898,6 +5913,7 @@ def sources_dashboard():
                                     "{{dataset}} · {{reason}} · {{detail}}",
                                 )
                             ],
+                            columns=(None,),
                         )
                     ),
                 ),
@@ -4929,6 +5945,8 @@ def load_dashboard():
                                 )
                             ],
                             unit="percentunit",
+                            thresholds=BUDGET_USED,
+                            minimum=0,
                         ),
                         5,
                         24,

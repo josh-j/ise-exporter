@@ -1,5 +1,50 @@
 {
-  "annotations": {},
+  "annotations": {
+    "list": [
+      {
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${prometheus}"
+        },
+        "enable": true,
+        "expr": "changes(ise3_dataset_provider_active{instance=~\"$deployment\"}[5m]) > 0",
+        "hide": false,
+        "iconColor": "purple",
+        "name": "Provider changed",
+        "step": "1m",
+        "textFormat": "{{dataset}} is now served by {{provider}}",
+        "titleFormat": "Provider changed: {{dataset}}"
+      },
+      {
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${prometheus}"
+        },
+        "enable": true,
+        "expr": "max by (instance,node) (changes(ise3_deployment_node_state{instance=~\"$deployment\"}[10m])) > 0",
+        "hide": false,
+        "iconColor": "orange",
+        "name": "Node state changed",
+        "step": "1m",
+        "textFormat": "{{node}} changed deployment state",
+        "titleFormat": "Node state changed: {{node}}"
+      },
+      {
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${prometheus}"
+        },
+        "enable": true,
+        "expr": "changes(ise3_exporter_build_info{instance=~\"$deployment\"}[15m]) > 0",
+        "hide": false,
+        "iconColor": "blue",
+        "name": "Exporter build changed",
+        "step": "1m",
+        "textFormat": "exporter {{version}} targeting ISE {{target_ise_release}}",
+        "titleFormat": "Exporter build changed"
+      }
+    ]
+  },
   "description": "Administrative and monitoring-node state, services, backup, certificates, posture cache, node resources, and collector failures.",
   "editable": true,
   "fiscalYearStartMonth": 0,
@@ -39,9 +84,27 @@
         "type": "prometheus",
         "uid": "${prometheus}"
       },
-      "description": "Freshness of deployment, performance, backup, certificates, patches, and current-posture data.",
+      "description": "Freshness of deployment, performance, backup, certificates, patches, and current-posture data. NOT READY means the panels fed by that dataset stay blank.",
       "fieldConfig": {
         "defaults": {
+          "mappings": [
+            {
+              "options": {
+                "0": {
+                  "color": "red",
+                  "index": 1,
+                  "text": "NOT READY"
+                },
+                "1": {
+                  "color": "green",
+                  "index": 0,
+                  "text": "OK"
+                }
+              },
+              "type": "value"
+            }
+          ],
+          "noValue": "no data \u2014 exporter absent?",
           "unit": "short"
         },
         "overrides": []
@@ -56,42 +119,42 @@
       "repeatDirection": "h",
       "targets": [
         {
-          "expr": "((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"deployment\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"deployment\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"deployment\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"deployment\"} == 1))) == 1)",
+          "expr": "((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"deployment\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"deployment\"} == 1))) == bool 1) * ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"deployment\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"deployment\"} == 1))) == bool 1)",
           "instant": true,
           "legendFormat": "deployment",
           "range": false,
           "refId": "A"
         },
         {
-          "expr": "((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"psn_performance\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"psn_performance\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"psn_performance\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"psn_performance\"} == 1))) == 1)",
+          "expr": "((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"psn_performance\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"psn_performance\"} == 1))) == bool 1) * ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"psn_performance\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"psn_performance\"} == 1))) == bool 1)",
           "instant": true,
           "legendFormat": "performance",
           "range": false,
           "refId": "B"
         },
         {
-          "expr": "((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"backup\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"backup\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"backup\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"backup\"} == 1))) == 1)",
+          "expr": "((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"backup\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"backup\"} == 1))) == bool 1) * ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"backup\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"backup\"} == 1))) == bool 1)",
           "instant": true,
           "legendFormat": "backup",
           "range": false,
           "refId": "C"
         },
         {
-          "expr": "((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"certificates\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"certificates\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"certificates\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"certificates\"} == 1))) == 1)",
+          "expr": "((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"certificates\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"certificates\"} == 1))) == bool 1) * ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"certificates\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"certificates\"} == 1))) == bool 1)",
           "instant": true,
           "legendFormat": "certificates",
           "range": false,
           "refId": "D"
         },
         {
-          "expr": "((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"patches\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"patches\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"patches\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"patches\"} == 1))) == 1)",
+          "expr": "((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"patches\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"patches\"} == 1))) == bool 1) * ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"patches\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"patches\"} == 1))) == bool 1)",
           "instant": true,
           "legendFormat": "patches",
           "range": false,
           "refId": "E"
         },
         {
-          "expr": "((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"posture_current\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"posture_current\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"posture_current\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"posture_current\"} == 1))) == 1)",
+          "expr": "((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"posture_current\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"posture_current\"} == 1))) == bool 1) * ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"posture_current\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"posture_current\"} == 1))) == bool 1)",
           "instant": true,
           "legendFormat": "posture",
           "range": false,
@@ -213,6 +276,7 @@
       "targets": [
         {
           "expr": "ise3_deployment_node_state{instance=~\"$deployment\",node=~\"$node\",state=~\".*\"} == 1",
+          "format": "table",
           "instant": true,
           "legendFormat": "{{node}} \u00b7 {{roles}} \u00b7 {{state}}",
           "range": false,
@@ -220,7 +284,21 @@
         }
       ],
       "title": "PAN and MnT node state",
-      "transformations": [],
+      "transformations": [
+        {
+          "id": "filterFieldsByName",
+          "options": {
+            "exclude": {
+              "names": [
+                "Time",
+                "__name__",
+                "job",
+                "Value"
+              ]
+            }
+          }
+        }
+      ],
       "transparent": false,
       "type": "table"
     },
@@ -232,7 +310,59 @@
       "description": "Explicit services enabled on each selected administrative or monitoring node.",
       "fieldConfig": {
         "defaults": {},
-        "overrides": []
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "enabled"
+            },
+            "properties": [
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "red",
+                      "value": null
+                    },
+                    {
+                      "color": "green",
+                      "value": 1
+                    }
+                  ]
+                }
+              },
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "options": {
+                      "0": {
+                        "color": "red",
+                        "index": 1,
+                        "text": "No"
+                      },
+                      "1": {
+                        "color": "green",
+                        "index": 0,
+                        "text": "Yes"
+                      }
+                    },
+                    "type": "value"
+                  }
+                ]
+              },
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "mode": "basic",
+                  "type": "color-background"
+                }
+              }
+            ]
+          }
+        ]
       },
       "gridPos": {
         "h": 8,
@@ -245,6 +375,7 @@
       "targets": [
         {
           "expr": "ise3_deployment_node_service_enabled{instance=~\"$deployment\",node=~\"$node\"}",
+          "format": "table",
           "instant": true,
           "legendFormat": "{{node}} \u00b7 {{service}}",
           "range": false,
@@ -252,7 +383,28 @@
         }
       ],
       "title": "Node service assignments",
-      "transformations": [],
+      "transformations": [
+        {
+          "id": "filterFieldsByName",
+          "options": {
+            "exclude": {
+              "names": [
+                "Time",
+                "__name__",
+                "job"
+              ]
+            }
+          }
+        },
+        {
+          "id": "organize",
+          "options": {
+            "renameByName": {
+              "Value": "enabled"
+            }
+          }
+        }
+      ],
       "transparent": false,
       "type": "table"
     },
@@ -266,7 +418,112 @@
         "defaults": {
           "unit": "short"
         },
-        "overrides": []
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byFrameRefID",
+              "options": "A"
+            },
+            "properties": [
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "options": {
+                      "0": {
+                        "color": "orange",
+                        "index": 1,
+                        "text": "No"
+                      },
+                      "1": {
+                        "color": "green",
+                        "index": 0,
+                        "text": "Yes"
+                      }
+                    },
+                    "type": "value"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byFrameRefID",
+              "options": "B"
+            },
+            "properties": [
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "red",
+                      "value": null
+                    },
+                    {
+                      "color": "green",
+                      "value": 1
+                    }
+                  ]
+                }
+              },
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "options": {
+                      "0": {
+                        "color": "red",
+                        "index": 1,
+                        "text": "Not configured"
+                      },
+                      "1": {
+                        "color": "green",
+                        "index": 0,
+                        "text": "Configured"
+                      }
+                    },
+                    "type": "value"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byFrameRefID",
+              "options": "C"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "h"
+              },
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "green",
+                      "value": null
+                    },
+                    {
+                      "color": "orange",
+                      "value": 26
+                    },
+                    {
+                      "color": "red",
+                      "value": 50
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        ]
       },
       "gridPos": {
         "h": 5,
@@ -314,7 +571,56 @@
         "defaults": {
           "unit": "short"
         },
-        "overrides": []
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byFrameRefID",
+              "options": "B"
+            },
+            "properties": [
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "green",
+                      "value": null
+                    },
+                    {
+                      "color": "red",
+                      "value": 1
+                    }
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byFrameRefID",
+              "options": "C"
+            },
+            "properties": [
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "green",
+                      "value": null
+                    },
+                    {
+                      "color": "orange",
+                      "value": 1
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        ]
       },
       "gridPos": {
         "h": 5,
@@ -373,6 +679,7 @@
       "targets": [
         {
           "expr": "sort(ise3_certificate_expiry_days{instance=~\"$deployment\",node=~\"$node\"})",
+          "format": "table",
           "instant": true,
           "legendFormat": "{{node}} \u00b7 {{store}} \u00b7 {{certificate}}",
           "range": false,
@@ -380,7 +687,28 @@
         }
       ],
       "title": "Core-node certificate expiry",
-      "transformations": [],
+      "transformations": [
+        {
+          "id": "filterFieldsByName",
+          "options": {
+            "exclude": {
+              "names": [
+                "Time",
+                "__name__",
+                "job"
+              ]
+            }
+          }
+        },
+        {
+          "id": "organize",
+          "options": {
+            "renameByName": {
+              "Value": "days to expiry"
+            }
+          }
+        }
+      ],
       "transparent": false,
       "type": "table"
     },
@@ -531,6 +859,13 @@
       "description": "Current active-session distribution across serving policy service nodes.",
       "fieldConfig": {
         "defaults": {
+          "links": [
+            {
+              "targetBlank": false,
+              "title": "This node on PSN troubleshooting",
+              "url": "/d/ise3-psn?${__url_time_range}&${deployment:queryparam}&var-node=${__field.labels.psn}"
+            }
+          ],
           "unit": "short"
         },
         "overrides": []
@@ -575,6 +910,13 @@
       "description": "Distinct active endpoints by serving policy service node and current posture state.",
       "fieldConfig": {
         "defaults": {
+          "links": [
+            {
+              "targetBlank": false,
+              "title": "This node on PSN troubleshooting",
+              "url": "/d/ise3-psn?${__url_time_range}&${deployment:queryparam}&var-node=${__field.labels.psn}"
+            }
+          ],
           "unit": "short"
         },
         "overrides": []
@@ -633,7 +975,29 @@
       "fieldConfig": {
         "defaults": {
           "custom": {
-            "fillOpacity": 0
+            "fillOpacity": 0,
+            "thresholdsStyle": {
+              "mode": "dashed"
+            }
+          },
+          "max": 100,
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 80
+              },
+              {
+                "color": "red",
+                "value": 90
+              }
+            ]
           },
           "unit": "percent"
         },
@@ -697,6 +1061,25 @@
       "description": "Filesystem utilisation for selected core nodes, sorted to surface capacity risk.",
       "fieldConfig": {
         "defaults": {
+          "max": 100,
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 80
+              },
+              {
+                "color": "red",
+                "value": 90
+              }
+            ]
+          },
           "unit": "percent"
         },
         "overrides": []
@@ -819,6 +1202,7 @@
       "targets": [
         {
           "expr": "ise3_dataset_last_failure_detail_info{instance=~\"$deployment\",dataset=~\"deployment|backup|certificates|patches|posture_current|psn_performance\"}",
+          "format": "table",
           "instant": true,
           "legendFormat": "{{dataset}} \u00b7 {{provider}} \u00b7 {{reason}} \u00b7 {{detail}}",
           "range": false,
@@ -826,7 +1210,21 @@
         }
       ],
       "title": "PAN and MnT failure work queue",
-      "transformations": [],
+      "transformations": [
+        {
+          "id": "filterFieldsByName",
+          "options": {
+            "exclude": {
+              "names": [
+                "Time",
+                "__name__",
+                "job",
+                "Value"
+              ]
+            }
+          }
+        }
+      ],
       "transparent": false,
       "type": "table"
     },
@@ -1041,6 +1439,7 @@
       "targets": [
         {
           "expr": "sort_desc(ise3_psn_diagnostic_events{instance=~\"$deployment\",node=~\"$node\"})",
+          "format": "table",
           "instant": true,
           "legendFormat": "{{node}} \u00b7 {{source}} \u00b7 {{severity}} \u00b7 {{category}} \u00b7 {{message_code}}",
           "range": false,
@@ -1048,7 +1447,28 @@
         }
       ],
       "title": "PAN and MnT diagnostic work queue",
-      "transformations": [],
+      "transformations": [
+        {
+          "id": "filterFieldsByName",
+          "options": {
+            "exclude": {
+              "names": [
+                "Time",
+                "__name__",
+                "job"
+              ]
+            }
+          }
+        },
+        {
+          "id": "organize",
+          "options": {
+            "renameByName": {
+              "Value": "events"
+            }
+          }
+        }
+      ],
       "transparent": false,
       "type": "table"
     }
