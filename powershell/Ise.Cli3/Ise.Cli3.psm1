@@ -766,21 +766,29 @@ function Get-IseDcEndpoint {
     .SYNOPSIS
     The endpoint database: MAC, profile, and identity group.
     .DESCRIPTION
-    Current state rather than history -- this view has no time column, so there
-    is no -Last. It is also the largest view on a real deployment (tens of
-    thousands of rows against a few dozen sessions), so -First matters here more
-    than anywhere else.
+    Current state rather than history: without -Last it returns the whole
+    database (up to -First), and it is the largest view on a real deployment --
+    tens of thousands of rows against a few dozen sessions -- so -First matters
+    here more than anywhere else. With -Last it narrows to endpoints whose row
+    changed inside the window (bounded on UPDATE_TIME, newest first), which is
+    the "what changed lately" question rather than a smaller copy of the same
+    list.
     .PARAMETER Mac
     MAC address; wildcards accepted.
     .PARAMETER Policy
     Endpoint policy (the profile); wildcards accepted.
+    .PARAMETER Last
+    Only endpoints updated inside this window: 30m, 2h, 1d.
     .EXAMPLE
     Get-IseDcEndpoint -Policy 'Cisco-IP-Phone*' -First 500
+    .EXAMPLE
+    Get-IseDcEndpoint -Last 1h
     #>
     [CmdletBinding()]
     param(
         [string]$Mac,
         [string]$Policy,
+        [string]$Last,
         [int]$First,
         [string[]]$Column,
         [switch]$Wait,

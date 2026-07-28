@@ -79,6 +79,18 @@ def recent_epoch(column, hours, limits):
             f"* 86400 - {hours * 3600}")
 
 
+def recent_zoned(column, hours, limits):
+    """The same bound for a TIMESTAMP WITH TIME ZONE column.
+
+    No CAST on either side: SYSTIMESTAMP is already zoned, and stripping the
+    zone from the column would compare wall-clock digits across offsets rather
+    than instants. The zoned trouble is in *fetching* such a column (DPY-3022),
+    not in comparing against it, so the WHERE clause keeps the raw name.
+    """
+    hours = max(1, min(limits.window_hours, int(hours)))
+    return f"{column} >= SYSTIMESTAMP - NUMTODSINTERVAL({hours}, 'HOUR')"
+
+
 def group_limit(limits, limit=0):
     """Resolve a statement's row limit against the declared group ceiling.
 

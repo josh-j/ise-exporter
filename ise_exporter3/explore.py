@@ -98,6 +98,12 @@ class View:
     # raw (DPY-3022, docs/DATASETS_FACTS 5.1). Projected through a CAST the way
     # source_freshness does, so they are readable rather than a 502.
     zoned_columns: tuple = ()
+    # An event view is always window-bounded -- that bound is what keeps a scan
+    # of an 80 GB history cheap. A current-state view sets this instead: its
+    # time column says when a row last changed, so a window is a filter the
+    # operator may ask for, never a default that would silently hide the rows
+    # that have not changed lately.
+    window_optional: bool = False
 
 
 def _catalog(*views):
@@ -238,13 +244,14 @@ VIEW_CATALOG = _catalog(
         name="endpoints_data",
         view="ENDPOINTS_DATA",
         description="the endpoint database: one current row per known endpoint",
-        # Current state, not events: UPDATE_TIME says when a row last changed,
-        # which is not a window an event query can scan.
+        time_column="UPDATE_TIME",
+        time_kind="tstz",
         default_columns=(
             "MAC_ADDRESS", "ENDPOINT_POLICY", "IDENTITY_GROUP_ID",
             "POSTURE_APPLICABLE", "UPDATE_TIME",
         ),
         zoned_columns=("UPDATE_TIME", "CREATE_TIME", "REG_TIMESTAMP"),
+        window_optional=True,
     ),
     View(
         name="system_summary",
@@ -547,8 +554,10 @@ def build_query(request, catalog_columns, limits):
         raise _invalid(
             f"{entry.view} has no event time column, so last cannot bound it")
 
+    windowed = bool(time_column) and (
+        request.window_requested or not entry.window_optional)
     binds, where = {}, []
-    if time_column:
+    if windowed:
         hours = request.hours or limits.window_hours
         where.append(window_bound(time_column, hours, limits, entry.time_kind))
     for column, value in request.equals:
@@ -570,8 +579,11 @@ def build_query(request, catalog_columns, limits):
         # columns still get their CAST and the statement says what it fetched.
         selected = default_projection(entry, columns) or tuple(sorted(columns))
 
+    # An unwindowed current-state browse keeps its stable key order; asking for
+    # a window is asking "what changed lately", which reads newest-first.
     order = (_validate(request.order, columns, entry, "order by")
-             if request.order else (time_column or selected[0]))
+             if request.order
+             else (time_column if windowed else selected[0]))
     descending = (request.descending if request.descending is not None
                   else order == time_column)
     binds["limit"] = request.first
@@ -590,6 +602,8 @@ def window_bound(column, hours, limits, kind):
     """The window bound in whichever form this view's time column takes."""
     if kind == "epoch":
         return reporting.recent_epoch(column, hours, limits)
+    if kind == "tstz":
+        return reporting.recent_zoned(column, hours, limits)
     return reporting.recent(column, hours, limits)
 
 
@@ -606,6 +620,9 @@ def describe(entry, catalog_columns):
         "description": entry.description,
         "time_column": time_column or None,
         "time_kind": entry.time_kind if time_column else None,
+        # True means last= is a filter this view accepts, not a bound it always
+        # gets: a current-state view unwindowed shows every row it has.
+        "window_optional": entry.window_optional if time_column else None,
         "default_columns": list(projection) or None,
         "columns": sorted(columns),
         "available": bool(columns),

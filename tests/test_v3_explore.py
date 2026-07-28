@@ -146,7 +146,7 @@ def test_every_view_the_transport_knows_about_is_navigable():
 
 def test_the_curated_metadata_is_the_shape_the_wire_promises():
     for entry in VIEW_CATALOG.values():
-        assert entry.time_kind in ("timestamp", "epoch", "")
+        assert entry.time_kind in ("timestamp", "epoch", "tstz", "")
         assert bool(entry.time_column) == bool(entry.time_kind)
         for column in entry.default_columns + entry.zoned_columns:
             assert explore._IDENTIFIER.match(column), column
@@ -161,7 +161,13 @@ def test_the_views_that_do_not_time_on_timestamp_say_so():
     # an invented time column is an ORA-00904 on every statement.
     assert VIEW_CATALOG["key_performance_metrics"].time_column == "LOGGED_TIME"
     assert VIEW_CATALOG["posture_assessment_by_condition"].time_column == "LOGGED_AT"
-    assert VIEW_CATALOG["endpoints_data"].time_column == ""
+    # Current state, not events: its zoned change time is an optional filter,
+    # never the always-on bound the event views get.
+    assert VIEW_CATALOG["endpoints_data"].time_column == "UPDATE_TIME"
+    assert VIEW_CATALOG["endpoints_data"].time_kind == "tstz"
+    assert VIEW_CATALOG["endpoints_data"].window_optional is True
+    assert all(not entry.window_optional
+               for name, entry in VIEW_CATALOG.items() if name != "endpoints_data")
     for name in ("tacacs_authentication_last_two_days",
                  "tacacs_authorization_last_two_days",
                  "tacacs_accounting_last_two_days"):
@@ -203,12 +209,31 @@ def test_a_timezone_column_is_cast_rather_than_selected_raw():
     assert ", UPDATE_TIME," not in sql
 
 
-def test_an_untimed_view_gets_no_window_and_refuses_one():
+def test_a_current_state_view_is_only_windowed_on_request():
+    # Unwindowed, the endpoint database shows every row it has, in stable key
+    # order. An implicit window here would silently hide every endpoint that
+    # has not changed lately, which is most of them.
     sql, _binds = _build(view="endpoints_data")
     assert "WHERE" not in sql
     assert "ORDER BY MAC_ADDRESS ASC" in sql
+
+    # Asked for, the window bounds on UPDATE_TIME -- zoned on both sides, no
+    # CAST, because stripping the zone would compare digits across offsets --
+    # and the answer reads newest-first: a window is "what changed lately".
+    sql, _binds = _build(view="endpoints_data", last="4h")
+    assert ("WHERE UPDATE_TIME >= SYSTIMESTAMP - "
+            "NUMTODSINTERVAL(4, 'HOUR')") in sql
+    assert "ORDER BY UPDATE_TIME DESC" in sql
+
+
+def test_a_view_whose_catalog_lost_its_time_column_refuses_a_window():
+    # The curated time column is a preference; the catalog is the fact. When a
+    # release does not carry it, last= must refuse rather than build ORA-00904.
+    schema = {"ENDPOINTS_DATA": {"MAC_ADDRESS", "ENDPOINT_POLICY"}}
+    sql, _binds = _build(schema=schema, view="endpoints_data")
+    assert "WHERE" not in sql
     with pytest.raises(ExploreError) as raised:
-        _build(view="endpoints_data", last="1h")
+        _build(schema=schema, view="endpoints_data", last="1h")
     assert raised.value.error == "invalid_request"
     assert raised.value.status == 400
 
@@ -681,7 +706,9 @@ def test_a_view_descriptor_tells_the_truth_about_this_account():
     endpoints = views["endpoints_data"]
     assert endpoints["available"] is True
     assert endpoints["view"] == "ENDPOINTS_DATA"
-    assert endpoints["time_column"] is None and endpoints["time_kind"] is None
+    assert endpoints["time_column"] == "UPDATE_TIME"
+    assert endpoints["time_kind"] == "tstz"
+    assert endpoints["window_optional"] is True
     assert endpoints["columns"] == sorted(ENDPOINT_COLUMNS)
     assert endpoints["default_columns"][0] == "MAC_ADDRESS"
 

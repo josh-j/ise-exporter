@@ -394,8 +394,11 @@ try {
         '&view=endpoints_data'
     ) $listenerState.Requests[-1]
     Assert-Equal 'endpoint rows are typed' 'Ise.Dc.EndpointsData' $endpoints[0].PSObject.TypeNames[0]
-    Assert-That 'endpoints_data has no -Last, because it has no time column' (
-        -not (Get-Command Get-IseDcEndpoint).Parameters.ContainsKey('Last'))
+
+    # -Last is an optional filter here, not the always-on bound the event views
+    # get: the server windows on UPDATE_TIME only when asked.
+    $null = Get-IseDcEndpoint -Policy 'Cisco-IP-Phone*' -Last 1h
+    Assert-Like 'Get-IseDcEndpoint passes -Last through' '*last=1h*' $listenerState.Requests[-1]
 
     $null = Get-IseDcTacacsAuth -User jdoe -Nad 'sw-*' -Failed -Last 1d
     Assert-Equal 'Get-IseDcTacacsAuth maps -Failed onto STATUS' (
