@@ -778,6 +778,14 @@ function Get-IseDcEndpoint {
     changed inside the window (bounded on UPDATE_TIME, newest first), which is
     the "what changed lately" question rather than a smaller copy of the same
     list.
+
+    Not every column is equally fresh, and that decides what a query is worth:
+    Cisco documents a real-time set -- (Get-IseDcView endpoints_data)
+    .realtime_columns, profiling and registration state mostly -- while every
+    other column synchronizes with a delay of up to 12 hours. Re-polling the
+    delayed columns inside that interval spends duty cycle on answers that
+    cannot have changed yet, and a short -Last window over them can be
+    legitimately empty because the sync simply has not run.
     .PARAMETER Mac
     MAC address; wildcards accepted.
     .PARAMETER Policy

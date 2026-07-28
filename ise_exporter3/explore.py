@@ -108,6 +108,12 @@ class View:
     # operator may ask for, never a default that would silently hide the rows
     # that have not changed lately.
     window_optional: bool = False
+    # Columns Cisco documents as updated in real time; every other column of
+    # the view synchronizes with a delay of up to 12 hours. This is duty-cycle
+    # information as much as freshness information: re-polling the delayed
+    # columns inside their sync interval spends Oracle budget on answers that
+    # cannot have changed yet. Empty means the doc draws no such distinction.
+    realtime_columns: tuple = ()
 
 
 def _catalog(*views):
@@ -266,6 +272,20 @@ VIEW_CATALOG = _catalog(
         # and casting a non-date column is worse than fetching it raw.
         zoned_columns=("UPDATE_TIME", "CREATE_TIME"),
         window_optional=True,
+        # The doc's real-time list, translated from ISE's internal attribute
+        # vocabulary to this view's column names (STATIC_ASSIGNEMENT [sic] ->
+        # STATIC_ASSIGNMENT, EPID -> ENDPOINT_ID, ...); 22 of its 40 names --
+        # nearly the whole MDM_* family -- have no column here at all. The
+        # doc-facts suite derives this same set from docs/dataconnect-views
+        # .json, so it cannot drift from the note silently.
+        realtime_columns=(
+            "BYOD_REG", "DEVICE_REGISTRATIONS_STATUS", "ENDPOINT_ID",
+            "ENDPOINT_POLICY", "HOSTNAME", "IDENTITY_GROUP_ID",
+            "MATCHED_POLICY_ID", "MATCHED_VALUE", "MDM_GUID", "MDM_SERVER_ID",
+            "NMAP_SUBNET_SCANID", "PHONE_ID", "PHONE_ID_TYPE", "PORTAL_USER",
+            "POSTURE_APPLICABLE", "STATIC_ASSIGNMENT",
+            "STATIC_GROUP_ASSIGNMENT", "UNIQUE_SUBJECT_ID",
+        ),
     ),
     View(
         name="system_summary",
@@ -670,6 +690,10 @@ def describe(entry, catalog_columns):
         # True means last= is a filter this view accepts, not a bound it always
         # gets: a current-state view unwindowed shows every row it has.
         "window_optional": entry.window_optional if time_column else None,
+        # Everything outside this set synchronizes with up to 12 hours' delay,
+        # so re-polling it inside that interval spends duty for nothing.
+        "realtime_columns": (list(entry.realtime_columns)
+                             if entry.realtime_columns else None),
         "default_columns": list(projection) or None,
         "columns": sorted(columns),
         "available": bool(columns),

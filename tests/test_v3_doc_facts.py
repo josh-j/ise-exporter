@@ -78,6 +78,37 @@ def test_time_kinds_match_the_documented_types(official):
             f"curated as {entry.time_kind}")
 
 
+# The doc's real-time note speaks ISE's internal attribute vocabulary, not
+# the view's column names. This is the translation, and it is deliberately
+# explicit: joining the two programmatically without it silently drops the
+# renamed half of the real-time set.
+_NOTE_ATTRIBUTE_TO_COLUMN = {
+    "STATIC_ASSIGNEMENT": "STATIC_ASSIGNMENT",      # sic, on the page
+    "NMAP_SUBNET_SCAN_ID": "NMAP_SUBNET_SCANID",
+    "DEVICE_REG_STATUS": "DEVICE_REGISTRATIONS_STATUS",
+    "BYOD_REGISTERED": "BYOD_REG",
+    "HOST_NAME": "HOSTNAME",
+    "EPID": "ENDPOINT_ID",
+}
+
+
+def test_the_curated_realtime_set_is_the_documented_note_translated(official):
+    # Freshness is duty-cycle information: everything outside this set syncs
+    # with up to 12 hours' delay, so the set must come from the doc, not from
+    # anyone's memory of it. Both directions are pinned -- a curated column
+    # the note does not justify, and a note attribute with a column that the
+    # curation missed, both fail.
+    for entry in VIEW_CATALOG.values():
+        attributes = official[entry.view].get("realtime_attributes")
+        if not attributes:
+            assert entry.realtime_columns == (), entry.view
+            continue
+        columns = set(_columns(official, entry.view))
+        translated = {_NOTE_ATTRIBUTE_TO_COLUMN.get(name, name)
+                      for name in attributes}
+        assert set(entry.realtime_columns) == translated & columns, entry.view
+
+
 def test_the_schema_contracts_name_documented_columns(official):
     for view, contract in SCHEMA_COLUMN_CONTRACTS.items():
         columns = _columns(official, view)
