@@ -263,6 +263,25 @@ top_nads = 200
 # Raising it removes requests the plan does not model; lowering it buys
 # freshness with requests it also does not model. `plan` prints the value.
 detail_refresh_hours = 24
+#
+# The detail fetch is per *arrival*, and the arrival rate is the whole cost of
+# this dataset: at 60k sessions averaging eight hours, roughly 7,200 endpoints
+# appear every hour. A roam between controllers, a laptop waking, or a session
+# that straddles a cycle boundary all read as arrivals, so an endpoint that
+# left is held briefly rather than dropped -- its return then costs nothing,
+# and its decision did not change. 0 restores the old drop-immediately
+# behaviour. This is the cheapest reduction available: no metric changes.
+detail_grace_minutes = 15
+#
+# Decided from the active list, before a request is spent. ISE 3.3 returns a
+# session *index* -- user, MAC, NAS IP, framed IP, session ids and PSN -- so the
+# NAS address is the only segment key available without making the request this
+# avoids. Endpoints on these prefixes are never detail-fetched: they still count
+# in `active_sessions`, but they leave every authorization breakdown -- policy
+# set, matched rule, profile, method, failure reason and both latency families
+# -- and the posture families, which are fed from the same cache. Empty means
+# fetch for everything.
+skip_nas_ip_prefixes = ""
 
 # Posture compliance as it stands now. Rides the same MnT ActiveList and detail
 # cache as session_authorization above, so it adds no requests of its own; the

@@ -4,6 +4,11 @@ OpenAPI only. Unlike v2 this fetches its own node list rather than reading a
 cache the deployment collector filled: one more request, but no hidden coupling
 between datasets, and the request is declared in the cost rather than concealed.
 
+The two stores are not the same shape: the per-node system store keys off the
+SHORT hostname from /deployment/node, sends keySize as an int and carries
+selfSigned and usedBy, while the trusted store has neither selfSigned nor usedBy,
+sends keySize as a string, and names its usage trustedFor.
+
 Expiry thresholds are cumulative -- a certificate expiring in ten days counts in
 the 30, 60 and 90 day buckets -- which matches how "expiring within N days" is
 read on a dashboard.
@@ -49,6 +54,23 @@ _METRICS = (expiry_days, expiring_soon, expired, nodes_scanned, nodes_unreachabl
 _THRESHOLDS = (30, 60, 90)
 
 
+def _usage(certificate):
+    """Order-stable usage label.
+
+    ISE comma-joins a certificate's usages ("usedBy" on the system store,
+    "trustedFor" on the trusted store) in an order that differs between nodes for
+    the same set -- 'Admin, EAP Authentication, Portal' on one and
+    'EAP Authentication, Admin, Portal' on the next. Sorting the members keeps
+    one logical usage on one series instead of minting a new one whenever ISE
+    reorders the string.
+    """
+    raw = certificate.get("usedBy")
+    if raw is None:
+        raw = certificate.get("trustedFor")
+    members = sorted(part.strip() for part in str(raw or "").split(",") if part.strip())
+    return label(", ".join(members), "unknown")
+
+
 def _certificate_row(ctx, certificate, node, store, seen):
     if not isinstance(certificate, dict):
         ctx.fail("invalid_response", f"malformed {store} certificate response")
@@ -58,11 +80,14 @@ def _certificate_row(ctx, certificate, node, store, seen):
     if expires.tzinfo is None:
         expires = expires.replace(tzinfo=timezone.utc)
     # Not exported, but validated: a malformed value here suggests the whole
-    # payload is untrustworthy, not just this field.
-    if not isinstance(certificate.get("selfSigned", False), bool):
+    # payload is untrustworthy, not just this field. Only the system store sends
+    # selfSigned -- validating an absent key against a default proves nothing.
+    self_signed = certificate.get("selfSigned")
+    if self_signed is not None and not isinstance(self_signed, bool):
         ctx.fail("invalid_response", f"{store} certificate had an invalid selfSigned flag")
     try:
-        key_size = int(certificate.get("keySize") or 0)
+        # System certificates send keySize as an int, trusted ones as "2048".
+        key_size = int(str(certificate.get("keySize") or 0).strip())
     except (TypeError, ValueError):
         ctx.fail("invalid_response", f"{store} certificate had an invalid keySize")
     if not 0 <= key_size <= 65_536:
@@ -79,7 +104,7 @@ def _certificate_row(ctx, certificate, node, store, seen):
         "node": identity[0],
         "certificate": identity[1],
         "store": store,
-        "usage": label(certificate.get("usedBy", certificate.get("trustedFor", "unknown"))),
+        "usage": _usage(certificate),
         "days": (expires - datetime.now(timezone.utc)).days,
     }
 

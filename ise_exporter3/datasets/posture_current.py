@@ -6,12 +6,22 @@ never substitute for one another.
 
 - ``mnt`` reads the same cached per-session detail that answers
   ``session_authorization``, so it costs nothing extra and converges to the whole
-  active set. The overall posture status is frequently ``NotApplicable`` even
-  when posture ran, so the per-policy pass/fail parsed out of ``PostureReport``
-  is the signal that actually works -- which is why this dataset parses the
-  report rather than reading the summary field alone.
+  active set. Where ISE emits ``posture_status`` empty the endpoint is published
+  as ``Unavailable`` rather than as ``NotApplicable``, which is a real ISE
+  verdict and would read as "posture ran and did not apply".
 - ``pxgrid`` carries ``postureStatus`` on the session object for free with the
   session stream, but not the per-policy report -- a cheaper, coarser answer.
+
+The posture fields are empty on an estate with no Secure Client and populated on
+one that runs posture, so they are read either way and
+``ise3_session_detail_field_coverage`` reports which world you are in. They were
+briefly deleted here after a lab with no posture module showed them absent on
+every session; that is the difference between a field ISE cannot answer and a
+field this deployment never exercises, and only the first justifies dropping a
+lookup. Data Connect names the same three facts ``POSTURE_REPORT``,
+``POSTURE_AGENT_VERSION`` and ``ENDPOINT_OPERATING_SYSTEM`` in
+``POSTURE_ASSESSMENT_BY_ENDPOINT``, which is the independent confirmation that
+they are ISE fields rather than spellings invented here.
 """
 from collections import defaultdict
 
@@ -74,10 +84,15 @@ _CANONICAL_STATUS = {
 
 
 def canonical_status(value):
-    """Collapse ISE's spelling variants so one verdict is one series."""
+    """Collapse ISE's spelling variants so one verdict is one series.
+
+    An absent or empty status is ``Unavailable``: every verdict in the map is
+    something ISE decided, and answering "NotApplicable" for a field the
+    appliance did not populate reports a decision that was never made.
+    """
     key = str(value or "").strip().lower().replace(" ", "")
     if not key:
-        return "NotApplicable"
+        return "Unavailable"
     return _CANONICAL_STATUS.get(key, str(value).strip())
 
 
@@ -156,8 +171,9 @@ def fetch_mnt(ctx):
             serving_psns[mac].add(label(session.get("server"), "unknown"))
 
     directory = nad_directory.shared()
-    statuses, policies = defaultdict(set), defaultdict(set)
-    agents, systems, psns = defaultdict(set), defaultdict(set), defaultdict(set)
+    statuses, psns = defaultdict(set), defaultdict(set)
+    policies, agents, systems = (
+        defaultdict(set), defaultdict(set), defaultdict(set))
     fields = defaultdict(int)
     covered = 0
 
@@ -168,6 +184,9 @@ def fetch_mnt(ctx):
         if not detail:
             continue
         covered += 1
+        # Coverage is the honest signal for the posture fields: an estate with
+        # no Secure Client reports 0.0 and reads as "nothing runs posture here",
+        # which is true, while a deployment that runs it reports what it has.
         for field in (
             "posture_status",
             "posture_report",
@@ -185,7 +204,6 @@ def fetch_mnt(ctx):
 
         for policy, result in parse_posture_report(detail["posture_report"]):
             policies[(label(policy), label(result))].add(mac)
-
         if detail["agent_version"]:
             agents[label(detail["agent_version"])].add(mac)
         if detail["operating_system"]:
@@ -204,14 +222,14 @@ def fetch_mnt(ctx):
 
     for (status, owner), members in statuses.items():
         ctx.set(endpoints_by_status, len(members), status=status, ops_owner=owner)
+    for (psn, status), members in psns.items():
+        ctx.set(by_psn, len(members), psn=psn, status=status)
     for (policy, result), members in policies.items():
         ctx.set(policy_results, len(members), policy=policy, result=result)
     for agent, members in agents.items():
         ctx.set(by_agent_version, len(members), agent_version=agent)
     for system, members in systems.items():
         ctx.set(by_os, len(members), os=system)
-    for (psn, status), members in psns.items():
-        ctx.set(by_psn, len(members), psn=psn, status=status)
     if covered:
         for field, populated in fields.items():
             ctx.set(field_coverage, populated / covered, field=field)
@@ -226,14 +244,15 @@ DATASET = Dataset(
         Provider(
             name="mnt",
             # The same cached per-MAC fan-out that answers session_authorization:
-            # posture, OS, agent version and PSN come out of detail already
+            # the posture status and the serving PSN come out of detail already
             # fetched, so this is pooled and charged once. Coverage converges to
             # the whole active set rather than sampling it.
             cost=Cost(target="mnt", requests=1, scales_with="sessions",
                       warmup_requests=2000, churn_fraction=0.01,
                       churn_interval=300,
                       shares="mnt_session_detail", pool_reader=True),
-            supplies=frozenset({"status", "policy_result", "os", "agent_version", "psn"}),
+            supplies=frozenset({
+                "status", "policy_result", "os", "agent_version", "psn"}),
             coverage="converging",
             fetch=fetch_mnt,
         ),

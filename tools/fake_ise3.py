@@ -20,6 +20,11 @@ Three seams, in descending order of fidelity:
    are all the shipped code. Only `oracledb`'s connection is synthetic, and it
    synthesises result sets by reading the statement's own SELECT list, so a
    dataset gets the columns it asked for at the row count its GROUP BY implies.
+   Two things cannot be read off a statement and so are declared instead:
+   `LAB_EMPTY_VIEWS`, the views that hold no rows, and `EMPTY_DIMENSIONS`, the
+   columns that exist and are NULL on every row. Both are ordinary appliance
+   states, both make a dataset publish nothing, and a synthesiser that answers
+   every statement with plausible rows can never show either.
 
 3. **Time is virtual.** Modelled appliance latency (a declared assumption, see
    `Latency`) advances a shared clock instead of sleeping. The scheduler, the
@@ -30,6 +35,12 @@ Three seams, in descending order of fidelity:
 What is *not* simulated: ISE's own semantics. Aggregate values are plausible,
 not meaningful. This measures cost, cardinality, convergence and pacing -- never
 whether a number is correct.
+
+What *is* held to the appliance is every payload's **shape**, because a field
+the simulator invents is a design that passes here and collects nothing in
+production. Every response below was captured from ISE 3.3.0.430 Patch 11 on
+2026-07-27 and is documented in `docs/DATASETS_FACTS.md`; the estate around them
+is scaled up, the shapes are not.
 """
 from __future__ import annotations
 
@@ -253,7 +264,20 @@ OPERATING_SYSTEMS = (
     "Windows 11 Enterprise", "Windows 10 Enterprise", "macOS 15.3",
     "Ubuntu 24.04", "iOS 18.2", "Android 15",
 )
-SESSION_STATES = ("STARTED", "AUTHENTICATED", "POSTURED")
+# Node names are short everywhere ISE reports them -- /deployment/node hostname,
+# the MnT acs_server element, the Data Connect ISE_NODE column -- and the FQDN
+# arrives beside them as its own field. Modelling the FQDN as the identity gave
+# the `node` and `psn` labels a shape production never has.
+NODE_DOMAIN = "ise.example.net"
+
+# One NAD in this many is configured in ISE as a subnet rather than a host, and
+# one in this many is left at the network-device-group roots. Both are the
+# awkward real cases: a subnet NAD's configured address is the network address,
+# which no session's NAS IP can equal, and a rooted NAD's group strings have two
+# segments and carry no location or device type at all. A uniform estate of
+# /32 NADs in fully-populated groups made both invisible.
+SUBNET_NAD_EVERY = 4
+ROOT_NDG_EVERY = 3
 
 
 def mac_of(index):
@@ -268,7 +292,13 @@ class Estate:
 
     def __init__(self, *, nads=5000, endpoints=100_000, sessions=20_000,
                  accounts=1000, policy_sets=len(POLICY_SETS),
-                 churn_per_hour=0.12, clock=None):
+                 churn_per_hour=0.12, clock=None,
+                 subnet_nad_every=SUBNET_NAD_EVERY, posture_share=0.0):
+        self.subnet_nad_every = max(0, int(subnet_nad_every))
+        # Share of sessions whose detail carries Secure Client posture. 0.0 is
+        # the probed appliance, where nothing runs posture; raise it to exercise
+        # the path a deployment that does run it takes.
+        self.posture_share = min(1.0, max(0.0, float(posture_share)))
         self.nad_count = int(nads)
         self.endpoint_count = int(endpoints)
         self.session_count = int(sessions)
@@ -281,8 +311,7 @@ class Estate:
         self.device_types = ("Switch", "WLC", "Router", "AccessPoint", "Firewall")
 
         psn_count = max(2, min(50, -(-self.session_count // 2500)))
-        self.psns = tuple(f"psn{index:02d}.ise.example.net"
-                          for index in range(1, psn_count + 1))
+        self.psns = tuple(f"psn{index:02d}" for index in range(1, psn_count + 1))
         self.policy_sets = self._build_policy_sets()
         self.nodes = self._build_nodes()
         self.nads = self._build_nads()
@@ -298,22 +327,30 @@ class Estate:
 
     # --- inventory ------------------------------------------------------
 
+    def _node(self, index, hostname, roles, services):
+        """One /deployment/node row: short hostname, fqdn and ipAddress beside it."""
+        return {
+            "hostname": hostname,
+            "fqdn": f"{hostname}.{NODE_DOMAIN}",
+            "ipAddress": f"10.10.{index // 254}.{index % 254 + 1}",
+            "roles": list(roles),
+            "services": list(services),
+            "nodeStatus": "Connected",
+        }
+
     def _build_nodes(self):
+        # Roles and services are both lists ISE will happily return empty, and a
+        # node commonly holds two personas, so the shapes are modelled here.
         nodes = [
-            {"hostname": "pan1.ise.example.net", "roles": ["PrimaryAdmin"],
-             "services": [], "nodeStatus": "Connected"},
-            {"hostname": "pan2.ise.example.net", "roles": ["SecondaryAdmin"],
-             "services": [], "nodeStatus": "Connected"},
-            {"hostname": "mnt1.ise.example.net", "roles": ["PrimaryMonitoring"],
-             "services": [], "nodeStatus": "Connected"},
-            {"hostname": "mnt2.ise.example.net", "roles": ["SecondaryMonitoring"],
-             "services": [], "nodeStatus": "Connected"},
+            self._node(0, "pan1", ["PrimaryAdmin", "PrimaryMonitoring"], []),
+            self._node(1, "pan2", ["SecondaryAdmin", "SecondaryMonitoring"], []),
+            self._node(2, "mnt1", ["PrimaryMonitoring"], []),
+            self._node(3, "mnt2", [], []),
         ]
-        for hostname in self.psns:
-            nodes.append({
-                "hostname": hostname, "roles": [],
-                "services": ["Session", "Profiler", "DeviceAdmin"],
-                "nodeStatus": "Connected"})
+        nodes.extend(
+            self._node(4 + position, hostname, [],
+                       ["Session", "Profiler", "DeviceAdmin"])
+            for position, hostname in enumerate(self.psns))
         return nodes
 
     def _build_nads(self):
@@ -322,16 +359,43 @@ class Estate:
             site = self.locations[index % len(self.locations)]
             owner = self.ops_owners[(index * 7) % len(self.ops_owners)]
             kind = self.device_types[(index * 3) % len(self.device_types)]
-            octet_high, octet_low = divmod(index, 254)
+            # One /24 per NAD, and a declared share of them configured as the
+            # subnet rather than as a host: ISE then stores 10.x.y.0/24 while the
+            # session arrives from 10.x.y.1, so the directory has to match by
+            # containment rather than by string equality.
+            second, third = 16 + index // 256, index % 256
+            host = f"10.{second}.{third}.1"
+            subnet = self.subnet_nad_every and index % self.subnet_nad_every == 0
             devices.append({
                 "id": f"{index:08x}-0000-4000-8000-{index:012x}",
                 "name": f"sw-{site.lower()}-{index:04d}",
-                "ip": f"10.{16 + octet_high // 254}.{octet_high % 254}.{octet_low + 1}",
+                "ip": f"10.{second}.{third}.0" if subnet else host,
+                "mask": 24 if subnet else 32,
+                "nas_ip": host,
+                # A NAD left at the group roots yields two-segment strings that
+                # name a category and nothing else, so it classifies to Unknown.
+                "rooted": index % ROOT_NDG_EVERY == 0,
                 "location": site,
                 "ops_owner": owner,
                 "device_type": kind,
             })
         return devices
+
+    def device_groups(self, device):
+        """The NetworkDeviceGroupList ISE returns for one NAD."""
+        if device["rooted"]:
+            return [
+                "IPSEC#Is IPSEC Device",
+                "Device Type#All Device Types",
+                "Location#All Locations",
+                f"Ops Owner#All Ops Owners#{device['ops_owner']}",
+            ]
+        return [
+            f"Location#All Locations#{device['location']}",
+            f"Ops Owner#All Ops Owners#{device['ops_owner']}",
+            f"Device Type#All Device Types#{device['device_type']}",
+            "IPSEC#Is IPSEC Device#No",
+        ]
 
     def _build_accounts(self):
         return [{"id": f"user-{index:06d}", "name": f"netadmin{index:04d}",
@@ -358,74 +422,240 @@ class Estate:
         start = self.window_start()
         return range(start, start + self.session_count)
 
-    def session_fields(self, index):
-        """Everything MnT would report for one session, as plain strings."""
-        nad = index % self.nad_count
-        psn = index % len(self.psns)
-        authz = index % len(AUTHZ_PROFILES)
-        rule = index % len(AUTHZ_RULES)
-        policy = index % len(self.policy_sets)
-        method = index % len(AUTH_METHODS)
-        posture = index % len(POSTURE_STATUSES)
-        system = index % len(OPERATING_SYSTEMS)
-        agent = index % len(AGENT_VERSIONS)
-        passed = index % 23 != 0
-        failure = index % len(FAILURE_CODES)
-        device = self.nads[nad]
-        mac = mac_of(index)
-        return {
-            "mac": mac,
-            "user_name": f"user{index % 8000:05d}@example.net",
-            "nas_ip_address": device["ip"],
-            "network_device_name": device["name"],
-            "location": f"All Locations#{device['location']}",
-            "server": self.psns[psn],
-            "framed_ip_address": f"172.{16 + index % 15}.{index // 254 % 254}."
-                                 f"{index % 254 + 1}",
-            "nas_port_id": f"GigabitEthernet1/0/{index % 48 + 1}",
-            "session_state": SESSION_STATES[index % len(SESSION_STATES)],
-            "authentication_method": AUTH_METHODS[method],
-            "selected_azn_profiles": AUTHZ_PROFILES[authz],
-            "identity_group": "Profiled" if index % 3 else "Employee",
-            "passed": "true" if passed else "false",
-            "failed": "false" if passed else "true",
-            "failure_reason": "" if passed else
-                              f"{FAILURE_CODES[failure]} Authentication failed",
-            "posture_status": POSTURE_STATUSES[posture],
-            "posture_agent_version": AGENT_VERSIONS[agent],
-            "operating_system": OPERATING_SYSTEMS[system],
-            "execution_steps": "1001,1002,1003",
-            "step_latency": (
-                f"1={2 + index % 4};2={7 + index % 11};"
-                f"3={15 + index % 23}"
-            ),
-            "total_authentication_latency": str(35 + index % 90),
-            "posture_report": ";".join(
-                f"{policy_name}:{'Passed' if (index + offset) % 4 else 'Failed'}"
-                for offset, policy_name in enumerate(POSTURE_POLICIES)),
-            "other_attr_string": (
-                f":!:AuthorizationPolicyMatchedRule={AUTHZ_RULES[rule]}"
-                f":!:ISEPolicySetName={self.policy_sets[policy]}"
-                f":!:AuthenticationIdentityStore=AD-example"
-                f":!:SelectedAccessService=Default Network Access"),
-        }
-
     # --- MnT documents --------------------------------------------------
 
+    # Exactly what ISE 3.3 Patch 11 returns from /Session/ActiveList, captured
+    # from laba-ise-001 on 2026-07-27. It is a session *index*, not a summary:
+    # no NAD name, no identity group, no posture status, no session state. The
+    # simulator used to invent those five, which made designs that read them
+    # from the bulk list look viable when they collect nothing on a real
+    # appliance. Anything richer than this list costs a per-MAC detail request.
+    # framed_ipv6_address is the eighth child and is emitted empty, so the
+    # transport's empty-text filter drops it and seven keys survive the parse.
     _ACTIVE_FIELDS = (
         "user_name", "calling_station_id", "nas_ip_address",
-        "network_device_name", "framed_ip_address", "nas_port_id", "server",
-        "session_state", "identity_group", "posture_status",
+        "acct_session_id", "audit_session_id", "server", "framed_ip_address",
+        "framed_ipv6_address",
     )
+
+    def session_fields(self, index):
+        """The session identity the ActiveList carries. Everything else is a
+        per-MAC detail request, which is the point of the split."""
+        device = self.nads[index % self.nad_count]
+        session_id = f"{index:08X}{index * 2654435761 & 0xFFFFFFFF:08X}"
+        return {
+            "mac": mac_of(index),
+            "user_name": f"user{index % 8000:05d}@example.net",
+            "calling_station_id": mac_of(index),
+            "nas_ip_address": device["nas_ip"],
+            "acct_session_id": session_id,
+            "audit_session_id": session_id,
+            "server": self.psns[index % len(self.psns)],
+            "framed_ip_address": f"172.{16 + index % 15}.{index // 254 % 254}."
+                                 f"{index % 254 + 1}",
+            # Present on every row of the real document and empty on every one
+            # of them; this lab has no IPv6-addressed session to show.
+            "framed_ipv6_address": "",
+        }
+
+    # The 28 ISE message codes a 3.3 dot1x session reports, verbatim: codes
+    # repeat, and there is one more of them than there are StepLatency entries.
+    _EXECUTION_STEPS = (
+        "11001,11017,15049,15008,15041,15048,15013,24430,24325,24313,24319,"
+        "24323,24343,24402,22037,24715,15036,24209,24217,15048,15048,15048,"
+        "15048,15048,15016,22081,22080,11002")
+    # ISE types these four with an inline XML Schema namespace on every element.
+    # The tag names stay unnamespaced, which is why the projection still finds
+    # them, but a reader that assumed bare elements would not have been caught.
+    _BOOLEAN_ATTRIBUTES = (
+        ' xsi:type="xs:boolean" xmlns:xs="http://www.w3.org/2001/XMLSchema"'
+        ' xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"')
+    _BOOLEAN_TAGS = frozenset({"passed", "failed", "started", "stopped"})
+
+    def other_attributes(self, index):
+        """The 43-attribute other_attr_string, in ISE's own shape.
+
+        The awkward parts are the point of reproducing it: a LEADING ``:!:`` so
+        the first split part is empty, keys containing spaces, values containing
+        ``=`` and ``;``, and both authentication latencies carried here because
+        no element of the document reports them.
+        """
+        rule = AUTHZ_RULES[index % len(AUTHZ_RULES)]
+        policy_set = self.policy_sets[index % len(self.policy_sets)]
+        device = self.nads[index % self.nad_count]
+        user = f"user{index % 8000:05d}"
+        total_latency = 15 + index % 40
+        steps = ";".join(f"{position}={(index + position) % 8}"
+                         for position in range(1, 28))
+        switch = f"{device['name']}-sw{index % 24:02d}"
+        groups = "".join(f":!:{part}" for part in (
+            "Location=Location#All Locations"
+            if device["rooted"] else
+            f"Location=Location#All Locations#{device['location']}",
+            "Device Type=Device Type#All Device Types"
+            if device["rooted"] else
+            f"Device Type=Device Type#All Device Types#{device['device_type']}",
+            "IPSEC=IPSEC#Is IPSEC Device",
+            f"Ops Owner=Ops Owner#All Ops Owners#{device['ops_owner']}",
+        ))
+        return (
+            ":!:ConfigVersionId=770"
+            ":!:DestinationPort=1812"
+            ":!:Protocol=Radius"
+            f":!:NAS-Port={50000 + index % 1000}"
+            ":!:Framed-MTU=1500"
+            f":!:OriginalUserName={user}"
+            ":!:NetworkDeviceProfileId=b0699505-3150-4215-a80e-6753d45bf56c"
+            ":!:IsThirdPartyDeviceFlow=false"
+            f":!:AcsSessionID={self.psns[index % len(self.psns)]}/{index}/155"
+            ":!:SelectedAuthenticationIdentityStores=lab.local"
+            ":!:AuthenticationStatus=AuthenticationPassed"
+            ":!:IdentityPolicyMatchedRule=Dot1X"
+            f":!:AuthorizationPolicyMatchedRule={rule}"
+            f":!:EndPointMACAddress={mac_of(index).replace(':', '-')}"
+            f":!:ISEPolicySetName={policy_set}"
+            ":!:IdentitySelectionMatchedRule=Dot1X"
+            f":!:StepLatency={steps}"
+            f":!:AD-User-Resolved-Identities={user}@lab.local"
+            f":!:AD-User-Candidate-Identities={user}@lab.local"
+            f":!:TotalAuthenLatency={total_latency}"
+            ":!:ClientLatency=0"
+            f":!:AD-User-Resolved-DNs=CN={user},OU=Lab,DC=lab,DC=local"
+            ":!:AD-User-DNS-Domain=lab.local"
+            ":!:AD-User-NetBios-Name=LAB"
+            ":!:IsMachineIdentity=false"
+            ":!:UserAccountControl=66048"
+            f":!:AD-User-SamAccount-Name={user}"
+            f":!:AD-User-Qualified-Name={user}@lab.local"
+            ":!:DTLSSupport=Unknown"
+            ":!:Network Device Profile=Cisco"
+            f"{groups}"
+            ":!:IdentityAccessRestricted=false"
+            ':!:StepData="5= Normalised Radius.RadiusFlowType","6=lab.local",'
+            '"7=lab.local","8=' + user + '","9=lab.local","12=' + user +
+            '@lab.local","19= Radius.NAS-Port-Type","20= Network Access.UserName"'
+            ',"21= IdentityGroup.Name","23= Network Access.AuthenticationStatus"'
+            "=StepData"
+            f":!:RADIUS Username={user}"
+            f":!:NAS-Identifier={switch}"
+            f":!:Device IP Address={device['nas_ip']}"
+            f":!:CPMSessionID={index:016X}"
+            f":!:Called-Station-ID=00-11-22-33-0C-0C:{switch}"
+            f":!:CiscoAVPair=audit-session-id={index:016X},"
+            f"AuthenticationIdentityStore=lab.local,"
+            f"FQSubjectName=968cd8c0-7b02-11f1-ad2d-8a4e8c5a954a#{user}@lab.local"
+        )
+
+    _POSTURE_STATUSES = ("Compliant", "NonCompliant", "Pending")
+    _POSTURE_AGENTS = ("5.1.2.42", "5.1.3.62", "4.10.07061")
+    _POSTURE_SYSTEMS = ("Windows 11", "Windows 10", "macOS 14.5")
+
+    def _posture_elements(self, index):
+        """The posture elements, empty unless this estate runs Secure Client."""
+        if index % 100 >= self.posture_share * 100:
+            return (("posture_status", ""),)
+        status = self._POSTURE_STATUSES[index % len(self._POSTURE_STATUSES)]
+        failed = status == "NonCompliant"
+        return (
+            ("posture_status", status),
+            ("posture_report",
+             "AV_Installed:Passed;Firewall_Enabled:"
+             + ("Failed" if failed else "Passed")),
+            ("posture_agent_version",
+             self._POSTURE_AGENTS[index % len(self._POSTURE_AGENTS)]),
+            ("operating_system",
+             self._POSTURE_SYSTEMS[index % len(self._POSTURE_SYSTEMS)]),
+        )
+
+    def detail_fields(self, index):
+        """The 43 elements /Session/MACAddress/<mac> really returns, in order.
+
+        Not one of ``server``, ``session_state``, ``identity_group``,
+        ``failure_reason``, ``posture_report``, ``posture_agent_version``,
+        ``operating_system``, ``step_latency`` or ``total_authentication_latency``
+        exists on the real document -- the simulator used to emit all nine, which
+        made every posture and latency metric in this family look healthy while
+        collecting nothing on an appliance.
+
+        The posture elements are the one case where the lab is not the last
+        word. ``posture_status`` is emitted empty because the probed estate runs
+        no Secure Client, not because ISE cannot answer it, and an estate that
+        does run posture populates it along with the report, the agent version
+        and the endpoint OS. ``posture_share`` models that estate, so the path
+        stays exercisable rather than being untestable at any scale; it defaults
+        to 0.0, which reproduces the appliance exactly.
+        """
+        session = self.session_fields(index)
+        device = self.nads[index % self.nad_count]
+        passed = index % 23 != 0
+        stamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+        session_key = f"{index:016X}"
+        return (
+            ("passed", "true" if passed else "false"),
+            ("failed", "false" if passed else "true"),
+            ("user_name", session["user_name"]),
+            ("nas_ip_address", session["nas_ip_address"]),
+            ("calling_station_id", session["calling_station_id"]),
+            ("orig_calling_station_id", session["mac"].replace(":", "-")),
+            ("cpmsession_id", session_key),
+            ("destination_ip_address", "10.10.0.1"),
+            # The switch, which differs from the NAS IP the session reports.
+            ("device_ip_address", device["nas_ip"]),
+            # The ISE NAD object, not the switch: on a subnet-defined NAD every
+            # session on the segment reports the same value here.
+            ("network_device_name", device["name"]),
+            ("acs_server", session["server"]),
+            ("authentication_method",
+             AUTH_METHODS[index % len(AUTH_METHODS)]),
+            ("authentication_protocol", "PAP_ASCII"),
+            ("framed_ip_address", session["framed_ip_address"]),
+            ("auth_acs_timestamp", stamp),
+            ("execution_steps", self._EXECUTION_STEPS),
+            ("response", f"{{Class=CACS:{session_key}; LicenseTypes=1; }}"),
+            ("audit_session_id", session["audit_session_id"]),
+            ("nas_port_id", f"GigabitEthernet1/0/{index % 48 + 1}"),
+            *self._posture_elements(index),
+            ("selected_azn_profiles",
+             AUTHZ_PROFILES[index % len(AUTHZ_PROFILES)]),
+            ("service_type", "Framed"),
+            ("message_code",
+             "5200" if passed else FAILURE_CODES[index % len(FAILURE_CODES)]),
+            ("auth_acsview_timestamp", stamp),
+            ("auth_id", str(1784566916869177 + index)),
+            ("identity_store", "lab.local"),
+            # The NDG path, not the leaf, and rooted NADs report the bare root.
+            ("location", "All Locations" if device["rooted"]
+             else f"All Locations#{device['location']}"),
+            ("device_type", "All Device Types" if device["rooted"]
+             else f"All Device Types#{device['device_type']}"),
+            # Milliseconds, and the same value TotalAuthenLatency carries.
+            ("response_time", str(15 + index % 40)),
+            ("other_attr_string", self.other_attributes(index)),
+            ("acct_id", str(1784566916869181 + index)),
+            ("acct_acs_timestamp", stamp),
+            ("acct_acsview_timestamp", stamp),
+            ("acct_session_id", session["acct_session_id"]),
+            ("acct_status_type", "Start"),
+            ("acct_input_octets", str(index * 1024 % 10_000_000)),
+            ("acct_output_octets", str(index * 2048 % 10_000_000)),
+            ("acct_input_packets", str(index * 7 % 90_000)),
+            ("acct_output_packets", str(index * 11 % 90_000)),
+            ("acct_authentic", "RADIUS"),
+            ("started", "true"),
+            ("stopped", "false"),
+            # The real profiling verdict, which nothing currently reads.
+            ("endpoint_policy",
+             ENDPOINT_PROFILES[index % len(ENDPOINT_PROFILES)]),
+        )
 
     def _chunk(self, index):
         """One rendered <activeSession>, cached: churn only replaces a few."""
         cached = self._chunks.get(index)
         if cached is None:
             fields = self.session_fields(index)
-            fields["calling_station_id"] = fields["mac"]
             body = "".join(
-                f"<{name}>{_escape(fields.get(name, ''))}</{name}>"
+                f"<{name}/>" if fields.get(name, "") == ""
+                else f"<{name}>{_escape(fields[name])}</{name}>"
                 for name in self._ACTIVE_FIELDS)
             cached = f"<activeSession>{body}</activeSession>".encode("utf-8")
             if len(self._chunks) > 3 * self.session_count:
@@ -434,12 +664,16 @@ class Estate:
         return cached
 
     def active_list_xml(self):
-        header = (f'<?xml version="1.0" encoding="UTF-8"?>'
-                  f'<activeSessions noOfActiveSession="{self.session_count}">')
+        # The root is <activeList>. The transport keys off the child tag and the
+        # count attribute so both parse alike, but a simulator that names the
+        # root something ISE never sends cannot be used to check the one thing a
+        # root tag is for.
+        header = (f'<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+                  f'<activeList noOfActiveSession="{self.session_count}">')
         return b"".join(
             [header.encode("utf-8")]
             + [self._chunk(index) for index in self.active_indices()]
-            + [b"</activeSessions>"])
+            + [b"</activeList>"])
 
     def index_of(self, mac):
         """The endpoint index behind a MAC, or None if it is not active now."""
@@ -450,18 +684,39 @@ class Estate:
         index = value - 0x0A5EED000000
         return index if index in self.active_indices() else None
 
-    def session_detail_xml(self, mac):
+    def session_detail_response(self, mac):
+        """(status, body) for one per-MAC detail request.
+
+        A MAC with no current session is answered with HTTP 500 and an
+        <mnt-rest-result> document, not with 200 and an empty one. That is the
+        normal churn case -- a session that ended between the ActiveList read and
+        its detail fetch -- and modelling it as an empty 200 meant the reader's
+        empty branch looked exercised while the branch production actually takes
+        was never reached at all.
+        """
         index = self.index_of(mac)
         if index is None:
-            # A session that ended between the listing and the detail request.
-            return b'<?xml version="1.0" encoding="UTF-8"?><sessionParameters/>'
-        fields = self.session_fields(index)
-        fields["calling_station_id"] = fields["mac"]
-        fields.pop("mac")
-        body = "".join(f"<{name}>{_escape(value)}</{name}>"
-                       for name, value in fields.items() if value != "")
-        return (f'<?xml version="1.0" encoding="UTF-8"?>'
-                f'<sessionParameters>{body}</sessionParameters>').encode("utf-8")
+            return 500, (
+                '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+                "<mnt-rest-result><http-code>500</http-code>"
+                "<cpm-code>34110</cpm-code>"
+                "<description>Server has encountered error while processing the "
+                "REST request</description><module-name>MnT</module-name>"
+                "<internal-error-info>Error in generating XML output. Error "
+                f"message = Session data is not available for {_escape(mac)}."
+                "</internal-error-info>"
+                "<requested-operation>Get By Type</requested-operation>"
+                "<resource-id>N/A</resource-id><resource-name>N/A</resource-name>"
+                "<resource-type>RESTSDStatus</resource-type>"
+                "<status>SERVER_ERROR</status></mnt-rest-result>"
+            ).encode("utf-8")
+        body = "".join(
+            f"<{tag}{self._BOOLEAN_ATTRIBUTES if tag in self._BOOLEAN_TAGS else ''}>"
+            f"{_escape(value)}</{tag}>"
+            for tag, value in self.detail_fields(index))
+        return 200, (f'<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+                     f"<sessionParameters>{body}</sessionParameters>"
+                     ).encode("utf-8")
 
 
 def _escape(value):
@@ -597,18 +852,31 @@ class FakeIseHttp:
         start = (page - 1) * size
         window = rows[start:start + size]
         result = {"total": total, "resources": window}
+        # ERS OMITS nextPage on the last page and offers previousPage instead;
+        # it never sends the null OpenAPI uses.
         if start + size < total:
             result["nextPage"] = {
                 "rel": "next",
                 "href": f"{self.base_url}/ers{resource}?size={size}&page={page + 1}",
+            }
+        if page > 1:
+            result["previousPage"] = {
+                "rel": "previous",
+                "href": f"{self.base_url}/ers{resource}?size={size}&page={page - 1}",
             }
         self.clock.advance(self.latency.ers_page(), "pan")
         return self._json(request, {"SearchResult": result})
 
     def _ers_device_list(self, request, query):
         page, size = self._page(query)
+        # id, name, description and link, and nothing else: NetworkDeviceGroupList
+        # is never inline on 3.3 P11 at any page size, so the per-NAD detail
+        # fan-out is mandatory rather than opportunistic.
         rows = [{"id": device["id"], "name": device["name"],
-                 "description": f"{device['device_type']} at {device['location']}"}
+                 "description": f"{device['device_type']} at {device['location']}",
+                 "link": {"rel": "self", "type": "application/json",
+                          "href": f"{self.base_url}/ers/config/networkdevice/"
+                                  f"{device['id']}"}}
                 for device in self.estate.nads]
         return self._search_result(request, "/config/networkdevice", rows, page,
                                    size, len(rows))
@@ -623,13 +891,12 @@ class FakeIseHttp:
         return self._json(request, {"NetworkDevice": {
             "id": found["id"],
             "name": found["name"],
-            "NetworkDeviceIPList": [{"ipaddress": found["ip"], "mask": 32}],
-            "NetworkDeviceGroupList": [
-                f"Location#All Locations#{found['location']}",
-                f"Ops Owner#All Ops Owners#{found['ops_owner']}",
-                f"Device Type#All Device Types#{found['device_type']}",
-                "IPSEC#Is IPSEC Device#No",
-            ],
+            # ISE stores a base address and a mask, and the mask is real: a
+            # subnet-defined NAD's ipaddress is the network address, which no
+            # session's NAS IP will ever equal.
+            "NetworkDeviceIPList": [
+                {"ipaddress": found["ip"], "mask": found["mask"]}],
+            "NetworkDeviceGroupList": self.estate.device_groups(found),
             "profileName": "Cisco",
             "coaPort": 1700,
         }})
@@ -670,14 +937,24 @@ class FakeIseHttp:
             return self._send(request, 404, b'{"error":"no such user"}',
                               "application/json")
         index = int(account_id.rsplit("-", 1)[-1])
+        # No identityGroups (an invented field), no passwordInfo object, and no
+        # last-login or login-count field of any kind: the whole per-account
+        # fan-out buys enabled and passwordNeverExpires, both real JSON booleans
+        # at the top level.
         return self._json(request, {"InternalUser": {
             "id": found["id"],
             "name": found["name"],
-            "enabled": "true" if found["enabled"] else "false",
-            "changePassword": "false" if index % 5 else "true",
+            "description": "",
+            "enabled": bool(found["enabled"]),
+            "changePassword": index % 5 == 0,
             "passwordNeverExpires": index % 11 == 0,
-            "identityGroups": "Network Admins",
+            "daysForPasswordExpiration": 30 + index % 30,
             "expiryDateEnabled": index % 7 == 0,
+            "expiryDate": "",
+            "dateCreated": "2026-07-06",
+            "dateModified": "2026-07-06",
+            "customAttributes": {},
+            "passwordIDStore": "Internal Users",
         }})
 
     # --- PAN OpenAPI ----------------------------------------------------
@@ -691,30 +968,38 @@ class FakeIseHttp:
             return self._json(request, {"response": {"isEnabled": True}})
         if path == "/patch":
             self.clock.advance(self.latency.openapi(), "pan")
-            return self._json(request, {"response": {
+            # A bare object -- no response envelope, no version -- listing only
+            # the HIGHEST installed patch. ISE does not enumerate the ones
+            # beneath it, so this is one element and not SUPPORTED_PATCH_LEVEL.
+            return self._json(request, {
                 "iseVersion": SUPPORTED_ISE_VERSION,
-                "patchVersion": [{"patchNumber": number, "installDate": "2026-05-02"}
-                                 for number in range(1, SUPPORTED_PATCH_LEVEL + 1)],
-            }})
+                "patchVersion": [{"patchNumber": SUPPORTED_PATCH_LEVEL,
+                                  "installDate": "Fri Jul 10 15:53:58 2026"}],
+            })
         if path == "/license/system/tier-state":
             self.clock.advance(self.latency.openapi(), "pan")
+            # EVALUATION on every tier, which is what an unlicensed deployment
+            # reports and is a recognised state that is not a compliant one.
+            # daysOutOfCompliance and lastAuthorization arrive as the literal
+            # string "-", not as numbers and not absent.
+            consumption = {"ESSENTIAL": self.estate.session_count,
+                           "ADVANTAGE": 0, "PREMIER": 0, "DEVICEADMIN": 1}
             return self._json(request, [
-                {"name": "ESSENTIAL", "status": "ENABLED", "compliance": "COMPLIANT",
-                 "consumptionCounter": self.estate.endpoint_count},
-                {"name": "ADVANTAGE", "status": "ENABLED", "compliance": "COMPLIANT",
-                 "consumptionCounter": int(self.estate.endpoint_count * 0.62)},
-                {"name": "PREMIER", "status": "ENABLED", "compliance": "EVALUATION",
-                 "consumptionCounter": int(self.estate.endpoint_count * 0.11)},
-                {"name": "DEVICEADMIN", "status": "ENABLED", "compliance": "COMPLIANT",
-                 "consumptionCounter": 1},
+                {"name": tier, "status": "ENABLED", "compliance": "EVALUATION",
+                 "consumptionCounter": used,
+                 "daysOutOfCompliance": "-", "lastAuthorization": "-"}
+                for tier, used in consumption.items()
             ])
         if path == "/backup-restore/config/last-backup-status":
             self.clock.advance(self.latency.openapi(), "pan")
-            started = datetime.now(timezone.utc) - timedelta(hours=9, minutes=12)
+            # A deployment that has never been backed up answers 200 with every
+            # one of the fourteen fields as explicit JSON null rather than
+            # omitting them, and that is the state this resource is usually in.
             return self._json(request, {"response": {
-                "status": "COMPLETED",
-                "startDate": started.strftime("%a %b %d %H:%M:%S UTC %Y"),
-                "name": "nightly-config",
+                name: None for name in (
+                    "repository", "type", "name", "startDate", "error",
+                    "action", "scheduled", "status", "message", "justComplete",
+                    "percentComplete", "details", "hostName", "initiatedFrom")
             }})
         if path.startswith("/certs/system-certificate/"):
             node = path.rsplit("/", 1)[-1]
@@ -725,8 +1010,11 @@ class FakeIseHttp:
                                       self._trusted_certificates())
         if path == "/policy/device-admin/policy-set":
             self.clock.advance(self.latency.openapi(), "pan")
-            return self._json(request, {"response": [
-                {"id": f"ps-{index}", "name": name, "rank": index}
+            return self._json(request, {"version": "1.0.0", "response": [
+                {"default": index == 0, "id": f"ps-{index}", "name": name,
+                 "description": f"{name} policy set", "hitCounts": 0,
+                 "rank": index, "state": "enabled", "condition": None,
+                 "serviceName": "Default Device Admin", "isProxy": False}
                 for index, name in enumerate(self.estate.policy_sets)]})
         policy_rules = re.fullmatch(
             r"/policy/device-admin/policy-set/(ps-\d+)/(authentication|authorization)",
@@ -737,24 +1025,44 @@ class FakeIseHttp:
             index = int(policy_id.removeprefix("ps-"))
             count = 3 + index % 5 if rule_type == "authentication" else 8 + index % 9
             self.clock.advance(self.latency.openapi(count), "pan")
-            return self._json(request, {"response": [
+            # The rule's identity is NESTED under a "rule" sub-object; what sits
+            # at the top level beside it is the rule's effect. A flat row made
+            # any reader of a rule name or state look like it would work.
+            extra = (
+                {"identitySourceName": "All_User_ID_Stores",
+                 "ifAuthFail": "REJECT", "ifUserNotFound": "REJECT",
+                 "ifProcessFail": "DROP"}
+                if rule_type == "authentication" else
+                {"commands": [COMMAND_SETS[0]], "profile": SHELL_PROFILES[0]})
+            return self._json(request, {"version": "1.0.0", "response": [
                 {
-                    "id": f"{policy_id}-{rule_type}-{rule}",
-                    "name": f"{rule_type}-{rule}",
-                    "rank": rule,
+                    "rule": {
+                        "default": rule == count - 1,
+                        "id": f"{policy_id}-{rule_type}-{rule}",
+                        "name": f"{rule_type}-{rule}",
+                        "hitCounts": 0,
+                        "rank": rule,
+                        "state": "enabled",
+                        "condition": None,
+                    },
+                    **extra,
                 }
                 for rule in range(count)
             ]})
+        # Both lists are BARE JSON, with no response envelope, and ISE mirrors
+        # its deny-all command set into the shell-profile list under the same
+        # id -- so the two lists overlap and counting the profile list verbatim
+        # reports a shell profile that does not exist.
         if path == "/policy/device-admin/command-sets":
             self.clock.advance(self.latency.openapi(), "pan")
-            return self._json(request, {"response": [
-                {"id": f"cs-{index}", "name": name}
-                for index, name in enumerate(COMMAND_SETS)]})
+            return self._json(request, self._command_sets())
         if path == "/policy/device-admin/shell-profiles":
             self.clock.advance(self.latency.openapi(), "pan")
-            return self._json(request, {"response": [
+            mirrored = [row for row in self._command_sets()
+                        if row["name"].startswith("Deny")]
+            return self._json(request, [
                 {"id": f"sp-{index}", "name": name}
-                for index, name in enumerate(SHELL_PROFILES)]})
+                for index, name in enumerate(SHELL_PROFILES)] + mirrored)
         self.unhandled.append(f"api/v1{path}")
         return self._send(request, 404, b'{"error":"no such OpenAPI resource"}',
                           "application/json")
@@ -764,7 +1072,9 @@ class FakeIseHttp:
         start = (page - 1) * size
         window = rows[start:start + size]
         self.clock.advance(self.latency.openapi(len(window)), "pan")
-        payload = {"response": window}
+        # OpenAPI signals the last page with an explicit nextPage: null, where
+        # ERS omits the key -- two different terminations on one appliance.
+        payload = {"response": window, "nextPage": None, "version": "1.0.1"}
         if start + size < len(rows):
             payload["nextPage"] = {
                 "rel": "next",
@@ -772,7 +1082,11 @@ class FakeIseHttp:
             }
         return self._json(request, payload)
 
-    def _certificate(self, name, node, days, usage):
+    def _command_sets(self):
+        return [{"name": name, "id": f"cs-{index}"}
+                for index, name in enumerate(COMMAND_SETS)]
+
+    def _certificate(self, name, node, days, **fields):
         expires = datetime.now(timezone.utc) + timedelta(days=days)
         return {
             "id": f"cert-{node}-{name}",
@@ -780,23 +1094,44 @@ class FakeIseHttp:
             "expirationDate": expires.strftime("%a %b %d %H:%M:%S UTC %Y"),
             "issuedTo": node,
             "issuedBy": "example-issuing-ca",
-            "keySize": 2048,
-            "selfSigned": False,
-            "usedBy": usage,
+            "signatureAlgorithm": "SHA256withRSA",
+            "sha256Fingerprint": f"{abs(hash((node, name))):064x}"[:64],
+            **fields,
         }
+
+    # The system store's usage is a comma-joined multi-value whose member order
+    # differs between nodes for the same set, so the same logical usage mints a
+    # different label on each node unless the reader sorts it. A single-valued
+    # enum hid that entirely.
+    _SYSTEM_USAGES = (
+        ("Admin", "EAP Authentication", "Portal", "RADIUS DTLS"),
+        ("pxGrid",), ("Portal",), ("ISE Messaging Service",),
+        ("SAML",), ("Not in use",), ("EAP Authentication",),
+    )
 
     def _system_certificates(self, node):
         offset = sum(ord(character) for character in node)
-        usages = ("Admin", "EAP Authentication", "pxGrid", "Portal", "RADIUS DTLS",
-                  "SAML", "ISE Messaging Service")
-        return [self._certificate(usage.replace(" ", "-"), node,
-                                  30 + (offset + position * 97) % 700, usage)
-                for position, usage in enumerate(usages)]
+        rows = []
+        for position, usage in enumerate(self._SYSTEM_USAGES):
+            members = list(usage)
+            if offset % 2:
+                members.reverse()
+            rows.append(self._certificate(
+                f"system-{position}", node, 30 + (offset + position * 97) % 700,
+                keySize=2048, selfSigned=False, groupTag="",
+                usedBy=", ".join(members)))
+        return rows
 
     def _trusted_certificates(self):
-        return [self._certificate(f"trusted-ca-{index:03d}", "trust_store",
-                                  45 + (index * 37) % 3000, "Infrastructure")
-                for index in range(180)]
+        # No selfSigned, no usedBy, and keySize as a STRING: the trusted store
+        # is a different shape from the system store, which the reader has to
+        # survive rather than merely happen to.
+        return [self._certificate(
+            f"trusted-ca-{index:03d}", "trust_store", 45 + (index * 37) % 3000,
+            keySize="2048", status="Enabled",
+            trustedFor="Infrastructure,Cisco Services"
+            if index % 3 else "Cisco Services")
+            for index in range(180)]
 
     # --- MnT ------------------------------------------------------------
 
@@ -817,8 +1152,8 @@ class FakeIseHttp:
         if path.startswith("/Session/MACAddress/"):
             self.clock.advance(self.latency.mnt_detail(), "mnt")
             mac = path.rsplit("/", 1)[-1]
-            return self._send(request, 200, self.estate.session_detail_xml(mac),
-                              "application/xml")
+            status, body = self.estate.session_detail_response(mac)
+            return self._send(request, status, body, "application/xml")
         self.unhandled.append(f"mnt{path}")
         return self._send(request, 404, b"<error/>", "application/xml")
 
@@ -926,13 +1261,18 @@ class SimulatedDataConnect(DataConnectTransport):
     dataset receives exactly the columns it asked for.
     """
 
-    def __init__(self, config, estate, clock, latency):
+    def __init__(self, config, estate, clock, latency, *, empty_views=()):
         super().__init__(config)
         self.estate = estate
         self.clock = clock
         self.lane = LaneClock(clock)
         self.latency = latency
         self.statements = []
+        # Views to answer with no rows. An empty reporting view is a real and
+        # common appliance state -- seven of them are empty on the lab -- and it
+        # is the one answer a synthesiser that reads the statement's own SELECT
+        # list can never produce on its own, which is why it is declared here.
+        self.empty_views = frozenset(name.lower() for name in empty_views)
         self._catalog = None
 
     def connect(self):
@@ -958,7 +1298,8 @@ class SimulatedDataConnect(DataConnectTransport):
             return ["table_name", "column_name"], rows, self.latency.oracle_query(
                 view, len(rows))
 
-        columns, rows = synthesize(text, self.estate, parameters)
+        columns, rows = synthesize(text, self.estate, parameters,
+                                   empty_views=self.empty_views)
         self.statements.append((view, len(rows)))
         return columns, rows, self.latency.oracle_query(view, len(rows))
 
@@ -1117,6 +1458,30 @@ def _row_offset(text):
     return int(match.group(1)) if match else 0
 
 
+# Columns that exist in these views and are NULL on every row of a 3.3 P11
+# appliance, with the placeholder the dataset's own NVL substitutes. Keyed by
+# view because the same dimension name is live in one and dead in another:
+# radius_reporting's `policy` is AUTHORIZATION_RULE and carries values,
+# radius_accounting's is AUTHORIZATION_POLICY and never does. A synthesiser that
+# manufactures a value domain for these reports a breakdown where the appliance
+# publishes one placeholder series.
+EMPTY_DIMENSIONS = {
+    "endpoints_data": {"identity_group": "none"},
+    "profiled_endpoints_summary": {"action": "unknown"},
+    "radius_accounting": {"policy": "unknown"},
+    "radius_authentication_summary": {"security_group": "unknown"},
+}
+
+# The views this appliance answers with no rows at all, for a run that wants the
+# lab's shape rather than a populated production one.
+LAB_EMPTY_VIEWS = frozenset({
+    "radius_errors_view", "system_diagnostics_view",
+    "posture_assessment_by_endpoint", "posture_assessment_by_condition",
+    "tacacs_authentication_last_two_days", "tacacs_authorization_last_two_days",
+    "tacacs_accounting_last_two_days",
+})
+
+
 class Domains:
     """What a grouped column's values are, and how many there are.
 
@@ -1125,21 +1490,27 @@ class Domains:
     scale. That is the point: the row ceiling, the byte ceiling, the truncation
     signal and the resulting Prometheus cardinality are then all exercised at
     the size the exporter claims to support.
+
+    ``empty`` names the dimensions this statement's view carries and never
+    populates; each answers with its single placeholder value.
     """
 
-    def __init__(self, estate):
+    def __init__(self, estate, empty=None):
         self.estate = estate
+        self.empty = empty or {}
 
     def values(self, name):
         estate = self.estate
         name = name.lower()
+        if name in self.empty:
+            return [self.empty[name]]
         if name in ("ise_node", "node", "psn", "server", "acs_server"):
             return list(estate.psns)
         if name in ("nad", "network_device_name", "device_name", "device",
                     "nas_name", "nas_identifier"):
             return [device["name"] for device in estate.nads]
         if name in ("nas_ip_address", "nas_ipv4_address", "ip_address"):
-            return [device["ip"] for device in estate.nads]
+            return [device["nas_ip"] for device in estate.nads]
         if name in ("endpoint", "mac", "mac_address", "calling_station_id",
                     "endpoint_id", "endpoint_mac", "endpoint_mac_address"):
             return [mac_of(index) for index in range(estate.endpoint_count)]
@@ -1246,7 +1617,34 @@ def _grouped_columns(text, inner, expressions, columns):
     return []
 
 
-def _marginal_rows(text, columns, estate, limit, offset, numeric=()):
+_FROM_VIEW = re.compile(r"\bfrom\s+([A-Za-z_][A-Za-z0-9_$#]*)", re.I)
+
+
+def from_views(text):
+    """Every table name this statement selects from, lowercased."""
+    return {match.group(1).lower() for match in _FROM_VIEW.finditer(text)}
+
+
+def _empty_row(columns, expressions, literals):
+    """The single row Oracle returns for a bare aggregate over an empty view.
+
+    COUNT and SUM answer 0, every other aggregate and every plain column answers
+    NULL, and a literal in the SELECT list is still a literal. A GROUP BY over
+    the same view returns no rows at all -- the two shapes are different and the
+    exporter has to survive both, which is the whole reason for modelling this.
+    """
+    row = []
+    for name, expression in zip(columns, expressions):
+        if name in literals:
+            row.append(literals[name])
+            continue
+        found = _AGGREGATE.search(expression)
+        row.append(0 if found and found.group(1).lower() in ("sum", "count")
+                   else None)
+    return tuple(row)
+
+
+def _marginal_rows(text, columns, estate, limit, offset, numeric=(), empty=None):
     """One row per (dimension, value) pair across every GROUPING SET.
 
     This is `reporting.marginals`: the breakdowns add rather than multiply, and
@@ -1254,7 +1652,7 @@ def _marginal_rows(text, columns, estate, limit, offset, numeric=()):
     what makes the truncation signal (returned versus existing) meaningful at
     scale -- at 5,000 NADs some of these genuinely do not fit.
     """
-    domains = Domains(estate)
+    domains = Domains(estate, empty)
     pairs = [(dimension, value)
              for _expression, dimension in _GROUPING_CASE.findall(text)
              for value in domains.values(dimension)]
@@ -1268,18 +1666,24 @@ def _marginal_rows(text, columns, estate, limit, offset, numeric=()):
     return rows
 
 
-def synthesize(text, estate, parameters=None):
+def synthesize(text, estate, parameters=None, empty_views=()):
     """Answer one statement from its own shape.
 
     The SELECT list gives the columns, the GROUP BY / GROUPING SETS / PARTITION
     BY gives the row count, and everything left over becomes a measure.
+
+    ``empty_views`` is the one thing that cannot be read off the statement: a
+    view holding no rows looks identical to a busy one from its SQL, so it has
+    to be declared. Each UNION branch is decided on its own view, which is what
+    makes a freshness probe over a mix of empty and populated views work.
     """
     del parameters
     branches = _split_on_keyword(text, " union all ")
     if len(branches) > 1:
         columns, rows = [], []
         for branch in branches:
-            branch_columns, branch_rows = synthesize(branch, estate)
+            branch_columns, branch_rows = synthesize(
+                branch, estate, empty_views=empty_views)
             columns = columns or branch_columns
             rows.extend(branch_rows)
         return columns, rows[:_row_limit(text)]
@@ -1309,16 +1713,32 @@ def synthesize(text, estate, parameters=None):
     numeric = {name for name, expression in zip(columns, expressions)
                if _AGGREGATE.search(expression)}
     limit, offset = _row_limit(text), _row_offset(text)
+    views = from_views(text)
+    is_empty = bool(views & frozenset(empty_views))
+    empty_dimensions = {}
+    for view in views:
+        empty_dimensions.update(EMPTY_DIMENSIONS.get(view, {}))
     if "grouping sets" in text.lower():
+        if is_empty:
+            return columns, []
         return columns, _marginal_rows(
-            text, columns, estate, limit, offset, numeric)
+            text, columns, estate, limit, offset, numeric, empty_dimensions)
+
+    if is_empty:
+        # A GROUP BY over an empty view returns nothing; a bare aggregate still
+        # returns its one row of zeros and NULLs. The test is the clause and not
+        # whether the grouped columns resolved, so a grouping expression this
+        # parser cannot follow does not silently fall back to the wrong shape.
+        if _clause(text, "group by") or (inner and _clause(inner, "group by")):
+            return columns, []
+        return columns, [_empty_row(columns, expressions, literals)]
 
     grouped = _grouped_columns(text, inner, expressions, columns)
     if not grouped:
         return columns, [
             _fill(columns, {**literals, "group_total": 1}, 0, estate, numeric)]
 
-    domains = Domains(estate)
+    domains = Domains(estate, empty_dimensions)
     spaces = [domains.values(name) for name in grouped]
     total = 1
     for space in spaces:

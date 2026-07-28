@@ -73,3 +73,76 @@ def test_fetch_publishes_total_and_source_action_pairs():
         7.0,
         {"source": "RADIUS Probe", "action": "Profiled"},
     ) in ctx.samples
+
+
+class _Context:
+    dataset = SimpleNamespace(name="profile_events", default_interval=21600)
+    limits = LIMITS
+
+    def __init__(self, transport):
+        self.transport = transport
+        self.samples = []
+        self.shared = []
+
+    def set(self, family, sample_value, /, **labels):
+        self.samples.append((family._name, sample_value, labels))
+
+    def set_shared(self, family, sample_value, /, **labels):
+        self.shared.append((family._name, sample_value, labels))
+
+
+def test_an_always_null_action_column_leaves_the_source_breakdown_standing():
+    # ENDPOINT_ACTION_NAME is NULL in 290 of 290 rows on ISE 3.3 P11, so the
+    # pair is a source breakdown with a constant label -- but SOURCE itself
+    # carries four real probe names and must keep publishing.
+    class Transport:
+        schema = {"PROFILED_ENDPOINTS_SUMMARY": {
+            "TIMESTAMP", "SOURCE", "ENDPOINT_ACTION_NAME"}}
+
+        def query_many(self, statements):
+            return {
+                "totals": [{"events": 290}],
+                "source_action": [
+                    {"source": "RADIUS Probe", "action": "unknown",
+                     "events": 229, "group_total": 4},
+                    {"source": "DHCP Probe", "action": "unknown",
+                     "events": 8, "group_total": 4},
+                ],
+            }
+
+    ctx = _Context(Transport())
+    profile_events.fetch(ctx)
+
+    assert ("ise3_endpoint_profile_events_by_source", 229.0,
+            {"source": "RADIUS Probe"}) in ctx.samples
+    assert not [sample for sample in ctx.samples
+                if sample[0] == "ise3_endpoint_profile_events"]
+    assert ("ise3_breakdown_dimension_populated", 0,
+            {"dataset": "profile_events", "dimension": "action"}) in ctx.shared
+
+
+def test_a_populated_action_column_still_publishes_the_pair():
+    class Transport:
+        schema = {"PROFILED_ENDPOINTS_SUMMARY": {
+            "TIMESTAMP", "SOURCE", "ENDPOINT_ACTION_NAME"}}
+
+        def query_many(self, statements):
+            return {
+                "totals": [{"events": 12}],
+                "source_action": [
+                    {"source": "RADIUS Probe", "action": "Profiled",
+                     "events": 7, "group_total": 2},
+                    {"source": "RADIUS Probe", "action": "unknown",
+                     "events": 5, "group_total": 2},
+                ],
+            }
+
+    ctx = _Context(Transport())
+    profile_events.fetch(ctx)
+
+    assert ("ise3_endpoint_profile_events", 7.0,
+            {"source": "RADIUS Probe", "action": "Profiled"}) in ctx.samples
+    assert ("ise3_endpoint_profile_events_by_source", 12.0,
+            {"source": "RADIUS Probe"}) in ctx.samples
+    assert ("ise3_breakdown_dimension_populated", 1,
+            {"dataset": "profile_events", "dimension": "action"}) in ctx.shared

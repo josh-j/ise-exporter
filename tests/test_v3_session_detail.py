@@ -21,14 +21,11 @@ FULL = {
     "selected_azn_profiles": "PermitAccess,Quarantine",
     "other_attr_string":
         ":!:ISEPolicySetName=Wired Open Mode:!:"
-        "AuthorizationPolicyMatchedRule=Basic_Authenticated_Access:!:",
+        "AuthorizationPolicyMatchedRule=Basic_Authenticated_Access:!:"
+        "StepLatency=1=5;2=12:!:TotalAuthenLatency=24:!:",
     "posture_status": "Compliant",
-    "posture_report": "AV_Policy:Passed;FW_Policy:Failed",
-    "posture_agent_version": "5.1.2.42",
-    "operating_system": "Windows 11",
-    "execution_steps": "1001,1002",
-    "step_latency": "1=5;2=12",
-    "total_authentication_latency": "24",
+    "message_code": "5200",
+    "response_time": "24",
     # Everything below is real MnT payload that nothing has ever read.
     "acct_session_id": "0A0101010000001F",
     "audit_session_id": "0A01010100000020",
@@ -52,10 +49,9 @@ def test_the_projection_keeps_what_its_readers_use():
     assert projected["policy_set"] == "Wired Open Mode"
     assert projected["authz_rule"] == "Basic_Authenticated_Access"
     assert projected["posture_status"] == "Compliant"
-    assert projected["posture_report"] == "AV_Policy:Passed;FW_Policy:Failed"
-    assert projected["agent_version"] == "5.1.2.42"
-    assert projected["operating_system"] == "Windows 11"
-    assert projected["execution_steps"] == "1001,1002"
+    assert projected["message_code"] == "5200"
+    # Both latencies are attributes of other_attr_string; ISE has no element for
+    # either, so reading them as top-level fields collected nothing.
     assert projected["step_latency"] == "1=5;2=12"
     assert projected["total_authentication_latency"] == "24"
 
@@ -69,6 +65,52 @@ def test_the_projection_drops_what_nothing_reads():
         assert field not in projected, f"{field} is retained but never read"
     # 20,000 of these are held at once, so the shape is the memory.
     assert len(projected) < len(FULL)
+
+
+def test_posture_fields_stay_projected_for_estates_that_run_posture():
+    # They are empty on a lab with no Secure Client and populated where posture
+    # runs, so the projection keeps reading them. Dropping a lookup because one
+    # estate never exercises it removes a working production metric -- the test
+    # is whether ISE can emit the field, not whether it did here.
+    projected = project(FULL)
+    for field in ("posture_report", "agent_version", "operating_system"):
+        assert field in projected
+    populated = project({
+        "posture_report": "AV_Installed:Passed",
+        "PostureAgentVersion": "5.1.2.42",
+        "os_type": "Windows 11",
+    })
+    assert populated["posture_report"] == "AV_Installed:Passed"
+    assert populated["agent_version"] == "5.1.2.42"
+    assert populated["operating_system"] == "Windows 11"
+
+
+def test_execution_steps_is_not_offered_to_readers():
+    # Genuinely dropped: no position in StepLatency maps to a message code, so
+    # the codes are no longer projected for a mapping that cannot be made.
+    assert "execution_steps" not in project(FULL)
+
+
+def test_total_latency_falls_back_to_response_time():
+    # response_time is a real element and carried exactly the TotalAuthenLatency
+    # value on every sampled session; the attribute still wins where both exist.
+    assert project({"response_time": "42"})["total_authentication_latency"] == "42"
+    assert project({
+        "response_time": "42",
+        "other_attr_string": ":!:TotalAuthenLatency=25:!:",
+    })["total_authentication_latency"] == "25"
+
+
+def test_the_awkward_shapes_of_a_real_other_attr_string_parse():
+    # Leading delimiter, keys with spaces, and values that contain their own
+    # '=' and ';' -- StepLatency is the whole run of steps in one value.
+    parsed = parse_attributes(
+        ":!:Ops Owner=Ops Owner#All Ops Owners#AD Lab:!:StepLatency=1=0;2=3"
+        ":!:AD-User-Resolved-DNs=CN=user3,OU=Lab:!:TotalAuthenLatency=25:!:")
+    assert parsed["Ops Owner"] == "Ops Owner#All Ops Owners#AD Lab"
+    assert parsed["StepLatency"] == "1=0;2=3"
+    assert parsed["AD-User-Resolved-DNs"] == "CN=user3,OU=Lab"
+    assert parsed["TotalAuthenLatency"] == "25"
 
 
 def test_location_is_not_retained_per_session():
@@ -97,14 +139,6 @@ def test_an_accounting_only_record_is_distinguishable_from_a_failed_one():
     ("posture_status", "Compliant", "posture_status"),
     ("PostureStatus", "Compliant", "posture_status"),
     ("posture_assessment_status", "Compliant", "posture_status"),
-    ("posture_report", "P:Passed", "posture_report"),
-    ("PostureReport", "P:Passed", "posture_report"),
-    ("posture_agent_version", "5.1", "agent_version"),
-    ("PostureAgentVersion", "5.1", "agent_version"),
-    ("agent_version", "5.1", "agent_version"),
-    ("operating_system", "Windows", "operating_system"),
-    ("os_type", "Windows", "operating_system"),
-    ("endpoint_operating_system", "Windows", "operating_system"),
 ])
 def test_ise_spelling_variants_are_resolved_once_at_the_boundary(field, value, key):
     # They used to be tried on every read of every record on every cycle. Now a

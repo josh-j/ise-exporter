@@ -24,8 +24,18 @@ from ise_exporter3.transports import Transport
 def _detail(mac, *, nad="sw-01", location="All Locations#Germany#Ramstein AB",
             nas_ip="10.1.1.1", passed=True, method="dot1x", profile="PermitAccess",
             rule="Basic_Authenticated_Access", policy_set="Wired Open Mode",
-            failure_reason="", total_latency="", execution_steps="",
-            step_latency=""):
+            failure_reason="", total_latency="", step_latency="",
+            response_time="", message_code=""):
+    # Shaped like the appliance: ISE 3.3 carries both latencies as attributes of
+    # other_attr_string and neither as an element, and sends no failure_reason.
+    attributes = [
+        f"ISEPolicySetName={policy_set}",
+        f"AuthorizationPolicyMatchedRule={rule}",
+    ]
+    if step_latency:
+        attributes.append(f"StepLatency={step_latency}")
+    if total_latency:
+        attributes.append(f"TotalAuthenLatency={total_latency}")
     record = {
         "calling_station_id": mac,
         "network_device_name": nad,
@@ -33,14 +43,13 @@ def _detail(mac, *, nad="sw-01", location="All Locations#Germany#Ramstein AB",
         "nas_ip_address": nas_ip,
         "authentication_method": method,
         "selected_azn_profiles": profile,
-        "total_authentication_latency": total_latency,
-        "execution_steps": execution_steps,
-        "step_latency": step_latency,
-        "other_attr_string":
-            f":!:ISEPolicySetName={policy_set}:!:"
-            f"AuthorizationPolicyMatchedRule={rule}:!:",
+        "other_attr_string": ":!:" + ":!:".join(attributes) + ":!:",
     }
     record["passed" if passed else "failed"] = "true"
+    if response_time:
+        record["response_time"] = response_time
+    if message_code:
+        record["message_code"] = message_code
     if failure_reason:
         record["failure_reason"] = failure_reason
     return record
@@ -56,11 +65,21 @@ class MnT(Transport):
         self.details = details or {}
         self.fail = set(fail)
         self.detail_requests = []
+        # The active list is a session index: ISE 3.3 sends no identity group,
+        # NAD name or posture status, so scope can key only on the NAS address.
+        self.nas_ips = {}
+        self.extra_sessions = []
+
+    def _session(self, mac):
+        session = {"calling_station_id": mac}
+        if mac in self.nas_ips:
+            session["nas_ip_address"] = self.nas_ips[mac]
+        return session
 
     def get_mnt_xml(self, path, *, api="mnt_xml"):
         if path.endswith("/ActiveList"):
-            return {"total": len(self.macs),
-                    "sessions": [{"calling_station_id": mac} for mac in self.macs]}
+            rows = [self._session(mac) for mac in self.macs] + self.extra_sessions
+            return {"total": len(rows), "sessions": rows}
         mac = path.rsplit("/", 1)[-1]
         self.detail_requests.append(mac)
         if mac in self.fail:
@@ -182,10 +201,71 @@ def test_departed_endpoints_are_dropped_so_the_cache_tracks_the_active_set():
     _run(transport)
     assert _sample("ise3_detail_cache_entries", cache=authz.CACHE) == 2
 
+    # Held through the grace window, so the size gauge still counts it -- it is
+    # real memory -- but coverage counts only endpoints that are actually here.
     transport.macs = ["00:11:22:33:44:01"]
     _run(transport)
-    assert _sample("ise3_detail_cache_entries", cache=authz.CACHE) == 1
+    assert _sample("ise3_detail_cache_entries", cache=authz.CACHE) == 2
     assert _coverage() == 1.0
+
+    # Past the window it goes, so the cache still tracks the active set.
+    cache = detail_cache.shared(authz.CACHE)
+    cache.retain({"00:11:22:33:44:01"}, 0)
+    assert len(cache) == 1
+
+
+def test_a_reconnect_inside_the_grace_window_costs_no_request():
+    # The fetch is per arrival, and a roam or a sleep/wake reads as an arrival.
+    # Paying again for a decision that did not change is the cheapest waste to
+    # remove, so it is removed by default.
+    macs = ["00:11:22:33:44:01", "00:11:22:33:44:02"]
+    transport = MnT(macs)
+    _run(transport)
+    assert len(transport.detail_requests) == 2
+
+    transport.macs = ["00:11:22:33:44:01"]
+    _run(transport)
+    transport.macs = list(macs)
+    _run(transport)
+    assert len(transport.detail_requests) == 2, "a return must reuse the entry"
+
+
+def test_a_zero_grace_window_refetches_a_returning_endpoint():
+    # The opposite of the case above, so the option is doing the work rather
+    # than something else keeping the entry alive.
+    macs = ["00:11:22:33:44:01", "00:11:22:33:44:02"]
+    transport = MnT(macs)
+    _run_with({"detail_grace_minutes": 0}, None, None, transport=transport)
+    assert len(transport.detail_requests) == 2
+
+    transport.macs = macs[:1]
+    _run_with({"detail_grace_minutes": 0}, None, None, transport=transport)
+    transport.macs = list(macs)
+    _run_with({"detail_grace_minutes": 0}, None, None, transport=transport)
+    assert len(transport.detail_requests) == 3, "dropped at once, so refetched"
+
+
+def test_a_skipped_segment_is_never_detail_fetched():
+    # The NAS address is on the active list, so this is decided before a request
+    # is spent. The endpoint still exists -- it just leaves the authorization
+    # breakdowns, which is the trade being made.
+    macs = ["00:11:22:33:44:01", "00:11:22:33:44:02"]
+    transport = MnT(macs)
+    transport.nas_ips = {"00:11:22:33:44:01": "10.10.0.1",
+                         "00:11:22:33:44:02": "10.20.0.1"}
+    _run_with({"skip_nas_ip_prefixes": "10.20."}, macs, None, transport=transport)
+    assert transport.detail_requests == ["00:11:22:33:44:01"]
+
+
+def test_an_endpoint_is_kept_when_only_one_of_its_sessions_is_skipped():
+    macs = ["00:11:22:33:44:01"]
+    transport = MnT(macs)
+    transport.nas_ips = {"00:11:22:33:44:01": "10.20.0.1"}
+    transport.extra_sessions = [
+        {"calling_station_id": "00:11:22:33:44:01",
+         "nas_ip_address": "10.10.0.1"}]
+    _run_with({"skip_nas_ip_prefixes": "10.20."}, macs, None, transport=transport)
+    assert transport.detail_requests == ["00:11:22:33:44:01"]
 
 
 def test_the_budget_reports_what_it_left_for_the_next_cycle(monkeypatch):
@@ -246,14 +326,71 @@ def test_posture_refuses_rather_than_publishing_an_empty_estate():
     assert not outcome.ok
     assert outcome.reason == "dependency_pending"
     assert _sample("ise3_posture_endpoints", provider="mnt",
-                   status="NotApplicable", ops_owner="unknown") is None
+                   status="Unavailable", ops_owner="unknown") is None
 
     # Once its peer has filled the cache, the same collection succeeds.
     _run(transport)
     detail_cache._CACHES.pop(authz.ACTIVE_LIST_CACHE, None)
     assert runner.run(entry, transport).ok
     assert _sample("ise3_posture_endpoints", provider="mnt",
-                   status="NotApplicable", ops_owner="unknown") == 1
+                   status="Unavailable", ops_owner="unknown") == 1
+
+
+
+def test_posture_reports_coverage_rather_than_dropping_the_dimension():
+    # A lab with no Secure Client leaves the posture fields empty. That is an
+    # estate fact, not an API limit, so the provider keeps reading them and
+    # coverage says 0.0 -- the signal an operator uses to tell "nothing runs
+    # posture here" from "the collector lost it".
+    from ise_exporter3.datasets import posture_current
+
+    mac = "00:11:22:33:44:01"
+    transport = MnT([mac], details={mac: _detail(
+        mac, total_latency="20", step_latency="1=5")})
+    entry = PlannedDataset(
+        name=posture_current.DATASET.name, description="", enabled=True,
+        interval=300, dataset=posture_current.DATASET,
+        provider=posture_current.DATASET.provider("mnt"))
+
+    _run(transport)
+    detail_cache._CACHES.pop(authz.ACTIVE_LIST_CACHE, None)
+    assert Runner(_config()).run(entry, transport).ok
+
+    for field in ("posture_report", "agent_version", "operating_system",
+                  "posture_status"):
+        assert _sample("ise3_session_detail_field_coverage",
+                       provider="mnt", field=field) == 0.0
+    assert _sample("ise3_session_detail_field_coverage",
+                   provider="mnt", field="step_latency") == 1.0
+    assert _sample("ise3_session_detail_field_coverage", provider="mnt",
+                   field="total_authentication_latency") == 1.0
+
+
+def test_posture_publishes_the_dimensions_once_secure_client_reports_them():
+    from ise_exporter3.datasets import posture_current
+
+    mac = "00:11:22:33:44:01"
+    detail = _detail(mac)
+    detail["posture_status"] = "Compliant"
+    detail["posture_report"] = "AV_Installed:Passed;Firewall:Failed"
+    detail["posture_agent_version"] = "5.1.2.42"
+    detail["operating_system"] = "Windows 11"
+    transport = MnT([mac], details={mac: detail})
+    entry = PlannedDataset(
+        name=posture_current.DATASET.name, description="", enabled=True,
+        interval=300, dataset=posture_current.DATASET,
+        provider=posture_current.DATASET.provider("mnt"))
+
+    _run(transport)
+    detail_cache._CACHES.pop(authz.ACTIVE_LIST_CACHE, None)
+    assert Runner(_config()).run(entry, transport).ok
+
+    assert _sample("ise3_posture_agent_version_endpoints",
+                   provider="mnt", agent_version="5.1.2.42") == 1
+    assert _sample("ise3_posture_endpoints_by_os",
+                   provider="mnt", os="Windows 11") == 1
+    assert _sample("ise3_posture_policy_results", provider="mnt",
+                   policy="Firewall", result="Failed") == 1
 
 
 def test_one_unreachable_endpoint_does_not_fail_the_dataset():
@@ -319,14 +456,15 @@ def _nad_coverage(breakdown="policy_set_nad"):
     )
 
 
-def _run_with(options, macs, details):
+def _run_with(options, macs, details, transport=None):
     document = {"targets": {"pan": {"host": "pan1", "user": "ro"},
                             "mnt": {"host": "mnt1"}},
                 "datasets": {"session_authorization": {"options": options}}}
     config = Config.from_document(
         document, path="test.toml", environ={"ISE_PASS": "secret"})
     detail_cache._CACHES.pop(authz.ACTIVE_LIST_CACHE, None)
-    outcome = Runner(config).run(_entry(), MnT(macs, details))
+    outcome = Runner(config).run(
+        _entry(), transport if transport is not None else MnT(macs, details))
     assert outcome.ok, f"{outcome.reason}: {outcome.detail}"
     return outcome
 
@@ -481,18 +619,19 @@ def test_failed_authentications_retain_authorization_context():
     ) == 1
 
 
-def test_authentication_and_step_latency_are_aggregated_from_mnt_detail():
+def test_authentication_and_step_latency_are_read_from_other_attr_string():
+    # The appliance has no step_latency or total_authen_latency element: both
+    # live in other_attr_string, and reading them as top-level fields published
+    # no series at all against real ISE.
     details = {
         "00:11:22:33:44:01": _detail(
             "00:11:22:33:44:01",
             total_latency="20",
-            execution_steps="1001,1002",
             step_latency="1=5;2=10",
         ),
         "00:11:22:33:44:02": _detail(
             "00:11:22:33:44:02",
             total_latency="40",
-            execution_steps="1001,1002",
             step_latency="1=15;2=30",
         ),
     }
@@ -503,16 +642,67 @@ def test_authentication_and_step_latency_are_aggregated_from_mnt_detail():
         statistic="mean",
     ) == pytest.approx(0.03)
     assert _sample(
+        "ise3_session_authentication_latency_samples", provider="mnt") == 2
+    # Labelled by StepLatency position. ISE reports one more execution step than
+    # it reports step latencies, so no position resolves to a message code.
+    assert _sample(
         "ise3_session_authentication_step_latency_seconds",
         provider="mnt",
-        step="1001",
+        step="1",
         statistic="max",
     ) == pytest.approx(0.015)
     assert _sample(
         "ise3_session_authentication_step_latency_samples",
         provider="mnt",
-        step="1002",
+        step="2",
     ) == 2
+
+
+def test_total_latency_falls_back_to_the_response_time_element():
+    # response_time carried exactly the TotalAuthenLatency value on every
+    # sampled session, so it answers when other_attr_string does not.
+    mac = "00:11:22:33:44:03"
+    details = {mac: _detail(mac, response_time="50")}
+    assert _run(MnT([mac], details=details)).ok
+    assert _sample(
+        "ise3_session_authentication_latency_seconds",
+        provider="mnt",
+        statistic="max",
+    ) == pytest.approx(0.05)
+
+
+def test_a_departed_endpoint_is_not_counted_as_a_detail_failure():
+    # ISE answers a MAC with no current session with HTTP 500 (cpm-code 34110),
+    # not an empty document, and that is the ordinary churn case: every session
+    # that ends between the ActiveList read and its detail fetch arrives here.
+    from ise_exporter3.transports import TransportError
+
+    class Departed(MnT):
+        def get_mnt_xml(self, path, *, api="mnt_xml"):
+            if not path.endswith("/ActiveList"):
+                self.detail_requests.append(path.rsplit("/", 1)[-1])
+                raise TransportError(
+                    "http_error", "ISE returned HTTP 500 for mnt_session_detail",
+                    status=500, code=authz.MNT_NO_SESSION_CODE)
+            return super().get_mnt_xml(path, api=api)
+
+    before = _sample("ise3_detail_fetches_total",
+                     cache=authz.CACHE, result="failed") or 0
+    assert _run(Departed(["00:11:22:33:44:0B"])).ok
+    assert _sample("ise3_detail_fetches_total",
+                   cache=authz.CACHE, result="gone") == 1
+    assert _sample("ise3_detail_fetches_total",
+                   cache=authz.CACHE, result="failed") == before
+
+
+def test_a_failure_without_a_failure_reason_falls_back_to_the_message_code():
+    # No failure_reason element exists on a real session document; message_code
+    # is the ISE result code it does carry.
+    mac = "00:11:22:33:44:0C"
+    details = {mac: _detail(mac, passed=False, message_code="11007")}
+    assert _run(MnT([mac], details=details)).ok
+    assert _sample("ise3_session_failure_reason_endpoints", provider="mnt",
+                   reason_code="11007", ops_owner="unknown") == 1
 
 
 def test_an_accounting_only_record_is_not_counted_as_an_authorization():

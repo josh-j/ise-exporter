@@ -3,6 +3,12 @@
 OpenAPI only. This is also the dataset that proves the appliance still matches
 the supported contract, so it fails closed on an unexpected version or patch
 level rather than exporting a number for a release nobody has tested.
+
+/patch is a bare object with no response envelope, and its patchVersion list
+holds only the HIGHEST installed patch -- ISE does not enumerate the ones beneath
+it. ``ise3_patch_installed`` therefore has exactly one series in production, and
+the absence of a patch_number below the level is not evidence it is missing;
+``ise3_patch_level`` is the number to alert on.
 """
 from prometheus_client import Gauge
 

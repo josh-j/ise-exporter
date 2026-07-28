@@ -65,12 +65,20 @@ FAILURE_EXPLANATIONS = {
 class TransportError(RuntimeError):
     """A bounded, typed transport failure carried into dataset health."""
 
-    def __init__(self, reason, detail=""):
+    def __init__(self, reason, detail="", status=0, code=""):
         reason = reason if reason in FAILURE_REASONS else "unexpected_error"
         detail = str(detail or FAILURE_EXPLANATIONS[reason])
         super().__init__(detail)
         self.reason = reason
         self.detail = detail
+        # The HTTP status, and for MnT the <cpm-code> out of its error body.
+        # A reader that has to recover either from the detail text is reading
+        # a sentence written for a human: MnT answers a MAC with no current
+        # session with 500 and cpm-code 34110, which is an ordinary event, and
+        # telling it apart from an outage decides whether a dataset counts a
+        # failure.
+        self.status = int(status or 0)
+        self.code = str(code or "")
 
 
 class Transport:

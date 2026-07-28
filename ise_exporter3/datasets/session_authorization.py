@@ -51,6 +51,7 @@ from ..labels import label
 from ..model import Cost, Dataset, Option, Provider
 from ..pxgrid import normalize_mac as _canonical_mac
 from ..session_detail import project
+from ..transports import TransportError
 
 
 CACHE = "mnt_session_detail"
@@ -121,11 +122,14 @@ authentication_latency_samples = Gauge(
     ["provider"])
 step_latency = Gauge(
     "ise3_session_authentication_step_latency_seconds",
-    "Current MnT authentication-step latency across usable session-detail samples",
+    "Current MnT authentication-step latency across usable session-detail "
+    "samples. step is the position within other_attr_string.StepLatency, not an "
+    "ISE message code: ISE reports one more execution step than it reports step "
+    "latencies, so no position can be mapped to a code",
     ["provider", "step", "statistic"])
 step_latency_samples = Gauge(
     "ise3_session_authentication_step_latency_samples",
-    "Current MnT session details carrying usable latency for each step",
+    "Current MnT session details carrying usable latency for each step position",
     ["provider", "step"])
 
 _METRICS = (status_endpoints, failure_reasons, auth_methods, authz_profiles,
@@ -145,8 +149,10 @@ WARMUP_LANE_FRACTION = 0.5
 # typically runs, so "one series per NAD" can be stated as a number rather than
 # as a shape. The real count comes from the appliance and is not knowable here.
 TYPICAL_POLICY_SETS = 4
-MAX_STEP_CODES = 256
-MAX_ISE_STEP_CODE = 999_999
+# Step positions published, and the highest position accepted. ISE 3.3 reports
+# 27 of them on a dot1x session; the bound is only there so a malformed
+# population cannot manufacture an unbounded label domain.
+MAX_STEP_POSITIONS = 256
 
 
 def _top_nads_danger(value, scale):
@@ -181,7 +187,44 @@ def _detail_refresh_danger(value, scale):
     return ""
 
 
+def _detail_grace_danger(value, scale):
+    if value > 240:
+        return (
+            "datasets.session_authorization.options.detail_grace_minutes = "
+            f"{value} holds the decision of a departed endpoint for {value / 60:.0f}h. "
+            "An endpoint that returns inside that window keeps its old "
+            "authorization until detail_refresh_hours elapses")
+    return ""
+
+
 OPTIONS = (
+    Option(
+        name="detail_grace_minutes",
+        default=15,
+        minimum=0,
+        maximum=1440,
+        # The fetch is per arrival, and a roam, a sleep/wake or a session that
+        # straddles a cycle boundary all read as arrivals. Holding a departed
+        # endpoint briefly makes its return free, which is the cheapest request
+        # reduction available here because the decision is unchanged.
+        description="minutes an endpoint that left the active list keeps its "
+                    "cached detail, so a reconnect inside the window costs no "
+                    "request; 0 drops it immediately",
+        danger=_detail_grace_danger,
+    ),
+    Option(
+        name="skip_nas_ip_prefixes",
+        default="",
+        # Keyed on the NAS address because that is what the active list gives
+        # us. ISE 3.3 returns a session index -- user, MAC, NAS IP, framed IP,
+        # session ids and PSN -- and nothing richer, so identity group or NAD
+        # name could only be learned by making the request this avoids.
+        description="comma-separated NAS address prefixes whose endpoints are "
+                    "never detail-fetched, e.g. \"10.20.\"; they still count in "
+                    "active_sessions but leave every authorization breakdown, "
+                    "so name only segments whose policy detail you do not "
+                    "analyse",
+    ),
     Option(
         name="detail_refresh_hours",
         default=24,
@@ -260,6 +303,50 @@ def active_macs(sessions):
     }
 
 
+def _skipped_prefixes(ctx):
+    return tuple(
+        prefix.strip()
+        for prefix in str(ctx.option("skip_nas_ip_prefixes") or "").split(",")
+        if prefix.strip()
+    )
+
+
+def detail_macs(sessions, skip_prefixes):
+    """MACs whose detail is worth a request, decided from the active list.
+
+    An endpoint holding several sessions is in scope unless every one of them
+    is on a skipped segment: the cheaper reading would drop a device the moment
+    one of its sessions looked uninteresting.
+    """
+    if not skip_prefixes:
+        return active_macs(sessions)
+    wanted = set()
+    for session in sessions:
+        mac = normalize_mac(session.get("calling_station_id"))
+        if not mac:
+            continue
+        nas_ip = str(session.get("nas_ip_address") or "").strip()
+        if not nas_ip or not nas_ip.startswith(skip_prefixes):
+            wanted.add(mac)
+    return wanted
+
+
+
+
+# MnT answers a MAC with no current session with HTTP 500 and cpm-code 34110,
+# so a session that ended between the active list and its detail fetch is an
+# ordinary event rather than a failure. The transport carries both, which is
+# what lets this tell that apart from the appliance being in trouble.
+MNT_NO_SESSION_CODE = "34110"
+
+
+def _session_gone(error):
+    """Whether this failure is ISE saying the session is no longer there."""
+    if getattr(error, "code", "") == MNT_NO_SESSION_CODE:
+        return True
+    return 500 <= int(getattr(error, "status", 0) or 0) < 600
+
+
 def warm(ctx, cache, macs):
     """Fetch detail for uncached MACs, up to this cycle's budget.
 
@@ -285,6 +372,15 @@ def warm(ctx, cache, macs):
         try:
             record = ctx.transport.get_mnt_xml(
                 f"/Session/MACAddress/{mac}", api="mnt_session_detail")
+        except TransportError as error:
+            # A MAC that left between the ActiveList read and its detail fetch is
+            # the normal churn case, and ISE answers it with HTTP 500 (cpm-code
+            # 34110) rather than an empty document -- so it arrives here, not at
+            # the empty branch below. Counted apart from other failures because
+            # it is expected traffic; the transport does not surface the
+            # cpm-code, so a genuine MnT 500 lands in this bucket too.
+            cache.count("gone" if _session_gone(error) else "failed")
+            continue
         except Exception:       # noqa: BLE001 - one MAC must not fail the dataset
             cache.count("failed")
             continue
@@ -313,25 +409,29 @@ def _milliseconds(value):
     return milliseconds / 1000.0
 
 
-def _step_samples(execution_steps, raw_latency):
-    codes = [item.strip() for item in str(execution_steps or "").split(",")]
+def _step_samples(raw_latency):
+    """``1=0;2=0;4=2;...`` from other_attr_string.StepLatency, by position.
+
+    The position is the label. It used to be resolved to the ISE message code at
+    the same offset in execution_steps, which cannot be right: ISE 3.3 reports 28
+    execution steps and 27 step latencies for the same session, and nothing in
+    the document says which end of the list the missing entry belongs to. A
+    neighbouring message code on every series is worse than an honest position.
+    """
     samples = []
     for item in str(raw_latency or "").split(";"):
         position, separator, raw_ms = item.partition("=")
         if not separator:
             continue
         try:
-            index = int(position.strip()) - 1
+            index = int(position.strip())
         except ValueError:
             continue
-        if index < 0:
-            continue
-        step = codes[index] if index < len(codes) and codes[index] else str(index + 1)
-        if not step.isdigit() or not 1 <= int(step) <= MAX_ISE_STEP_CODE:
+        if not 1 <= index <= MAX_STEP_POSITIONS:
             continue
         seconds = _milliseconds(raw_ms)
         if seconds is not None:
-            samples.append((step, seconds))
+            samples.append((str(index), seconds))
     return samples
 
 
@@ -368,7 +468,11 @@ def aggregate(cache, macs, directory):
             buckets["status"][("passed", owner)].add(mac)
         if detail["failed"]:
             buckets["status"][("failed", owner)].add(mac)
-            reason = detail["failure_reason"].split(" ", 1)[0]
+            # ISE 3.3 emits no failure_reason element; message_code is the
+            # result code the document does carry. Whether a failing session
+            # adds failure_reason could not be observed, so the leading-code
+            # split stays and message_code is the fallback.
+            reason = detail["failure_reason"].split(" ", 1)[0] or detail["message_code"]
             if reason:
                 buckets["reason"][(label(reason), owner)].add(mac)
 
@@ -399,17 +503,15 @@ def aggregate(cache, macs, directory):
         total_latency = _milliseconds(detail["total_authentication_latency"])
         if total_latency is not None:
             total_latencies.append(total_latency)
-        for step, seconds in _step_samples(
-                detail["execution_steps"], detail["step_latency"]):
+        for step, seconds in _step_samples(detail["step_latency"]):
             step_latencies[step].append(seconds)
 
-    # Step codes are a label. Keep the most-observed legitimate codes and use
-    # numeric ordering as a stable tie-breaker if a malformed population tries
-    # to manufacture an unbounded domain.
+    # Step positions are a label. Keep the most-observed ones and use numeric
+    # ordering as a stable tie-breaker.
     step_latencies = dict(sorted(
         step_latencies.items(),
         key=lambda item: (-len(item[1]), int(item[0])),
-    )[:MAX_STEP_CODES])
+    )[:MAX_STEP_POSITIONS])
     return buckets, covered, total_latencies, step_latencies
 
 
@@ -445,10 +547,12 @@ def fetch(ctx):
     # The pool owner: this dataset's read is the one the plan charges, and its
     # snapshot is what the readers in this cycle aggregate against.
     listing = active_list(ctx, refresh=True)
-    macs = active_macs(listing.get("sessions") or [])
+    sessions = listing.get("sessions") or []
+    macs = detail_macs(sessions, _skipped_prefixes(ctx))
 
-    # Drop departed MACs first, so coverage is measured against the current set.
-    cache.retain(macs)
+    # Departed MACs are held briefly rather than dropped, so a reconnect inside
+    # the window is free. Coverage is still measured against the active set.
+    cache.retain(macs, ctx.option("detail_grace_minutes") * 60)
     if not macs:
         cache.publish(0)
         return

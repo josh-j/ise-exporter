@@ -196,3 +196,146 @@ def test_a_single_dimension_probe_does_not_emit_a_one_argument_coalesce():
     pair = reporting.marginals("some_view", "1 = 1", (
         ("a", "NVL(col_a, 'x')"), ("b", "NVL(col_b, 'y')")), limits=LIMITS)
     assert "COALESCE(NVL(col_a, 'x'), NVL(col_b, 'y'))" in pair
+
+
+# --- dimensions that exist and hold nothing --------------------------------
+
+class _DimensionCtx:
+    """Minimal context that records what a fetch published."""
+
+    def __init__(self, name="probe"):
+        from types import SimpleNamespace
+        self.dataset = SimpleNamespace(name=name, default_interval=21600)
+        self.limits = LIMITS
+        self.samples = []
+        self.shared = []
+
+    def set(self, family, sample_value, /, **labels):
+        self.samples.append((family._name, sample_value, labels))
+
+    def set_shared(self, family, sample_value, /, **labels):
+        self.shared.append((family._name, sample_value, labels))
+
+
+def test_a_dimension_that_is_null_on_every_row_is_withheld_not_published():
+    # ISE 3.3 P11 carries four of these: the column exists, passes every schema
+    # presence check, and is NULL on every row. The marginal then repeats the
+    # dataset total under one 'unknown' label and reads as a breakdown.
+    ctx = _DimensionCtx()
+    rows = [
+        {"dimension": "policy", "value": "unknown", "events": 370},
+        {"dimension": "nad", "value": "campus-corp-wired", "events": 327},
+        {"dimension": "nad", "value": "adlab-workstations", "events": 43},
+    ]
+    live = reporting.live_dimensions(ctx, rows)
+
+    assert set(live) == {"nad"}
+    assert ("ise3_breakdown_dimension_populated", 0,
+            {"dataset": "probe", "dimension": "policy"}) in ctx.shared
+    assert ("ise3_breakdown_dimension_populated", 1,
+            {"dataset": "probe", "dimension": "nad"}) in ctx.shared
+
+
+def test_a_dimension_with_no_rows_at_all_is_not_declared_dead():
+    # An empty window is no evidence either way, and calling it a dead column
+    # would be the same invention this check exists to stop.
+    ctx = _DimensionCtx()
+    assert reporting.live_dimensions(ctx, []) == {}
+    assert ctx.shared == []
+
+
+def test_one_real_value_beside_placeholders_keeps_the_dimension():
+    ctx = _DimensionCtx()
+    rows = [{"dimension": "identity_group", "value": "none", "endpoints": 24_000},
+            {"dimension": "identity_group", "value": "Employee", "endpoints": 16}]
+    assert set(reporting.live_dimensions(ctx, rows)) == {"identity_group"}
+
+
+def test_endpoint_inventory_withholds_the_empty_identity_group_breakdown():
+    from ise_exporter3.datasets import endpoint_inventory
+
+    class Transport:
+        def query_many(self, statements):
+            return {
+                "totals": [{
+                    "endpoints": 24_016, "posture_yes": 24_016, "posture_no": 0,
+                    "unprofiled": 80, "profile_present": 24_016,
+                    "identity_group_present": 0,
+                    "posture_applicable_present": 24_016,
+                }],
+                # IDENTITY_GROUP_ID is NULL on all 24,016 rows of the appliance.
+                "marginals": [
+                    {"dimension": "identity_group", "value": "none",
+                     "endpoints": 24_016, "group_total": 21},
+                    {"dimension": "profile", "value": "Windows10-Workstation",
+                     "endpoints": 8_990, "group_total": 21},
+                ],
+            }
+
+    ctx = _DimensionCtx("endpoint_inventory")
+    ctx.transport = Transport()
+    endpoint_inventory.fetch(ctx)
+
+    published = {name for name, _value, _labels in ctx.samples}
+    assert "ise3_endpoints_by_profile" in published
+    assert "ise3_endpoints_by_identity_group" not in published
+    assert ("ise3_endpoint_inventory_field_coverage", 0.0,
+            {"field": "identity_group"}) in ctx.samples
+    assert ("ise3_breakdown_dimension_populated", 0,
+            {"dataset": "endpoint_inventory",
+             "dimension": "identity_group"}) in ctx.shared
+
+
+# --- freshness: stale, empty and missing are three different answers -------
+
+def test_the_freshness_probe_ages_the_view_not_the_window():
+    from ise_exporter3.datasets import source_freshness
+
+    for sql in source_freshness.statements(6, LIMITS).values():
+        # The age must not sit under the window predicate: a view staler than
+        # the window is exactly the view an operator is asking about, and it
+        # used to publish no age at all.
+        assert "WHERE" not in sql
+        assert "MAX(" in sql
+        assert "AS total_rows" in sql
+        assert "NUMTODSINTERVAL" in sql
+
+
+def test_a_stale_view_publishes_an_age_and_an_empty_one_does_not():
+    from ise_exporter3.datasets import source_freshness
+
+    class Transport:
+        def query_many(self, statements):
+            return {"batch_0": [
+                # Four days stale on the appliance, but it does hold rows.
+                {"view_name": "radius_accounting", "total_rows": 370,
+                 "recent_rows": 0, "age_seconds": 367_104},
+                # Empty all-time: no newest row, so no age exists to publish.
+                {"view_name": "radius_errors_view", "total_rows": 0,
+                 "recent_rows": 0, "age_seconds": -1},
+            ]}
+
+    ctx = _DimensionCtx("source_freshness")
+    ctx.interval = 21600
+    ctx.transport = Transport()
+    source_freshness.fetch(ctx)
+
+    assert ("ise3_source_latest_row_age_seconds", 367_104.0,
+            {"view": "radius_accounting"}) in ctx.samples
+    assert ("ise3_source_rows_total", 370.0,
+            {"view": "radius_accounting"}) in ctx.samples
+    assert ("ise3_source_has_recent_rows", 0,
+            {"view": "radius_accounting"}) in ctx.samples
+    assert ("ise3_source_rows_total", 0.0,
+            {"view": "radius_errors_view"}) in ctx.samples
+    assert not [sample for sample in ctx.samples
+                if sample[0] == "ise3_source_latest_row_age_seconds"
+                and sample[2] == {"view": "radius_errors_view"}]
+
+
+def test_nad_health_publishes_the_age_of_the_feed_it_judges_silence_by():
+    from ise_exporter3.datasets import nad_health
+
+    sql = nad_health._source_age()
+    assert "WHERE" not in sql
+    assert "MAX(timestamp)" in sql

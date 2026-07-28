@@ -66,14 +66,35 @@ class DetailCache:
         with self._lock:
             self._entries[key] = {"detail": detail, "at": now}
 
-    def retain(self, active):
-        """Drop entries whose subject is no longer active. Returns how many."""
+    def retain(self, active, grace_seconds=0, *, now=None):
+        """Drop entries whose subject is no longer active. Returns how many.
+
+        A subject that left is held for ``grace_seconds`` first. The expensive
+        fetch is per *arrival*, and on a wireless estate most arrivals are the
+        same device coming back -- a roam between controllers, a sleep/wake, a
+        session that straddled a cycle boundary. Dropping it the moment it
+        blinks means paying full price again for a decision that did not change.
+        Staleness stays bounded by the TTL, which applies to held entries too.
+        """
+        now = time.time() if now is None else now
         active = set(active)
         with self._lock:
-            stale = [key for key in self._entries if key not in active]
-            for key in stale:
-                del self._entries[key]
-            return len(stale)
+            dropped = 0
+            for key, entry in list(self._entries.items()):
+                if key in active:
+                    entry.pop("gone_at", None)
+                    continue
+                gone_at = entry.setdefault("gone_at", now)
+                if now - gone_at >= grace_seconds:
+                    del self._entries[key]
+                    dropped += 1
+            return dropped
+
+    def resident(self):
+        """Entries whose subject is currently active, not merely held."""
+        with self._lock:
+            return sum(1 for entry in self._entries.values()
+                       if "gone_at" not in entry)
 
     def uncached(self, keys, *, now=None):
         now = time.time() if now is None else now
@@ -85,9 +106,13 @@ class DetailCache:
 
     def publish(self, active_count, deferred_count=0):
         """Export size, coverage and what the budget left for next time."""
-        cached = len(self)
-        entries.labels(cache=self.name).set(cached)
+        entries.labels(cache=self.name).set(len(self))
         deferred.labels(cache=self.name).set(deferred_count)
+        # Coverage counts only entries whose subject is active. Entries held
+        # through the grace window are real memory, so they belong in the size
+        # gauge, but counting them here would report a warm cache while active
+        # endpoints were still missing from it.
+        cached = self.resident()
         covered = min(cached, active_count) / active_count if active_count else 1.0
         coverage.labels(cache=self.name).set(covered)
         return covered

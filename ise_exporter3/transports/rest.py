@@ -101,6 +101,20 @@ def redact(value):
     return _SENSITIVE_XML.sub(r"\1<redacted>\2", text)
 
 
+_MNT_CODE = re.compile(r"<cpm-code>\s*(\d+)\s*</cpm-code>", re.IGNORECASE)
+
+
+def _mnt_code(snippet):
+    """The MnT result code out of an error body, if it carried one.
+
+    MnT answers a request it understood but cannot satisfy -- a MAC with no
+    current session is 34110 -- with a 500 and this code. It is the only thing
+    that separates that from the appliance being in trouble.
+    """
+    found = _MNT_CODE.search(str(snippet or ""))
+    return found.group(1) if found else ""
+
+
 def _is_read_timeout(error):
     """Whether a requests ConnectionError is really a read timeout underneath."""
     candidates = [error.__cause__, error.__context__]
@@ -338,11 +352,12 @@ class RestTransport(Transport):
         self._count(api, f"http_{status}")
         self._error(api, "http_error", status)
         if status == 401:
-            raise TransportError("authentication_failed")
+            raise TransportError("authentication_failed", status=status)
         if status == 403:
-            raise TransportError("authorization_failed")
+            raise TransportError("authorization_failed", status=status)
         raise TransportError(
-            "http_error", f"ISE returned HTTP {status} for {api}")
+            "http_error", f"ISE returned HTTP {status} for {api}",
+            status=status, code=_mnt_code(snippet))
 
     @staticmethod
     def _close(response):

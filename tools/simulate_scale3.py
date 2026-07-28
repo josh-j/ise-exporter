@@ -33,6 +33,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from tools.fake_ise3 import (                                   # noqa: E402
+    LAB_EMPTY_VIEWS,
     Estate,
     FakeIseHttp,
     Latency,
@@ -65,6 +66,16 @@ def parse_arguments(argv=None):
                              "model declares)")
     parser.add_argument("--latency-scale", type=float, default=1.0,
                         help="multiply every modelled appliance latency")
+    parser.add_argument("--subnet-nad-every", type=int, default=4,
+                        help="one NAD in this many is configured as a /24 "
+                             "rather than a host, so its sessions can only be "
+                             "attributed by containment (default 4; 0 for none)")
+    parser.add_argument("--empty-views", default="",
+                        help="comma-separated reporting views to answer with no "
+                             "rows, or \"lab\" for the seven the reference "
+                             "appliance answers empty. An empty view is a state "
+                             "the exporter must handle and cannot otherwise be "
+                             "reached from a simulated statement")
     parser.add_argument("--json", metavar="PATH",
                         help="also write the measurements as JSON")
     parser.add_argument("--show-plan", action="store_true",
@@ -103,6 +114,31 @@ def load_configuration(path, scale, state_directory, appliance_host="127.0.0.1")
     return Config.from_document(document, path=str(path), environ=environment)
 
 
+# The time and node columns each reporting view really has, which are not the
+# same set twice. Seeding every view with {ISE_NODE, TIMESTAMP} advertised a
+# TIMESTAMP on KEY_PERFORMANCE_METRICS (which only has LOGGED_TIME and answers
+# ORA-00904 for the other), on ENDPOINTS_DATA (which has neither and times on
+# UPDATE_TIME), on POSTURE_ASSESSMENT_BY_CONDITION (LOGGED_AT) and on the TACACS
+# two-day views (EPOCH_TIME, a NUMBER) -- and an ISE_NODE on
+# PROFILED_ENDPOINTS_SUMMARY, which has none. A simulated catalogue that invents
+# columns is the same failure as a simulated payload that invents fields.
+VIEW_KEY_COLUMNS = {
+    "ENDPOINTS_DATA": {"UPDATE_TIME", "CREATE_TIME", "REG_TIMESTAMP"},
+    "KEY_PERFORMANCE_METRICS": {"ISE_NODE", "LOGGED_TIME"},
+    "POSTURE_ASSESSMENT_BY_CONDITION": {"ISE_NODE", "LOGGED_AT"},
+    "POSTURE_ASSESSMENT_BY_ENDPOINT": {"ISE_NODE", "TIMESTAMP"},
+    "PROFILED_ENDPOINTS_SUMMARY": {"TIMESTAMP"},
+    "TACACS_ACCOUNTING_LAST_TWO_DAYS": {
+        "ISE_NODE", "EPOCH_TIME", "GENERATED_TIME", "LOGGED_TIME"},
+    "TACACS_AUTHENTICATION_LAST_TWO_DAYS": {
+        "ISE_NODE", "EPOCH_TIME", "GENERATED_TIME", "LOGGED_TIME"},
+    "TACACS_AUTHORIZATION_LAST_TWO_DAYS": {
+        "ISE_NODE", "EPOCH_TIME", "GENERATED_TIME", "LOGGED_TIME"},
+}
+# Everything else really does key on ISE_NODE and TIMESTAMP.
+DEFAULT_KEY_COLUMNS = frozenset({"ISE_NODE", "TIMESTAMP"})
+
+
 def declared_views():
     """Every reporting view the shipped datasets declare they need."""
     from ise_exporter3 import datasets as registry
@@ -114,7 +150,8 @@ def declared_views():
             for requirement in provider.requires:
                 if str(requirement).startswith("view:"):
                     name = str(requirement).split(":", 1)[1].upper()
-                    views.setdefault(name, {"ISE_NODE", "TIMESTAMP"})
+                    views.setdefault(name, set()).update(
+                        VIEW_KEY_COLUMNS.get(name, DEFAULT_KEY_COLUMNS))
     # psn_performance selects optional columns against the catalog, so this pair
     # has to carry its real column set or the dataset degrades for the wrong
     # reason.
@@ -144,13 +181,59 @@ def declared_views():
         "RESPONSE_TIME",
     })
     views.setdefault("PROFILED_ENDPOINTS_SUMMARY", set()).update({
-        "TIMESTAMP", "SOURCE", "ENDPOINT_ACTION_NAME",
+        "TIMESTAMP", "SOURCE", "ENDPOINT_ACTION_NAME", "ENDPOINT_PROFILE",
+        "ENDPOINT_ID", "MESSAGE_CODE", "IDENTITY_GROUP",
+    })
+    # radius_errors hard-codes these four and has no degradation path, so a
+    # catalogue that does not carry them says nothing about the only dataset a
+    # rename would break outright.
+    views.setdefault("RADIUS_ERRORS_VIEW", set()).update({
+        "TIMESTAMP", "MESSAGE_CODE", "NETWORK_DEVICE_NAME",
+        "AUTHENTICATION_METHOD", "ISE_NODE",
+    })
+    views.setdefault("ENDPOINTS_DATA", set()).update({
+        "MAC_ADDRESS", "ENDPOINT_POLICY", "IDENTITY_GROUP_ID",
+        "POSTURE_APPLICABLE", "UPDATE_TIME",
+    })
+    views.setdefault("POSTURE_ASSESSMENT_BY_ENDPOINT", set()).update({
+        "TIMESTAMP", "ENDPOINT_MAC_ADDRESS", "ENDPOINT_OPERATING_SYSTEM",
+        "POSTURE_AGENT_VERSION", "POSTURE_STATUS", "POSTURE_POLICY_MATCHED",
+        "ISE_NODE",
+    })
+    # The two posture views genuinely disagree on spelling: ENDPOINT_ID and
+    # LOGGED_AT here where the endpoint view says ENDPOINT_MAC_ADDRESS and
+    # TIMESTAMP, and ENDPOINT_OS where it says ENDPOINT_OPERATING_SYSTEM.
+    views.setdefault("POSTURE_ASSESSMENT_BY_CONDITION", set()).update({
+        "LOGGED_AT", "ENDPOINT_ID", "ENDPOINT_OS", "CONDITION_NAME",
+        "CONDITION_STATUS", "ISE_NODE",
+    })
+    views.setdefault("TACACS_AUTHENTICATION_LAST_TWO_DAYS", set()).update({
+        "EPOCH_TIME", "USERNAME", "DEVICE_NAME", "STATUS", "DEVICE_GROUPS",
+    })
+    views.setdefault("TACACS_ACCOUNTING_LAST_TWO_DAYS", set()).update({
+        "EPOCH_TIME", "USERNAME", "DEVICE_NAME", "COMMAND", "COMMAND_ARGS",
+        "DEVICE_GROUPS",
     })
     views.setdefault("TACACS_AUTHORIZATION_LAST_TWO_DAYS", set()).update({
         "EPOCH_TIME", "USERNAME", "DEVICE_NAME", "STATUS",
         "AUTHORIZATION_POLICY", "SHELL_PROFILE", "MATCHED_COMMAND_SET",
+        # Singular here and plural in the other two views, which is ISE's own
+        # inconsistency and not a typo.
+        "DEVICE_GROUP",
     })
     return views
+
+
+def empty_views(declared):
+    """Resolve --empty-views; "lab" names the reference appliance's seven."""
+    names = set()
+    for part in str(declared or "").split(","):
+        part = part.strip().lower()
+        if part == "lab":
+            names.update(LAB_EMPTY_VIEWS)
+        elif part:
+            names.add(part)
+    return names
 
 
 def metric_samples(name):
@@ -260,7 +343,8 @@ def run_simulation(arguments):
     estate = Estate(nads=arguments.nads, endpoints=arguments.endpoints,
                     sessions=arguments.sessions, accounts=arguments.accounts,
                     policy_sets=arguments.policy_sets,
-                    churn_per_hour=arguments.churn_per_hour, clock=clock)
+                    churn_per_hour=arguments.churn_per_hour, clock=clock,
+                    subnet_nad_every=arguments.subnet_nad_every)
     estate_seconds = time.perf_counter() - build_started
     estate_rss = rss_mib() - baseline_rss
 
@@ -284,7 +368,8 @@ def run_simulation(arguments):
     if arguments.show_plan:
         print(render_plan(plan))
 
-    oracle = SimulatedDataConnect(config, estate, clock, latency)
+    oracle = SimulatedDataConnect(config, estate, clock, latency,
+                                  empty_views=empty_views(arguments.empty_views))
     oracle.catalog(declared_views())
     # The Data Connect transport reads time through its own lane clock, so its
     # cooldowns, its minimum inter-query interval and its statement timeout are
@@ -495,6 +580,11 @@ def measure(arguments, config, plan, estate, clock, appliance, oracle, recorder,
             "latency_scale": arguments.latency_scale,
             "churn_per_hour": arguments.churn_per_hour,
             "config": arguments.config,
+            # Declared shape, not measured: which views answered empty and how
+            # much of the estate was subnet-defined both change what a dataset
+            # can publish, so a report that omits them is not reproducible.
+            "empty_views": sorted(empty_views(arguments.empty_views)),
+            "subnet_nad_every": arguments.subnet_nad_every,
         },
         "plan": {
             "fits_budget": plan.fits,
@@ -595,6 +685,11 @@ def report(measurements):
         f"{scale['psns']} PSNs")
     add(f"{run['simulated_hours']:.1f} simulated hours of {run['config']} in "
         f"{run['wall_seconds']:.0f}s real, {run['collections']} collections")
+    subnet = run.get("subnet_nad_every") or 0
+    add(f"1 NAD in {subnet} is subnet-defined" if subnet
+        else "every NAD is host-defined")
+    if run.get("empty_views"):
+        add(f"views answering empty: {', '.join(run['empty_views'])}")
     add("=" * 78)
 
     add("")

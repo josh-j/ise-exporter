@@ -147,7 +147,10 @@ def fetch(ctx):
 
     rows = results.get("marginals", [])
     reporting.publish_truncation(ctx, "marginals", rows)
-    for dimension, entries in reporting.by_dimension(rows).items():
+    # AUTHORIZATION_POLICY is present in the view and NULL on every row of a
+    # 3.3 P11 appliance, so the policy marginal is a copy of the total wearing a
+    # dimension label. live_dimensions withholds it and says so.
+    for dimension, entries in reporting.live_dimensions(ctx, rows).items():
         for row in entries:
             (value,) = reporting.group(row, "value")
             _publish(ctx, dimension, label(value), row)

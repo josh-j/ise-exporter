@@ -6,10 +6,10 @@ where `ops_owner` comes from, which every other dashboard groups by, so it is
 effectively mandatory.
 
 **Group membership is not in the list response.** `/config/networkdevice`
-returns identity and a link; `NetworkDeviceGroupList` requires one detail request
-per device. Some ISE builds do include it in the list, so that is used when
-present, but the general case is a per-NAD fan-out -- 5,000 requests on a large
-estate, which is why this converges rather than sampling.
+returns only id, name, description and a link on 3.3 P11 at every page size;
+`NetworkDeviceGroupList` requires one detail request per device. The fan-out is
+mandatory, not opportunistic -- 5,000 requests on a large estate, which is why
+this converges rather than sampling.
 
 Group membership is about as stable as ISE configuration gets: it changes when
 someone edits a device, not continuously. So each NAD is fetched once and cached
@@ -19,7 +19,10 @@ symptom -- "NAD Group Detail coverage stuck at 10%" on a ~4,000-NAD estate.
 
 Group strings look like ``Location#All Locations#Germany#Ramstein AB``. The
 category and the ``All X`` root are dropped; location keeps its remaining path
-(sites nest), while ops owner and device type take the leaf.
+(sites nest), while ops owner and device type take the leaf. A NAD left at the
+root produces a two-segment string (``Location#All Locations``) that carries no
+classification, so it stays Unknown rather than inventing a bucket -- common
+enough on a real deployment that most NADs resolve only their ops owner.
 """
 import time
 from collections import defaultdict
@@ -70,14 +73,30 @@ MAX_DEVICES = 10_000
 
 
 def device_addresses(record):
-    """NAS IPs ISE will report for this device, for the session join."""
+    """NAS addresses ISE will report for this device, for the session join.
+
+    ISE stores each entry as a base address plus a mask, and a NAD is commonly a
+    whole subnet -- ``{"ipaddress": "10.200.40.0", "mask": 24}`` for every access
+    switch on that segment. Dropping the mask leaves a key (the network address)
+    that no session's NAS IP can ever equal, so the prefix travels with the key
+    and the directory matches by containment.
+    """
     addresses = record.get("NetworkDeviceIPList") if isinstance(record, dict) else None
     found = []
     for entry in addresses or ():
-        if isinstance(entry, dict):
-            value = entry.get("ipaddress") or entry.get("ipAddress")
-            if value:
-                found.append(str(value).strip())
+        if not isinstance(entry, dict):
+            continue
+        value = entry.get("ipaddress") or entry.get("ipAddress")
+        if not value:
+            continue
+        address = str(value).strip()
+        mask = entry.get("mask")
+        if mask is not None and "/" not in address:
+            try:
+                address = f"{address}/{int(mask)}"
+            except (TypeError, ValueError):
+                pass        # an unparseable mask leaves the host key alone
+        found.append(address)
     return found
 
 
@@ -162,8 +181,8 @@ def fetch(ctx):
     cache = detail_cache.shared(CACHE, ttl_seconds=CACHE_TTL_SECONDS)
     cache.retain({device["id"] for device in identified})
 
-    # Some ISE builds return the group list inline. Take it for free when
-    # offered rather than spending a detail request on it.
+    # No 3.3 P11 list row carries the group list, so this never fires there; it
+    # is kept only for builds that do offer it, and costs one dict lookup.
     for device in identified:
         groups = _groups_of(device["row"])
         if groups is not None and cache.get(device["id"]) is None:

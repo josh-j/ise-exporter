@@ -209,8 +209,8 @@ DETAIL_GAUGES = {
 }
 
 
-def _publish_outcomes(ctx, rows, gauges):
-    for dimension, entries in reporting.by_dimension(rows).items():
+def _publish_outcomes(ctx, grouped, gauges):
+    for dimension, entries in grouped.items():
         target = gauges.get(dimension)
         if target is None:
             continue
@@ -235,8 +235,12 @@ def fetch(ctx):
 
     summary = results.get("summary_marginals", [])
     reporting.publish_truncation(ctx, "summary_marginals", summary)
-    _publish_outcomes(ctx, summary, SUMMARY_GAUGES)
-    for dimension, entries in reporting.by_dimension(summary).items():
+    # SECURITY_GROUP is present in the summary view and NULL on every row of a
+    # 3.3 P11 appliance; a failure dimension that only ever says 'unknown' is
+    # not a failure dimension, so it is withheld and reported as unpopulated.
+    summary_live = reporting.live_dimensions(ctx, summary)
+    _publish_outcomes(ctx, summary_live, SUMMARY_GAUGES)
+    for dimension, entries in summary_live.items():
         if dimension in SUMMARY_GAUGES:
             continue
         for row in entries:
@@ -250,12 +254,13 @@ def fetch(ctx):
 
     detail = results.get("detail_marginals", [])
     reporting.publish_truncation(ctx, "detail_marginals", detail)
-    _publish_outcomes(ctx, detail, DETAIL_GAUGES)
+    detail_live = reporting.live_dimensions(ctx, detail)
+    _publish_outcomes(ctx, detail_live, DETAIL_GAUGES)
 
     # Latency only from the PSN marginal: a mean over "all methods" mixes
     # populations that are not comparable, and a mean of means across groups of
     # different sizes is wrong regardless.
-    for row in reporting.by_dimension(detail).get("psn", []):
+    for row in detail_live.get("psn", []):
         (psn,) = reporting.group(row, "value")
         timed = int(finite(row.get("timed")))
         usable = latency.observe(ctx, row.get("mean_response"), result="all")

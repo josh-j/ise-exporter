@@ -441,3 +441,41 @@ def test_tacacs_config_publishes_each_device_admin_object_inventory():
     ) == 2
     assert "/policy/device-admin/command-sets" in transport.calls
     assert "/policy/device-admin/shell-profiles" in transport.calls
+
+
+def test_active_sessions_mnt_attributes_on_the_nas_address_alone():
+    # The MnT active list is a session index and carries no network device
+    # element, so the NAS address is the only join key it offers. Reading a
+    # device name that is never there left the unmatched label reading as a
+    # device name and hid that the NAS address was doing all the work.
+    from types import SimpleNamespace
+
+    from ise_exporter3 import nad_directory
+    from ise_exporter3.datasets import active_sessions
+
+    nad_directory.shared().replace([{
+        "nad": "campus-corp-wired", "location": "Ramstein",
+        "ops_owner": "Network Team", "keys": ("10.200.40.12",)}])
+    sessions = [
+        {"calling_station_id": "00:11:22:33:44:55", "server": "laba-ise-001",
+         "nas_ip_address": "10.200.40.12", "network_device_name": "ignored"},
+        {"calling_station_id": "00:11:22:33:44:56", "server": "laba-ise-001",
+         "nas_ip_address": "10.200.40.99", "network_device_name": "ignored"},
+    ]
+
+    published = []
+
+    ctx = SimpleNamespace(
+        interval=300,
+        transport=SimpleNamespace(get_mnt_xml=lambda path, *, api="": {
+            "total": len(sessions), "sessions": sessions}),
+        set=lambda family, value, /, **labels: published.append(
+            (family._name, value, labels)))
+    active_sessions.fetch_mnt(ctx)
+
+    by_nad = {tuple(sorted(labels.items())): value
+              for name, value, labels in published
+              if name == "ise3_active_sessions_by_nad"}
+    assert by_nad[(("location", "Ramstein"), ("nad", "campus-corp-wired"))] == 1
+    # Unattributable, and published as the address it actually came from.
+    assert by_nad[(("location", "Unknown"), ("nad", "10.200.40.99"))] == 1

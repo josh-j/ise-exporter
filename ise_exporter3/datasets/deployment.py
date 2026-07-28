@@ -3,6 +3,10 @@
 OpenAPI is the only source: no other interface reports persona assignment or HA
 state. Two bounded reads per cycle, independent of fleet size.
 
+``hostname`` is the SHORT node name, which is also the token the per-node
+certificate paths take; fqdn and ipAddress arrive beside it and are deliberately
+not labelled on, since one identity per node is what dashboards join on.
+
 The response is validated fail-closed against the Patch 11 contract. A node with
 an unrecognised state, role or service fails the whole dataset rather than being
 published as a plausible partial deployment -- this is the metric operators page

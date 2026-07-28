@@ -13,7 +13,11 @@ total shows there is more -- so the common case stays one statement and an estat
 larger than the one declared still gets counted rather than cut off.
 
 Silence is the signal, so a NAD in inventory with no activity is published with
-zero and a never-seen marker rather than omitted.
+zero and a never-seen marker rather than omitted. Silence is only meaningful
+against a feed that is current, so the age of the activity view itself is
+published beside it: a whole estate reported silent while
+``ise3_nad_activity_source_age_seconds`` exceeds the window is a stale source,
+which is a different fault with a different owner.
 
 **This dataset cannot answer without the inventory**, and says so rather than
 guessing. Silence is measured against the set of configured NADs, so an empty
@@ -48,8 +52,15 @@ silent_total = Gauge(
     ["provider"])
 covered = Gauge(
     "ise3_nad_activity_covered", "NADs the activity scan reached", ["provider"])
+source_age_seconds = Gauge(
+    "ise3_nad_activity_source_age_seconds",
+    "Age of the newest row in the activity view, measured over the whole view "
+    "rather than the scan window. A whole estate reported silent while this is "
+    "older than the window is a stale feed, not a dead estate; -1 means the "
+    "view has never held a row", ["provider"])
 
-_METRICS = (authentications, last_seen_age_seconds, silent_total, covered)
+_METRICS = (authentications, last_seen_age_seconds, silent_total, covered,
+            source_age_seconds)
 
 VIEW = "radius_authentication_summary"
 
@@ -77,6 +88,23 @@ def _page(hours, offset, limits):
     """
 
 
+def _source_age():
+    """How old the activity feed itself is, unbounded by the scan window.
+
+    Silence measured inside a window says nothing about whether the window has
+    anything to measure. On a feed four days behind the appliance clock, every
+    configured NAD reports silent at any legal window and the verdict is
+    indistinguishable from a genuinely dead estate. MAX() alone so the optimiser
+    can answer it from the timestamp index instead of scanning the view.
+    """
+    return f"""
+        SELECT NVL(
+                 (CAST(SYSTIMESTAMP AS DATE) - CAST(MAX(timestamp) AS DATE)) * 86400,
+                 -1) AS age_seconds
+        FROM {VIEW}
+    """
+
+
 def fetch(ctx):
     # Checked BEFORE any Oracle work, not after. This dataset cannot answer
     # without the inventory, and a scan whose result is then discarded is the
@@ -98,6 +126,9 @@ def fetch(ctx):
                  "unconfigured switch")
 
     hours = reporting.scan_window(ctx)
+
+    for row in ctx.transport.query(_source_age()):
+        ctx.set(source_age_seconds, finite(row.get("age_seconds"), -1))
 
     rows = ctx.transport.query(_page(hours, 0, ctx.limits))
     total_groups = int(finite(rows[0].get("group_total"), len(rows))) if rows else 0
@@ -147,8 +178,9 @@ DATASET = Dataset(
         Provider(
             name="dataconnect",
             # One paged scan, plus a conditional second page only when the exact
-            # group total shows the first did not cover the fleet.
-            cost=Cost(target="oracle", db_seconds=8.0, scales_with="nads",
+            # group total shows the first did not cover the fleet, plus one
+            # index-answerable MAX for the age of the feed itself.
+            cost=Cost(target="oracle", db_seconds=8.5, scales_with="nads",
                       db_seconds_per_1k=0.5),
             supplies=frozenset({"nad", "last_seen", "activity", "silent"}),
             requires=("view:RADIUS_AUTHENTICATION_SUMMARY",),

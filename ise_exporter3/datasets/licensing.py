@@ -3,6 +3,12 @@
 OpenAPI only. The compliance and status vocabularies come from ISE 3.3's
 TierStateSettings enum and are matched exactly: guessing at an unknown value is
 how a non-compliant deployment ends up reported as healthy.
+
+``compliant`` stays a strict boolean -- EVALUATION is a licensed state, not a
+compliant one, and a deployment running every tier on evaluation should read as
+0. But 0 alone cannot distinguish an evaluation licence from a genuine
+entitlement breach, and an unlicensed lab is the common case, so the reported
+state is published alongside it rather than collapsed into the boolean.
 """
 import math
 
@@ -19,8 +25,12 @@ enabled = Gauge(
     "ise3_license_enabled", "Tier is enabled", ["provider", "tier"])
 compliant = Gauge(
     "ise3_license_compliant", "Tier is in compliance", ["provider", "tier"])
+compliance_state = Gauge(
+    "ise3_license_compliance_state",
+    "Compliance state ISE reports for a tier (1 for the current state)",
+    ["provider", "tier", "state"])
 
-_METRICS = (consumption, enabled, compliant)
+_METRICS = (consumption, enabled, compliant, compliance_state)
 
 _COMPLIANT = frozenset({"COMPLIANT", "FULL_COMPLIANCE", "RESERVED_IN_COMPLIANCE"})
 _COMPLIANCE_STATES = _COMPLIANT | frozenset({
@@ -67,6 +77,11 @@ def fetch(ctx):
         ctx.set(consumption, used, tier=tier_label)
         ctx.set(enabled, int(status == "ENABLED"), tier=tier_label)
         ctx.set(compliant, int(compliance in _COMPLIANT), tier=tier_label)
+        # Every state, so a transition is a visible 1 -> 0 rather than a series
+        # that disappears, and EVALUATION is distinguishable from NONCOMPLIANT.
+        for state in sorted(_COMPLIANCE_STATES):
+            ctx.set(compliance_state, int(state == compliance),
+                    tier=tier_label, state=state)
 
 
 DATASET = Dataset(
@@ -78,7 +93,8 @@ DATASET = Dataset(
         Provider(
             name="openapi",
             cost=Cost(target="pan", requests=1),
-            supplies=frozenset({"tier", "consumption", "compliance"}),
+            supplies=frozenset({"tier", "consumption", "compliance",
+                                "compliance_state"}),
             fetch=fetch,
         ),
     ),

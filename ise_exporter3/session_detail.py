@@ -11,15 +11,25 @@ neither dataset has ever looked at.
 instead of the records themselves, for exactly this reason. This is that
 discipline applied to the bigger cache, and it does three things:
 
-- **retains less.** Thirteen resolved fields instead of the whole document.
+- **retains less.** Fourteen resolved fields instead of the whole document.
 - **resolves ISE's spelling variants once.** The same posture verdict arrives as
   ``posture_status``, ``PostureStatus`` or ``posture_assessment_status``
   depending on release and field; the readers used to try each name on every
   read, which meant the variant handling ran 20,000 times a cycle forever rather
   than once per session.
-- **parses ``other_attr_string`` once.** It is the field the authorization rule
-  and policy set are buried in, it was parsed on every read of every record on
-  every cycle, and the raw string no longer has to be kept at all.
+- **parses ``other_attr_string`` once.** It is the field the authorization rule,
+  the policy set and both authentication latencies are buried in, it was parsed
+  on every read of every record on every cycle, and the raw string no longer has
+  to be kept at all.
+
+A field is projected where the appliance answers it, and "the appliance did not
+answer it here" is not the same claim as "this API cannot answer it". Neither
+latency is an element on ISE 3.3, under any spelling, on any session -- those
+are read out of ``other_attr_string`` instead. The posture fields are the other
+case: they are absent on a lab with no Secure Client, and populated in a
+deployment that runs posture, so they stay projected. Deleting a lookup because
+one estate never exercises it is how a working production metric gets removed;
+the test is whether ISE can ever emit the field, not whether it did here.
 
 The projection is deliberately flat and fully resolved: a reader gets a value or
 an empty string, never a choice of field names. Adding a field here is the
@@ -38,21 +48,26 @@ _METHOD_FIELDS = ("authentication_method",)
 _PROFILE_FIELDS = ("selected_azn_profiles",)
 _POSTURE_STATUS_FIELDS = (
     "posture_status", "PostureStatus", "posture_assessment_status")
+# Empty on an estate with no Secure Client, populated where posture runs. Data
+# Connect names the same three facts POSTURE_REPORT, POSTURE_AGENT_VERSION and
+# ENDPOINT_OPERATING_SYSTEM, which is what confirms they are ISE fields rather
+# than spellings this exporter invented.
 _POSTURE_REPORT_FIELDS = ("posture_report", "PostureReport")
 _AGENT_FIELDS = ("posture_agent_version", "PostureAgentVersion", "agent_version")
 _OS_FIELDS = ("operating_system", "os_type", "endpoint_operating_system")
-_EXECUTION_STEP_FIELDS = ("execution_steps", "ExecutionSteps", "Steps")
-_STEP_LATENCY_FIELDS = ("step_latency", "StepLatency")
-_TOTAL_LATENCY_FIELDS = (
-    "total_authen_latency",
-    "TotalAuthenLatency",
-    "total_authentication_latency",
-    "TotalAuthenticationLatency",
-)
+_MESSAGE_CODE_FIELDS = ("message_code",)
+# Neither latency has a top-level element on ISE 3.3; response_time is the only
+# one, and it carries the same milliseconds as the TotalAuthenLatency attribute.
+_TOTAL_LATENCY_FIELDS = ("response_time",)
 
 # Parsed out of other_attr_string rather than read from a column of their own.
 POLICY_SET_ATTRIBUTE = "ISEPolicySetName"
 AUTHZ_RULE_ATTRIBUTE = "AuthorizationPolicyMatchedRule"
+# Both latencies are attributes of other_attr_string, not elements of the
+# session document: ISE 3.3 emits no step_latency/StepLatency or
+# total_authen_latency/TotalAuthenLatency tag under any spelling.
+STEP_LATENCY_ATTRIBUTE = "StepLatency"
+TOTAL_LATENCY_ATTRIBUTE = "TotalAuthenLatency"
 
 
 def first(record, names):
@@ -99,6 +114,9 @@ def project(record):
         "passed": _truthy(record.get("passed")),
         "failed": _truthy(record.get("failed")),
         "failure_reason": first(record, _FAILURE_FIELDS),
+        # The ISE result code, and the only reason code a real session document
+        # carries: failure_reason is not an element of it on ISE 3.3.
+        "message_code": first(record, _MESSAGE_CODE_FIELDS),
         "method": first(record, _METHOD_FIELDS),
         "profiles": first(record, _PROFILE_FIELDS),
         "authz_rule": attributes.get(AUTHZ_RULE_ATTRIBUTE, ""),
@@ -107,7 +125,8 @@ def project(record):
         "posture_report": first(record, _POSTURE_REPORT_FIELDS),
         "agent_version": first(record, _AGENT_FIELDS),
         "operating_system": first(record, _OS_FIELDS),
-        "execution_steps": first(record, _EXECUTION_STEP_FIELDS),
-        "step_latency": first(record, _STEP_LATENCY_FIELDS),
-        "total_authentication_latency": first(record, _TOTAL_LATENCY_FIELDS),
+        "step_latency": attributes.get(STEP_LATENCY_ATTRIBUTE, ""),
+        "total_authentication_latency": (
+            attributes.get(TOTAL_LATENCY_ATTRIBUTE, "")
+            or first(record, _TOTAL_LATENCY_FIELDS)),
     }

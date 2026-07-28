@@ -214,6 +214,97 @@ def test_the_runner_reports_how_wide_each_dataset_is():
         "ise3_dataset_series", {"dataset": "deployment"}) > 0
 
 
+def test_a_certificate_usage_label_is_stable_across_nodes():
+    """ISE comma-joins a certificate's usages in a node-dependent order, so the
+    same logical usage minted one series per ordering -- unbounded churn keyed on
+    nothing but ISE's whim."""
+    from ise_exporter3.datasets import certificates
+
+    first = certificates._usage(
+        {"usedBy": "Admin, EAP Authentication, Portal, RADIUS DTLS"})
+    second = certificates._usage(
+        {"usedBy": "EAP Authentication, Admin, Portal, RADIUS DTLS"})
+    assert first == second
+    # The trusted store names the same thing trustedFor, and multi-values there
+    # are comma-joined without spaces.
+    assert (certificates._usage({"trustedFor": "Infrastructure,Cisco Services"})
+            == certificates._usage({"trustedFor": "Cisco Services,Infrastructure"}))
+    assert certificates._usage({}) == "unknown"
+
+
+def test_the_trusted_store_shape_is_accepted_as_ise_sends_it():
+    # No selfSigned key at all and keySize as a string: validating an absent
+    # field against a default proved nothing, and the int coercion survived the
+    # string by luck rather than by contract.
+    from prometheus_client import REGISTRY
+
+    from ise_exporter3.config import Config
+    from ise_exporter3.datasets import certificates
+    from ise_exporter3.plan import PlannedDataset
+    from ise_exporter3.runtime import Runner
+    from tests.test_v3_datasets import FakeTransport
+
+    expires = "Wed Jul 16 23:59:59 UTC 2036"
+    responses = {
+        "/deployment/node": [{"hostname": "laba-ise-001", "nodeStatus": "Connected",
+                              "roles": ["PrimaryAdmin"], "services": ["Session"]}],
+        "/certs/system-certificate/laba-ise-001": [
+            {"friendlyName": "Default self-signed", "expirationDate": expires,
+             "keySize": 2048, "selfSigned": True,
+             "usedBy": "EAP Authentication, Admin"}],
+        "/certs/trusted-certificate": [
+            {"friendlyName": "VeriSign Class 3", "expirationDate": expires,
+             "keySize": "2048", "trustedFor": "Infrastructure,Cisco Services"}],
+    }
+    config = Config.from_document(
+        {"targets": {"pan": {"host": "pan1", "user": "ro"}}},
+        path="test.toml", environ={"ISE_PASS": "secret"})
+    entry = PlannedDataset(
+        name="certificates", description="", enabled=True, interval=21600,
+        dataset=certificates.DATASET, provider=certificates.DATASET.providers[0])
+    assert Runner(config).run(entry, FakeTransport(responses)).ok
+    assert REGISTRY.get_sample_value(
+        "ise3_certificate_expiry_days",
+        {"provider": "openapi", "node": "trust_store",
+         "certificate": "VeriSign Class 3", "store": "trusted",
+         "usage": "Cisco Services, Infrastructure"}) > 0
+
+
+def test_an_evaluation_licence_is_distinguishable_from_a_breach():
+    """compliant=0 is correct for EVALUATION but says nothing about why. Every
+    tier on an unlicensed deployment reads identically to a real entitlement
+    breach unless the reported state is published too."""
+    from prometheus_client import REGISTRY
+
+    from ise_exporter3.config import Config
+    from ise_exporter3.datasets import licensing
+    from ise_exporter3.plan import PlannedDataset
+    from ise_exporter3.runtime import Runner
+    from tests.test_v3_datasets import FakeTransport
+
+    tiers = [{"name": "ESSENTIAL", "status": "ENABLED", "compliance": "EVALUATION",
+              "consumptionCounter": 27, "daysOutOfCompliance": "-",
+              "lastAuthorization": "-"}]
+    config = Config.from_document(
+        {"targets": {"pan": {"host": "pan1", "user": "ro"}}},
+        path="test.toml", environ={"ISE_PASS": "secret"})
+    entry = PlannedDataset(
+        name="licensing", description="", enabled=True, interval=21600,
+        dataset=licensing.DATASET, provider=licensing.DATASET.providers[0])
+    assert Runner(config).run(
+        entry, FakeTransport({"/license/system/tier-state": tiers})).ok
+
+    def sample(name, **labels):
+        return REGISTRY.get_sample_value(name, dict(provider="openapi", **labels))
+
+    assert sample("ise3_license_compliant", tier="ESSENTIAL") == 0
+    assert sample("ise3_license_compliance_state",
+                  tier="ESSENTIAL", state="EVALUATION") == 1
+    assert sample("ise3_license_compliance_state",
+                  tier="ESSENTIAL", state="NONCOMPLIANT") == 0
+    assert sample("ise3_license_consumption", tier="ESSENTIAL") == 27
+
+
 # --- convergence arithmetic -------------------------------------------------
 
 def _cache_ttl(dataset_name):

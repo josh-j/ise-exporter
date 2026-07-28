@@ -20,13 +20,19 @@ events = Gauge(
     "Endpoint profiling events by source and action",
     ["provider", "source", "action"],
 )
+by_source = Gauge(
+    "ise3_endpoint_profile_events_by_source",
+    "Endpoint profiling events by probe source. Published whether or not the "
+    "action column carries values, which the pair breakdown cannot be",
+    ["provider", "source"],
+)
 events_total = Gauge(
     "ise3_endpoint_profile_events_total",
     "Endpoint profiling events in the reporting window",
     ["provider"],
 )
 
-_METRICS = (events, events_total)
+_METRICS = (events, by_source, events_total)
 VIEW = "profiled_endpoints_summary"
 
 
@@ -65,13 +71,34 @@ def fetch(ctx):
 
     rows = results.get("source_action", [])
     reporting.publish_truncation(ctx, "source_action", rows)
+
+    sources = {}
     for row in rows:
-        ctx.set(
-            events,
-            finite(row.get("events")),
-            source=label(row.get("source")),
-            action=label(row.get("action")),
-        )
+        source = label(row.get("source"))
+        sources[source] = sources.get(source, 0.0) + finite(row.get("events"))
+    for source, count in sources.items():
+        ctx.set(by_source, count, source=source)
+
+    # ENDPOINT_ACTION_NAME is present in the view and NULL on every row of a
+    # 3.3 P11 appliance, which turns the pair into the source breakdown above
+    # wearing a constant action="unknown" label. Publish the pair only when the
+    # action column really carries values, and report the absence when it does
+    # not; with no rows at all there is no evidence either way.
+    if rows:
+        populated = any(
+            str(row.get("action") or "").strip().lower()
+            not in reporting.PLACEHOLDER_VALUES
+            for row in rows)
+        ctx.set_shared(reporting.dimension_populated, int(populated),
+                       dataset=ctx.dataset.name, dimension="action")
+        if populated:
+            for row in rows:
+                ctx.set(
+                    events,
+                    finite(row.get("events")),
+                    source=label(row.get("source")),
+                    action=label(row.get("action")),
+                )
 
 
 DATASET = Dataset(

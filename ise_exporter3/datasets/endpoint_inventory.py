@@ -109,7 +109,11 @@ def fetch(ctx):
     reporting.publish_truncation(ctx, "marginals", rows)
     gauges = {"profile": (by_profile, "profile"),
               "identity_group": (by_identity_group, "identity_group")}
-    for dimension, entries in reporting.by_dimension(rows).items():
+    # IDENTITY_GROUP_ID is present in ENDPOINTS_DATA and NULL on every row of a
+    # 3.3 P11 appliance; real group names live in ENDPOINT_IDENTITY_GROUPS,
+    # which this statement does not join, so the breakdown is withheld rather
+    # than published as one 'none' bucket holding the whole fleet.
+    for dimension, entries in reporting.live_dimensions(ctx, rows).items():
         target = gauges.get(dimension)
         if target is None:
             continue

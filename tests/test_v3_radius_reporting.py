@@ -1,5 +1,7 @@
 from types import SimpleNamespace
 
+import pytest
+
 from ise_exporter3 import limits as limits_module
 from ise_exporter3.datasets import radius_reporting
 from ise_exporter3.model import Scale
@@ -124,3 +126,65 @@ def test_fetch_publishes_failure_marginals_correlation_and_repeat_auth_inputs():
         4.0,
         {"nad": "switch-1", "method": "dot1x"},
     ) in ctx.samples
+
+
+def test_the_always_null_security_group_dimension_is_withheld():
+    # SECURITY_GROUP is present in RADIUS_AUTHENTICATION_SUMMARY and NULL in 384
+    # of 384 rows on ISE 3.3 P11: a failure dimension that only ever says
+    # 'unknown' answers nothing, and the presence check cannot see it.
+    class Transport:
+        schema = None
+
+        def query_many(self, statements):
+            return {
+                "totals": [{"passed": 322, "failed": 62}],
+                "summary_marginals": [
+                    {"dimension": "security_group", "value": "unknown",
+                     "passed": 322, "failed": 62, "group_total": 20},
+                    {"dimension": "location", "value": "All Locations",
+                     "passed": 322, "failed": 62, "group_total": 20},
+                    {"dimension": "nad", "value": "campus-corp-wired",
+                     "passed": 274, "failed": 53, "group_total": 20},
+                ],
+                "detail_marginals": [
+                    {"dimension": "psn", "value": "laba-ise-001", "passed": 261,
+                     "failed": 53, "mean_response": 29.6, "timed": 314,
+                     "group_total": 8},
+                ],
+                "failure_context": [],
+                "detail_totals": [],
+            }
+
+    class Context:
+        dataset = SimpleNamespace(name="radius_reporting", default_interval=1800)
+        provider = SimpleNamespace(name="dataconnect")
+        limits = LIMITS
+        transport = Transport()
+
+        def __init__(self):
+            self.samples = []
+            self.shared = []
+
+        def set(self, family, sample_value, /, **labels):
+            self.samples.append((family._name, sample_value, labels))
+
+        def set_shared(self, family, sample_value, /, **labels):
+            self.shared.append((family._name, sample_value, labels))
+
+    ctx = Context()
+    radius_reporting.fetch(ctx)
+
+    failure_dimensions = {
+        labels["dimension"] for name, _value, labels in ctx.samples
+        if name == "ise3_radius_failure_summary"}
+    assert failure_dimensions == {"location"}
+    assert ("ise3_breakdown_dimension_populated", 0,
+            {"dataset": "radius_reporting",
+             "dimension": "security_group"}) in ctx.shared
+    # A dimension going quiet must not take the real breakdowns with it.
+    assert ("ise3_radius_authentications_by_nad", 274.0,
+            {"nad": "campus-corp-wired", "status": "passed"}) in ctx.samples
+    latency = [value for name, value, labels in ctx.samples
+               if name == "ise3_radius_authentication_latency_seconds"
+               and labels == {"status": "all", "psn": "laba-ise-001"}]
+    assert latency == [pytest.approx(0.0296)]

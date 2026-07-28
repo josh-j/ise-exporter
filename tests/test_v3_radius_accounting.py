@@ -107,3 +107,51 @@ def test_fetch_publishes_totals_dimensions_duration_and_coverage():
         3 / 7,
         {"dimension": "nad", "value": "switch-1"},
     ) in ctx.samples
+
+
+def test_the_always_null_policy_dimension_is_withheld_rather_than_published():
+    # AUTHORIZATION_POLICY exists in RADIUS_ACCOUNTING and is NULL in 370 of 370
+    # rows on ISE 3.3 P11, so the policy marginal is the grand total wearing a
+    # dimension label. The schema presence check cannot see that.
+    class Transport:
+        schema = {"RADIUS_ACCOUNTING": {
+            "TIMESTAMP", "ACCT_STATUS_TYPE", "DEVICE_NAME", "ISE_NODE",
+            "AUTHORIZATION_POLICY"}}
+
+        def query_many(self, statements):
+            return {
+                "totals": [{"starts": 338, "stops": 32, "other": 0,
+                            "duration_samples": 4, "records": 370}],
+                "marginals": [
+                    {"dimension": "policy", "value": "unknown", "starts": 338,
+                     "stops": 32, "other": 0, "duration_samples": 4,
+                     "records": 370, "group_total": 6},
+                    {"dimension": "nad", "value": "adlab-workstations",
+                     "starts": 42, "stops": 3, "other": 0,
+                     "duration_samples": 0, "records": 45, "group_total": 6},
+                ],
+            }
+
+    class Context:
+        dataset = SimpleNamespace(name="radius_accounting", default_interval=1800)
+        limits = LIMITS
+        transport = Transport()
+
+        def __init__(self):
+            self.samples = []
+            self.shared = []
+
+        def set(self, family, sample_value, /, **labels):
+            self.samples.append((family._name, sample_value, labels))
+
+        def set_shared(self, family, sample_value, /, **labels):
+            self.shared.append((family._name, sample_value, labels))
+
+    ctx = Context()
+    radius_accounting.fetch(ctx)
+
+    dimensions = {labels.get("dimension") for _name, _value, labels in ctx.samples}
+    assert "policy" not in dimensions
+    assert {"total", "nad"} <= dimensions
+    assert ("ise3_breakdown_dimension_populated", 0,
+            {"dataset": "radius_accounting", "dimension": "policy"}) in ctx.shared

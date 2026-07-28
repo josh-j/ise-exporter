@@ -7,8 +7,10 @@ provider is a label on the data and not only on health:
   steady-state cost (a change feed, not a scan), but it carries no owning-PSN
   field, so per-PSN breakdown is unavailable from this source alone.
 - ``mnt`` is the current session store. One ActiveList read gives exact counts by
-  PSN, NAD and ops owner. The expensive per-endpoint detail is a different
-  question and belongs to ``session_authorization``, which caches it.
+  PSN, and by NAD and ops owner as far as the inventory can resolve the NAS
+  address -- the list names no network device, so an unresolved address is
+  published as itself. The expensive per-endpoint detail is a different question
+  and belongs to ``session_authorization``, which caches it.
 - ``dataconnect`` reconstructs sessions from accounting starts minus stops. It
   has the freshness and completeness of whatever the NADs actually sent, and it
   is by far the most expensive of the three -- a 60-minute scan with a dedup
@@ -88,9 +90,11 @@ def fetch_mnt(ctx):
     matched = unmatched = 0
 
     for session in sessions:
+        # The NAS address is the only join key the ActiveList offers: it is a
+        # session index -- user, MAC, NAS IP, framed IP, session ids and PSN --
+        # and carries no network device name to fall back on.
         nas_ip = session.get("nas_ip_address")
-        device = session.get("network_device_name")
-        classification = directory.lookup(nas_ip, device)
+        classification = directory.lookup(nas_ip)
         if classification:
             matched += 1
             nad, location, owner = classification
@@ -98,7 +102,7 @@ def fetch_mnt(ctx):
             # Counted, but not attributable. A session from a NAD that is not in
             # ERS inventory is a real finding, not a row to drop.
             unmatched += 1
-            nad, location, owner = label(device or nas_ip, "unknown"), "Unknown", "unknown"
+            nad, location, owner = label(nas_ip, "unknown"), "Unknown", "unknown"
 
         psns[label(session.get("server"), "unknown")] += 1
         nads[(nad, location)] += 1

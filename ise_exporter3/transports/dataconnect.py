@@ -138,9 +138,44 @@ SCHEMA_COLUMN_CONTRACTS = {
             "RESPONSE_TIME",
         ),
     },
+    "RADIUS_ERRORS_VIEW": {
+        # radius_errors has no schema-conditional degradation path, so a rename
+        # here is an ORA-00904 rather than a lost dimension. Contracted so the
+        # gap is visible before the statement fails.
+        "required": ("TIMESTAMP", "MESSAGE_CODE"),
+        "optional": ("NETWORK_DEVICE_NAME", "AUTHENTICATION_METHOD", "ISE_NODE"),
+    },
     "PROFILED_ENDPOINTS_SUMMARY": {
         "required": ("TIMESTAMP",),
         "optional": ("SOURCE", "ENDPOINT_ACTION_NAME"),
+    },
+    # ENDPOINTS_DATA is a current-state view: no TIMESTAMP and no ISE_NODE, and
+    # three datasets read it. UPDATE_TIME is TIMESTAMP WITH TIME ZONE, which the
+    # thin driver only returns through a CAST.
+    "ENDPOINTS_DATA": {
+        "required": ("MAC_ADDRESS", "ENDPOINT_POLICY"),
+        "optional": ("IDENTITY_GROUP_ID", "POSTURE_APPLICABLE", "UPDATE_TIME"),
+    },
+    "POSTURE_ASSESSMENT_BY_ENDPOINT": {
+        "required": ("TIMESTAMP", "ENDPOINT_MAC_ADDRESS"),
+        "optional": (
+            "ISE_NODE", "POSTURE_STATUS", "POSTURE_POLICY_MATCHED",
+            "POSTURE_AGENT_VERSION", "ENDPOINT_OPERATING_SYSTEM",
+        ),
+    },
+    # The two posture views disagree on spelling: this one keys on ENDPOINT_ID
+    # and times on LOGGED_AT.
+    "POSTURE_ASSESSMENT_BY_CONDITION": {
+        "required": ("LOGGED_AT", "ENDPOINT_ID"),
+        "optional": ("CONDITION_NAME", "CONDITION_STATUS"),
+    },
+    "TACACS_AUTHENTICATION_LAST_TWO_DAYS": {
+        "required": ("EPOCH_TIME",),
+        "optional": ("USERNAME", "DEVICE_NAME", "STATUS"),
+    },
+    "TACACS_ACCOUNTING_LAST_TWO_DAYS": {
+        "required": ("EPOCH_TIME",),
+        "optional": ("USERNAME", "DEVICE_NAME", "COMMAND", "COMMAND_ARGS"),
     },
     "TACACS_AUTHORIZATION_LAST_TWO_DAYS": {
         "required": ("EPOCH_TIME",),

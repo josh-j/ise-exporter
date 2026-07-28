@@ -9,6 +9,7 @@ survives a process that dies mid-query.
 import os
 import threading
 import time
+from types import SimpleNamespace
 
 import oracledb
 import pytest
@@ -572,3 +573,65 @@ def test_measured_database_seconds_are_counted_for_the_load_model(tmp_path):
     after = REGISTRY.get_sample_value(
         "ise3_load_measured_db_seconds_total", {"target": "oracle"})
     assert after == pytest.approx(before + 1.5)
+
+
+def test_every_view_the_reporting_datasets_read_is_under_contract():
+    # Availability telemetry said nothing about five of the views this exporter
+    # reads, ENDPOINTS_DATA included -- which three datasets depend on. A column
+    # disappearing there used to be a silent failure rather than a capability
+    # gap. ENDPOINTS_DATA is current-state, so it is contracted on the columns
+    # it really has: no TIMESTAMP, no ISE_NODE.
+    for view in ("ENDPOINTS_DATA", "POSTURE_ASSESSMENT_BY_ENDPOINT",
+                 "POSTURE_ASSESSMENT_BY_CONDITION", "RADIUS_ERRORS_VIEW",
+                 "TACACS_AUTHENTICATION_LAST_TWO_DAYS",
+                 "TACACS_ACCOUNTING_LAST_TWO_DAYS"):
+        assert view in SCHEMA_COLUMN_CONTRACTS, view
+
+    endpoints = SCHEMA_COLUMN_CONTRACTS["ENDPOINTS_DATA"]
+    assert "TIMESTAMP" not in endpoints["required"] + endpoints["optional"]
+    assert "ISE_NODE" not in endpoints["required"] + endpoints["optional"]
+    assert "UPDATE_TIME" in endpoints["optional"]
+    # The two posture views disagree on spelling; contracting them together is
+    # how that stays visible.
+    assert "LOGGED_AT" in \
+        SCHEMA_COLUMN_CONTRACTS["POSTURE_ASSESSMENT_BY_CONDITION"]["required"]
+    assert "TIMESTAMP" in \
+        SCHEMA_COLUMN_CONTRACTS["POSTURE_ASSESSMENT_BY_ENDPOINT"]["required"]
+
+
+def test_an_empty_diagnostic_view_publishes_zero_rather_than_nothing(tmp_path):
+    # SYSTEM_DIAGNOSTICS_VIEW holds no rows at all on ISE 3.3 P11. An absent
+    # total cannot be told apart from a statement that never ran, while the aaa
+    # source publishes a number beside it.
+    diagnostic_columns = {"ISE_NODE", "TIMESTAMP", "MESSAGE_SEVERITY",
+                          "CATEGORY", "MESSAGE_CODE"}
+    schema = {**FULL_SCHEMA,
+              "SYSTEM_DIAGNOSTICS_VIEW": diagnostic_columns,
+              "AAA_DIAGNOSTICS_VIEW": diagnostic_columns}
+
+    class Transport:
+        def query_many(self, statements):
+            return {key: [] for key in statements}
+
+    class Context:
+        dataset = SimpleNamespace(name="psn_performance", default_interval=300)
+        limits = _config(tmp_path).limits
+        transport = Transport()
+
+        def __init__(self):
+            self.samples = []
+
+        def set(self, family, sample_value, /, **labels):
+            self.samples.append((family._name, sample_value, labels))
+
+        def set_shared(self, family, sample_value, /, **labels):
+            self.samples.append((family._name, sample_value, labels))
+
+    Context.transport.schema = schema
+    ctx = Context()
+    psn_performance.fetch(ctx)
+
+    assert ("ise3_psn_diagnostic_events_total", 0.0,
+            {"source": "system"}) in ctx.samples
+    assert ("ise3_psn_diagnostic_events_total", 0.0,
+            {"source": "aaa"}) in ctx.samples

@@ -19,9 +19,21 @@ statement can be built without saying which ceiling it was built against.
 """
 from __future__ import annotations
 
+from prometheus_client import Gauge
+
 from . import snapshots, telemetry
 from .labels import label
 from .parsing import finite
+
+
+# Shared across every dataset that publishes marginals, like the coverage
+# families in telemetry, so it is written through ctx.set_shared rather than
+# declared in one Dataset.metrics.
+dimension_populated = Gauge(
+    "ise3_breakdown_dimension_populated",
+    "A breakdown dimension carried at least one real value in the scan window; "
+    "zero means the column exists and is empty, so no series is published for it",
+    ["dataset", "dimension"])
 
 
 def window_hours(interval_seconds, limits):
@@ -132,6 +144,36 @@ def by_dimension(rows):
     for row in rows:
         grouped.setdefault(str(row.get("dimension") or "unknown"), []).append(row)
     return grouped
+
+
+# The placeholders every marginal substitutes for NULL. A dimension whose rows
+# carry only these carries no values at all.
+PLACEHOLDER_VALUES = frozenset({"", "unknown", "none"})
+
+
+def live_dimensions(ctx, rows):
+    """Marginal rows by dimension, minus the dimensions that hold no values.
+
+    A column can exist, pass every schema presence check, and still be NULL on
+    every row -- ISE 3.3 P11 ships four of them in these views. The marginal then
+    collapses to a single ``unknown`` group carrying the dataset total, which
+    reads as a breakdown and is not one. Withholding those series and publishing
+    the absence instead is the difference between "no endpoints in this identity
+    group" and "this appliance does not populate identity groups".
+
+    A dimension that returned no rows at all is left unpublished: an empty window
+    is no evidence either way, and calling it dead would be its own invention.
+    """
+    live = {}
+    for dimension, entries in by_dimension(rows).items():
+        populated = any(
+            str(row.get("value") or "").strip().lower() not in PLACEHOLDER_VALUES
+            for row in entries)
+        ctx.set_shared(dimension_populated, int(populated),
+                       dataset=ctx.dataset.name, dimension=dimension)
+        if populated:
+            live[dimension] = entries
+    return live
 
 
 def top_groups(selected, source, where, group_by, order_by, *, limits, limit=0):

@@ -9,8 +9,13 @@ edits an account, so each is fetched once and cached, and the per-cycle budget
 fills the cache rather than capping how many accounts are ever classified.
 
 Hygiene signals are the point of this dataset: an account whose password never
-expires, or that is enabled and has never been used, is a finding. Those are only
-visible in the per-account detail, which is why the fan-out is worth paying for.
+expires, or a disabled account still on the box, is a finding. Both are visible
+only in the per-account detail, which is why the fan-out is worth paying for.
+
+There is deliberately no "never used" risk. ISE 3.3 P11 returns no last-login,
+last-used or login-count field on ``/config/internaluser/{id}`` -- only
+dateCreated and dateModified -- so that question cannot be answered from here and
+is not published as a plausible-looking zero.
 """
 from prometheus_client import Gauge
 
@@ -50,12 +55,17 @@ _METRICS = (accounts_total, accounts_classified, account_enabled,
             account_hygiene, policy_sets, policy_objects)
 
 
+def _object_id(row):
+    return str(row.get("id") or "").strip() if isinstance(row, dict) else ""
+
+
 def hygiene_risks(detail):
     """Named risks for one account. Absence of a risk is published as 0."""
     risks = {}
-    info = detail.get("passwordInfo") or {}
+    # passwordNeverExpires is top-level on InternalUser -- ISE sends no
+    # passwordInfo object -- and is a real JSON boolean, not a string.
     risks["password_never_expires"] = int(
-        str(info.get("passwordNeverExpires", "")).lower() == "true")
+        str(detail.get("passwordNeverExpires", "")).lower() == "true")
     risks["disabled_account_retained"] = int(
         str(detail.get("enabled", "true")).lower() == "false")
     return risks
@@ -131,21 +141,22 @@ def fetch(ctx):
         ctx.set(policy_sets, len(sets))
         ctx.set(policy_objects, len(sets), object_type="policy_sets")
 
-    for object_type, path, api in (
-        (
-            "command_sets",
-            "/policy/device-admin/command-sets",
-            "pan_command_sets",
-        ),
-        (
-            "shell_profiles",
-            "/policy/device-admin/shell-profiles",
-            "pan_shell_profiles",
-        ),
-    ):
-        objects = ctx.transport.get_openapi(path, api=api)
-        if isinstance(objects, list):
-            ctx.set(policy_objects, len(objects), object_type=object_type)
+    # Both endpoints return a bare list of {name, id}, and ISE mirrors command
+    # sets into the shell-profile list under the same id -- counting that list
+    # verbatim reports one shell profile per command set that does not exist.
+    command_sets = ctx.transport.get_openapi(
+        "/policy/device-admin/command-sets", api="pan_command_sets")
+    command_set_ids = set()
+    if isinstance(command_sets, list):
+        command_set_ids = {_object_id(row) for row in command_sets} - {""}
+        ctx.set(policy_objects, len(command_sets), object_type="command_sets")
+
+    profiles = ctx.transport.get_openapi(
+        "/policy/device-admin/shell-profiles", api="pan_shell_profiles")
+    if isinstance(profiles, list):
+        distinct = sum(1 for row in profiles
+                       if _object_id(row) not in command_set_ids)
+        ctx.set(policy_objects, distinct, object_type="shell_profiles")
 
 
 DATASET = Dataset(

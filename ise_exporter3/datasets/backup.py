@@ -2,10 +2,16 @@
 
 OpenAPI only.
 
-An ISE that has never been backed up reports neither a status nor a date. That is
-a real answer, not a failure: the dataset publishes ``configured = 0`` rather
-than erroring, because "no backup is configured" is exactly what an operator
-needs to see and an error would hide it behind a failure reason.
+An ISE that has never been backed up returns 200 with every one of the response's
+fields as explicit JSON null -- status and startDate included -- rather than
+omitting them. That is a real answer, not a failure: the dataset publishes
+``configured = 0`` rather than erroring, because "no backup is configured" is
+exactly what an operator needs to see and an error would hide it behind a failure
+reason.
+
+In that state the timestamp, age and status series are deliberately not
+published at all. An absent series says "never answered"; a zero would say "last
+backup at the epoch, zero hours old", which is a different and false claim.
 """
 from datetime import datetime, timezone
 

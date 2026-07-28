@@ -56,6 +56,9 @@ def warm(ctx, cache, policies):
         except Exception:  # noqa: BLE001 - one policy must not fail the inventory
             cache.count("failed")
             continue
+        # Only the length is taken. A rule's identity is nested under a "rule"
+        # sub-object on the row, not flat on it, so anything reading a rule's
+        # name or state has to go through row["rule"].
         if not isinstance(authentication, list) or not isinstance(authorization, list):
             cache.count("empty")
             continue

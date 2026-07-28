@@ -222,3 +222,68 @@ def test_a_pending_reason_is_one_the_vocabulary_knows():
     assert PENDING_REASONS <= FAILURE_REASONS
     # "not yet" and "stop hammering" are opposite instructions.
     assert not (PENDING_REASONS & SLOW_RETRY_REASONS)
+
+
+# --- the session join, against how NADs are really addressed ----------------
+
+def test_a_subnet_configured_nad_attributes_the_sessions_inside_it():
+    """Found on the lab: campus-corp-wired is 10.200.40.0/24 and every one of its
+    sessions arrives from 10.200.40.11-.14. Keying on the network address alone
+    meant no session ever matched, and a whole segment went unattributed."""
+    from ise_exporter3.datasets import network_devices
+
+    keys = network_devices.device_addresses(
+        {"NetworkDeviceIPList": [{"ipaddress": "10.200.40.0", "mask": 24}]})
+    assert keys == ["10.200.40.0/24"]
+
+    directory = nad_directory.shared()
+    directory.replace([{"nad": "campus-corp-wired", "location": "Unknown",
+                        "ops_owner": "AD Lab", "keys": (*keys, "campus-corp-wired")}])
+    assert directory.ops_owner("10.200.40.12") == "AD Lab"
+    assert directory.ops_owner("campus-corp-wired") == "AD Lab"
+    # Still a bounded claim: an address outside the prefix is not this NAD's.
+    assert directory.ops_owner("10.201.40.12") == "unknown"
+
+
+def test_a_host_configured_nad_matches_only_its_own_address():
+    from ise_exporter3.datasets import network_devices
+
+    keys = network_devices.device_addresses(
+        {"NetworkDeviceIPList": [{"ipaddress": "10.99.0.1", "mask": 32}]})
+    assert keys == ["10.99.0.1/32"]
+
+    directory = nad_directory.shared()
+    directory.replace([{"nad": "sim-nad-0001", "location": "site",
+                        "ops_owner": "net-ops", "keys": keys}])
+    assert directory.ops_owner("10.99.0.1") == "net-ops"
+    assert directory.ops_owner("10.99.0.2") == "unknown"
+
+
+def test_the_longest_prefix_owns_the_address():
+    directory = nad_directory.shared()
+    directory.replace([
+        {"nad": "campus", "location": "site", "ops_owner": "campus-team",
+         "keys": ("10.200.0.0/16",)},
+        {"nad": "lab-carveout", "location": "site", "ops_owner": "lab-team",
+         "keys": ("10.200.40.0/24",)},
+    ])
+    assert directory.ops_owner("10.200.40.12") == "lab-team"
+    assert directory.ops_owner("10.200.9.12") == "campus-team"
+
+
+def test_a_default_route_nad_does_not_own_the_whole_estate():
+    # 0.0.0.0/0 as a NAD address would attribute every session in the deployment
+    # to one owner, which is worse than attributing none of them.
+    directory = nad_directory.shared()
+    directory.replace([{"nad": "catch-all", "location": "site",
+                        "ops_owner": "someone", "keys": ("0.0.0.0/0", "catch-all")}])
+    assert directory.ops_owner("10.200.40.12") == "unknown"
+    assert directory.ops_owner("catch-all") == "someone"
+
+
+def test_a_malformed_mask_leaves_the_host_key_alone():
+    from ise_exporter3.datasets import network_devices
+
+    assert network_devices.device_addresses(
+        {"NetworkDeviceIPList": [{"ipaddress": "10.99.0.1", "mask": "n/a"}]}) == [
+            "10.99.0.1"]

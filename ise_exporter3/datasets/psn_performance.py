@@ -208,12 +208,15 @@ def fetch(ctx):
         if key not in results:
             continue
         reporting.publish_truncation(ctx, key, rows)
-        if rows:
-            ctx.set(
-                diagnostic_events_total,
-                finite(rows[0].get("total_events")),
-                source=source,
-            )
+        # A statement that ran and matched nothing is a zero, not a silence:
+        # SYSTEM_DIAGNOSTICS_VIEW is empty on 3.3 P11, and leaving the total
+        # absent there makes "no diagnostics" indistinguishable from "the view
+        # was never queried" while the aaa source publishes a number beside it.
+        ctx.set(
+            diagnostic_events_total,
+            finite(rows[0].get("total_events")) if rows else 0.0,
+            source=source,
+        )
         for row in rows:
             ctx.set(
                 diagnostic_events,
