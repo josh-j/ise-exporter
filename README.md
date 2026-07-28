@@ -266,7 +266,10 @@ in its name.
 
 ### Navigating Data Connect
 
-PowerCLI-style navigation of the sixteen reporting views, from the shell:
+PowerCLI-style navigation of every reporting view the Data Connect account
+can see, from the shell — sixteen curated views carry time windows, default
+ordering and typed cmdlets; the rest of the catalogue (Cisco documents ~70
+views) is queryable exactly as discovered:
 
 ```powershell
 ise> Get-IseDcView                     # what is there, and is it available
@@ -285,8 +288,12 @@ ise> Invoke-IseDcQuery -View radius_errors_view -Last 4h `
 Filters, projections, ordering and row limits are applied server-side through
 bind variables against the discovered catalog — the shell never sends SQL.
 `-AsSql` shows the statement a query would run without spending Oracle time,
-`-Wait` sits out a duty-cycle cooldown, and truncated results say so. The
-operator guide is `docs/ise-cli3.md` in a working checkout.
+`-Wait` sits out a duty-cycle cooldown, and truncated results say so. `-Force`
+is the incident override: it skips the cooldown waits and charges only measured
+Oracle time, while keeping every ceiling, the statement timeout, the auth guard
+and the one-statement-at-a-time lane — and forced use is counted separately in
+the exporter's own metrics. The operator guide is `docs/ise-cli3.md` in a
+working checkout.
 
 ## Dashboards
 

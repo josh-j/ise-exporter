@@ -121,7 +121,7 @@ function New-IseApiError {
             'This exporter has no Data Connect target configured, so there is ' +
             'nothing for the Get-IseDc* cmdlets to read.'
         }
-        'unknown_view' { "No such view. Get-IseDcView lists the ones this exporter curates." }
+        'unknown_view' { "That is not a legal view name. Get-IseDcView lists what this account can see." }
         'view_unavailable' {
             'The Data Connect account cannot see that view; Get-IseDcView ' +
             'reports which ones it can.'
@@ -364,7 +364,10 @@ function Get-IseDcView {
     A view with a null time_column is current state rather than history, and
     rejects -Last.
     .PARAMETER Name
-    Filter by curated view name; wildcards accepted.
+    Filter by view name; wildcards accepted. Every view the Data Connect
+    account can see is listed -- curated ones carry windows, default order
+    and typed cmdlets; the rest are queryable exactly as the catalog shows
+    them (the curated property tells them apart).
     .PARAMETER Refresh
     Re-fetch the descriptors. Worth doing once if the shell started before the
     exporter finished discovering the catalog.
@@ -411,7 +414,7 @@ function Get-IseDcColumn {
     $descriptor = @(Get-IseDcView -Name $View -Refresh:$Refresh) | Select-Object -First 1
     if (-not $descriptor) {
         throw [System.InvalidOperationException]::new(
-            "No curated view matches '$View'. Get-IseDcView lists them.")
+            "No view matches '$View'. Get-IseDcView lists what this account can see.")
     }
     $defaults = @($descriptor.default_columns)
     foreach ($column in @($descriptor.columns)) {

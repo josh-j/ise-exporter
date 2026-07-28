@@ -116,6 +116,35 @@ class View:
     realtime_columns: tuple = ()
 
 
+def resolve_view(name):
+    """A curated entry when one exists, a bare one for any other legal name.
+
+    Curation is enrichment, not a gate. The discovered catalog decides what
+    this account may query -- ``build_query`` refuses a view the catalog does
+    not carry -- while curation adds what a name alone cannot: the time
+    column, the window semantics, the reading order, the typed cmdlet. A view
+    nobody curated is still fully explorable; only ``last=<window>`` needs a
+    time column, and it is refused with exactly that explanation.
+
+    The identifier check matters here in a way it never did for curated
+    names: this string reaches FROM-clause position, and the catalog
+    membership test happens later, in another function. Refusing anything
+    outside Oracle's unquoted grammar keeps those two defences independent.
+    """
+    text = str(name).strip()
+    entry = VIEW_CATALOG.get(text.lower())
+    if entry is not None:
+        return entry
+    upper = text.upper()
+    if not _IDENTIFIER.match(upper):
+        raise ExploreError(
+            "unknown_view", f"{_echo(name)} is not a legal view name",
+            status=404)
+    return View(
+        name=upper.lower(), view=upper,
+        description="not curated; queryable as the discovered catalog shows it")
+
+
 def _catalog(*views):
     return MappingProxyType({view.name: view for view in views})
 
@@ -444,12 +473,7 @@ def parse_request(query, limits):
     name = _single(query, "view")
     if not name:
         raise _invalid("view is required; see /api/v1/dataconnect/views")
-    entry = VIEW_CATALOG.get(str(name).strip().lower())
-    if entry is None:
-        raise ExploreError(
-            "unknown_view",
-            f"{_echo(name)} is not a curated view; see "
-            f"/api/v1/dataconnect/views", status=404)
+    entry = resolve_view(name)
 
     hours = 0
     window_disabled = False
@@ -676,12 +700,13 @@ def window_bound(column, hours, limits, kind):
 
 # --- view descriptors -------------------------------------------------------
 
-def describe(entry, catalog_columns):
+def describe(entry, catalog_columns, *, curated=True):
     """One view descriptor, told from what the account can actually see."""
     columns = known_columns(catalog_columns)
     time_column = resolve_time_column(entry, columns)
     projection = default_projection(entry, columns)
     return {
+        "curated": curated,
         "name": entry.name,
         "view": entry.view,
         "description": entry.description,
@@ -747,8 +772,21 @@ class Explorer:
 
     def views(self):
         schema = self._schema()
-        return [describe(entry, schema.get(entry.view, ()))
-                for entry in VIEW_CATALOG.values()]
+        described = [describe(entry, schema.get(entry.view, ()))
+                     for entry in VIEW_CATALOG.values()]
+        curated = {entry.view for entry in VIEW_CATALOG.values()}
+        # Everything else the account can see is queryable too -- curation
+        # adds windows and reading order, never reachability -- so the listing
+        # must not hide it. Dictionary names that fail the identifier grammar
+        # are skipped rather than fatal; they could not be queried anyway.
+        for name in sorted(set(schema) - curated):
+            try:
+                entry = resolve_view(name)
+            except ExploreError:
+                continue
+            described.append(
+                describe(entry, schema.get(name, ()), curated=False))
+        return described
 
     def query(self, parameters):
         try:

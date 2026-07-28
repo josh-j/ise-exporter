@@ -330,12 +330,54 @@ def test_an_unparseable_window_is_a_readable_refusal():
     assert "last" in raised.value.detail
 
 
-def test_an_unknown_view_is_a_404_and_names_the_discovery_route():
+def test_curation_is_enrichment_and_the_catalog_is_the_gate():
+    # A malformed name is a 404 before anything else looks at it: it could
+    # reach FROM-clause position, so the identifier grammar is its own check.
+    for name in ("no such view", "1nope", "x;drop", "nope)", ""):
+        with pytest.raises(ExploreError) as raised:
+            _build(view=name)
+        assert raised.value.status in (400, 404)
+
+    # A well-formed name nobody curated is not refused by name -- reachability
+    # belongs to the discovered catalog. dba_users is the case that matters:
+    # Oracle dictionary views are not in user_tab_columns for this account,
+    # so the same gate that admits an uncurated reporting view keeps the
+    # dictionary out, without a second mechanism.
     with pytest.raises(ExploreError) as raised:
         _build(view="dba_users")
-    assert raised.value.error == "unknown_view"
-    assert raised.value.status == 404
-    assert "/api/v1/dataconnect/views" in raised.value.detail
+    assert raised.value.error == "view_unavailable"
+    assert raised.value.status == 409
+
+
+def test_an_uncurated_view_in_the_catalog_is_fully_explorable():
+    schema = {"NODE_LIST": {"HOSTNAME", "NODE_TYPE", "GATEWAY", "NODE_ROLE"}}
+    sql, binds = _build(schema=schema, view="node_list",
+                        eq="NODE_TYPE:PAN", first=10)
+    assert "FROM NODE_LIST" in sql
+    assert "NODE_TYPE = :b0" in sql and binds["b0"] == "PAN"
+    # No curated preference: the whole row, alphabetically, stably ordered.
+    assert sql.startswith("SELECT GATEWAY, HOSTNAME, NODE_ROLE, NODE_TYPE ")
+    assert "ORDER BY GATEWAY ASC" in sql
+
+    # No time column is known, so a window cannot be built -- but the
+    # explicit no-window trade still works.
+    with pytest.raises(ExploreError) as raised:
+        _build(schema=schema, view="node_list", last="1h")
+    assert raised.value.status == 400
+    assert _build(schema=schema, view="node_list", last="all")[0]
+
+
+def test_the_listing_carries_uncurated_views_marked_as_such():
+    schema = {"ENDPOINTS_DATA": set(ENDPOINT_COLUMNS),
+              "NODE_LIST": {"HOSTNAME", "NODE_TYPE"}}
+    explorer = Explorer(StubTransport(schema=schema))
+    views = {view["name"]: view for view in explorer.views()}
+    assert len(views) == len(VIEW_CATALOG) + 1
+    assert views["node_list"]["curated"] is False
+    assert views["node_list"]["available"] is True
+    assert views["node_list"]["columns"] == ["HOSTNAME", "NODE_TYPE"]
+    assert views["node_list"]["time_column"] is None
+    assert views["endpoints_data"]["curated"] is True
 
 
 def test_a_view_name_is_case_insensitive():
@@ -804,7 +846,7 @@ def test_every_outcome_is_counted_against_the_shared_duty_cycle():
     explorer.query(_query(view="radius_authentications"))
     explorer.query(_query(view="radius_authentications", explain=1))
     with pytest.raises(ExploreError):
-        explorer.query(_query(view="dba_users"))
+        explorer.query(_query(view="not a legal name"))
     assert _counted("success") == before["success"] + 1
     assert _counted("explain") == before["explain"] + 1
     assert _counted("unknown_view") == before["unknown_view"] + 1
@@ -830,8 +872,12 @@ def _route(api, path, query=None):
 def test_the_routes_carry_the_status_the_refusal_asked_for():
     api = _api(_explorer())
     status, payload = _route(
-        api, "/api/v1/dataconnect/query", _query(view="dba_users"))
+        api, "/api/v1/dataconnect/query", _query(view="not a legal name"))
     assert status == 404 and payload["error"] == "unknown_view"
+
+    status, payload = _route(
+        api, "/api/v1/dataconnect/query", _query(view="dba_users"))
+    assert status == 409 and payload["error"] == "view_unavailable"
 
     status, payload = _route(
         api, "/api/v1/dataconnect/query",
@@ -905,10 +951,11 @@ def test_the_contract_holds_over_real_http_the_way_a_client_sees_it():
         with pytest.raises(urllib.error.HTTPError) as raised:
             urllib.request.urlopen(
                 f"{base}/api/v1/dataconnect/query?view=nope", timeout=5)
-        assert raised.value.code == 404
+        # A legal name nobody curated is judged by the catalog, not by name.
+        assert raised.value.code == 409
         # The error body is JSON too: a client must be able to say why rather
         # than surfacing a raw HTTP exception.
-        assert json.loads(raised.value.read())["error"] == "unknown_view"
+        assert json.loads(raised.value.read())["error"] == "view_unavailable"
     finally:
         server.stop(timeout=5)
 
