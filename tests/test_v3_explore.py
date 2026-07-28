@@ -286,6 +286,84 @@ def test_last_all_makes_the_row_limit_the_only_bound():
     assert "NUMTODSINTERVAL" not in sql
 
 
+def test_ranges_nulls_and_exclusion_travel_as_bound_predicates():
+    sql, binds = _build(
+        view="radius_authentications", ge="RESPONSE_TIME:500",
+        le="RESPONSE_TIME:2000", ne="USERNAME:svc_probe",
+        null="FAILED", notnull="DEVICE_NAME")
+    assert "RESPONSE_TIME >= :b0" in sql
+    assert "RESPONSE_TIME <= :b1" in sql
+    assert "USERNAME != :b2" in sql
+    assert "FAILED IS NULL" in sql
+    assert "DEVICE_NAME IS NOT NULL" in sql
+    # Values never enter the statement text; both bounds are the same column
+    # asked twice, which is how between is said.
+    assert binds["b0"] == "500" and binds["b1"] == "2000"
+    assert binds["b2"] == "svc_probe"
+
+
+def test_all_filter_kinds_share_one_ceiling():
+    crowded = {"eq": [f"USERNAME:u{i}" for i in range(10)],
+               "ge": [f"RESPONSE_TIME:{i}" for i in range(6)],
+               "null": ["FAILED"] * 5}
+    with pytest.raises(ExploreError) as raised:
+        _build(view="radius_authentications", **crowded)
+    assert "filters" in raised.value.detail
+
+
+def test_a_grouped_query_is_a_bounded_top_n():
+    sql, binds = _build(view="radius_authentications",
+                        group=["DEVICE_NAME", "ISE_NODE"], first=20)
+    assert ("SELECT DEVICE_NAME, ISE_NODE, COUNT(*) AS ROW_COUNT "
+            "FROM RADIUS_AUTHENTICATIONS") in sql
+    assert "GROUP BY DEVICE_NAME, ISE_NODE" in sql
+    # Top-N reads largest-first, and the row limit caps the groups.
+    assert "ORDER BY ROW_COUNT DESC" in sql
+    assert sql.endswith("FETCH FIRST :limit ROWS ONLY")
+    assert binds == {"limit": 20}
+    # The window still bounds the scan underneath the grouping.
+    assert "NUMTODSINTERVAL(6, 'HOUR')" in sql
+
+
+def test_aggregates_project_with_derived_aliases():
+    sql, _binds = _build(view="radius_authentications", group="DEVICE_NAME",
+                         agg=["avg:RESPONSE_TIME", "max:RESPONSE_TIME"])
+    assert "AVG(RESPONSE_TIME) AS AVG_RESPONSE_TIME" in sql
+    assert "MAX(RESPONSE_TIME) AS MAX_RESPONSE_TIME" in sql
+    assert "ORDER BY AVG_RESPONSE_TIME DESC" in sql
+
+    # A whole-view aggregate needs no grouping: one row, still bounded.
+    sql, _binds = _build(view="radius_authentications", agg="avg:RESPONSE_TIME")
+    assert "GROUP BY" not in sql
+    assert "AVG(RESPONSE_TIME) AS AVG_RESPONSE_TIME" in sql
+
+
+def test_a_grouped_query_orders_only_by_what_it_projects():
+    sql, _binds = _build(view="radius_authentications", group="DEVICE_NAME",
+                         order="DEVICE_NAME")
+    # An explicit group-column order is a listing, so it stays ascending.
+    assert "ORDER BY DEVICE_NAME ASC" in sql
+    with pytest.raises(ExploreError) as raised:
+        _build(view="radius_authentications", group="DEVICE_NAME",
+               order="RESPONSE_TIME")
+    assert raised.value.error == "invalid_request"
+    with pytest.raises(ExploreError) as raised:
+        _build(view="radius_authentications", group="DEVICE_NAME", cols="USERNAME")
+    assert "cols cannot be combined" in raised.value.detail
+
+
+def test_a_zoned_column_keeps_its_cast_through_grouping():
+    wide = set(RADIUS_COLUMNS) | {"TIMESTAMP_TIMEZONE"}
+    request = parse_request(
+        _query(view="radius_authentications", group="TIMESTAMP_TIMEZONE",
+               agg="max:TIMESTAMP_TIMEZONE"), LIMITS)
+    sql, _binds = build_query(request, wide, LIMITS,
+                              zoned={"TIMESTAMP_TIMEZONE"})
+    assert ("CAST(TIMESTAMP_TIMEZONE AS DATE) AS TIMESTAMP_TIMEZONE" in sql)
+    assert "GROUP BY CAST(TIMESTAMP_TIMEZONE AS DATE)" in sql
+    assert "MAX(CAST(TIMESTAMP_TIMEZONE AS DATE)) AS MAX_TIMESTAMP_TIMEZONE" in sql
+
+
 def test_last_all_on_a_current_state_view_is_the_plain_browse():
     sql, _binds = _build(view="endpoints_data", last="all")
     assert "WHERE" not in sql
@@ -476,10 +554,29 @@ def test_an_identifier_parameter_refuses_anything_not_in_the_catalog(
 
 
 @pytest.mark.parametrize("hostile", INJECTIONS)
-@pytest.mark.parametrize("parameter", ["eq", "like"])
+@pytest.mark.parametrize("parameter", ["eq", "like", "ge", "le", "ne"])
 def test_a_filter_column_refuses_anything_not_in_the_catalog(parameter, hostile):
     with pytest.raises(ExploreError) as raised:
         _build(view="radius_authentications", **{parameter: f"{hostile}:x"})
+    assert raised.value.error == "invalid_request"
+
+
+@pytest.mark.parametrize("hostile", INJECTIONS)
+@pytest.mark.parametrize("parameter", ["null", "notnull", "group"])
+def test_a_bare_column_parameter_refuses_anything_not_in_the_catalog(
+        parameter, hostile):
+    with pytest.raises(ExploreError) as raised:
+        _build(view="radius_authentications", **{parameter: hostile})
+    assert raised.value.error == "invalid_request"
+
+
+@pytest.mark.parametrize("hostile", INJECTIONS)
+def test_an_aggregate_refuses_hostile_functions_and_columns(hostile):
+    with pytest.raises(ExploreError) as raised:
+        _build(view="radius_authentications", agg=f"avg:{hostile}")
+    assert raised.value.error == "invalid_request"
+    with pytest.raises(ExploreError) as raised:
+        _build(view="radius_authentications", agg=f"{hostile}:RESPONSE_TIME")
     assert raised.value.error == "invalid_request"
 
 

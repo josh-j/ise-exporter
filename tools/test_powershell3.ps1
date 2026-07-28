@@ -348,6 +348,24 @@ try {
     $null = Invoke-IseDcQuery -View radius_authentications -Last all -First 50
     Assert-Like '-Last all travels as last=all' '*first=50*last=all*' $listenerState.Requests[-1]
 
+    $null = Invoke-IseDcQuery -View radius_authentications -Last 1h `
+        -Min @{ RESPONSE_TIME = 500 } -Max @{ RESPONSE_TIME = 2000 } `
+        -Exclude @{ USERNAME = 'svc_probe' } -IsNull FAILURE_REASON -NotNull DEVICE_NAME
+    Assert-Equal 'ranges, exclusion and null tests map onto the wire' (
+        '/api/v1/dataconnect/query?ge=RESPONSE_TIME%3A500&last=1h' +
+        '&le=RESPONSE_TIME%3A2000&ne=USERNAME%3Asvc_probe' +
+        '&notnull=DEVICE_NAME&null=FAILURE_REASON&view=radius_authentications'
+    ) $listenerState.Requests[-1]
+
+    $grouped = @(Invoke-IseDcQuery -View radius_authentications -Last 1d `
+        -GroupBy DEVICE_NAME, ISE_NODE -Aggregate avg:RESPONSE_TIME)
+    Assert-Equal 'grouping and aggregates travel in projection order' (
+        '/api/v1/dataconnect/query?agg=avg%3ARESPONSE_TIME' +
+        '&group=DEVICE_NAME&group=ISE_NODE&last=1d&view=radius_authentications'
+    ) $listenerState.Requests[-1]
+    Assert-Equal 'grouped rows are typed as grouped, not as the view' `
+        'Ise.Dc.Grouped' $grouped[0].PSObject.TypeNames[0]
+
     $sql = Invoke-IseDcQuery -View radius_authentications -Last 1d -AsSql
     Assert-Like '-AsSql hits explain=1' '*explain=1*' $listenerState.Requests[-1]
     Assert-Equal '-AsSql is typed' 'Ise.Dc.Sql' $sql.PSObject.TypeNames[0]

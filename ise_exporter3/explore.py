@@ -72,9 +72,16 @@ MAX_VALUE_LENGTH = 512
 # reported rather than ignored: a typo in a filter silently returning the whole
 # window is worse than a refusal.
 PARAMETERS = frozenset({
-    "view", "last", "eq", "like", "cols", "order", "desc", "first", "explain",
-    "force",
+    "view", "last", "eq", "like", "ge", "le", "ne", "null", "notnull",
+    "group", "agg", "cols", "order", "desc", "first", "explain", "force",
 })
+
+# The aggregate vocabulary is an allowlist for the same reason identifiers
+# are: these names reach the statement text. COUNT(*) needs no entry -- it is
+# implied whenever a grouped query names no aggregate of its own.
+AGGREGATES = frozenset({"count", "sum", "avg", "min", "max"})
+MAX_GROUP_COLUMNS = 3
+MAX_AGGREGATES = 5
 
 # Oracle's unquoted identifier grammar. The catalog is Oracle's own dictionary,
 # so its contents are already legal names -- but an allowlist is only as good as
@@ -399,6 +406,15 @@ class Request:
     window_disabled: bool = False
     equals: tuple = ()
     matches: tuple = ()
+    # Inclusive bounds and exclusion, same COLUMN:value shape as equals.
+    at_least: tuple = ()
+    at_most: tuple = ()
+    excludes: tuple = ()
+    # (column, is_null) -- a null test names a column, not a value.
+    nulls: tuple = ()
+    groups: tuple = ()
+    # (function, column) pairs; empty with groups set means COUNT(*) alone.
+    aggregates: tuple = ()
     columns: tuple = ()
     order: str = ""
     # None means "the default for whichever column ends up ordering this".
@@ -437,6 +453,19 @@ def _flag(query, name):
     if text in ("0", "false", "no"):
         return False
     raise _invalid(f"{name} must be 1 or 0, got {_echo(raw)}")
+
+
+def _names(query, name):
+    """Repeatable bare column names, bounded like any other operator input."""
+    names = []
+    for raw in query.get(name) or []:
+        text = str(raw).strip()
+        if not text:
+            raise _invalid(f"{name} was given but names no column")
+        if len(text) > MAX_VALUE_LENGTH:
+            raise _invalid(f"{name} value exceeds {MAX_VALUE_LENGTH} characters")
+        names.append(text)
+    return names
 
 
 def _pairs(query, name):
@@ -492,12 +521,44 @@ def parse_request(query, limits):
 
     equals = _pairs(query, "eq")
     matches = _pairs(query, "like")
-    if len(equals) + len(matches) > MAX_FILTERS:
+    at_least = _pairs(query, "ge")
+    at_most = _pairs(query, "le")
+    excludes = _pairs(query, "ne")
+    nulls = ([(name, True) for name in _names(query, "null")]
+             + [(name, False) for name in _names(query, "notnull")])
+    if (len(equals) + len(matches) + len(at_least) + len(at_most)
+            + len(excludes) + len(nulls)) > MAX_FILTERS:
         raise _invalid(f"a query may carry at most {MAX_FILTERS} filters")
+
+    groups = []
+    for name in _names(query, "group"):
+        if name.upper() not in [group.upper() for group in groups]:
+            groups.append(name)
+    if len(groups) > MAX_GROUP_COLUMNS:
+        raise _invalid(
+            f"a query may group by at most {MAX_GROUP_COLUMNS} columns")
+
+    aggregates = []
+    for raw in query.get("agg") or []:
+        function, separator, column = str(raw).partition(":")
+        function = function.strip().lower()
+        column = column.strip()
+        if not separator or function not in AGGREGATES or not column:
+            raise _invalid(
+                f"agg must be function:COLUMN with function one of "
+                f"{', '.join(sorted(AGGREGATES))}; got {_echo(raw)}")
+        aggregates.append((function, column))
+    if len(aggregates) > MAX_AGGREGATES:
+        raise _invalid(
+            f"a query may carry at most {MAX_AGGREGATES} aggregates")
 
     columns = []
     raw_columns = _single(query, "cols")
     if raw_columns is not None:
+        if groups or aggregates:
+            raise _invalid(
+                "cols cannot be combined with group or agg; a grouped query's "
+                "projection is its group columns and its aggregates")
         for part in str(raw_columns).split(","):
             part = part.strip()
             # Deduplicated rather than refused: a repeated column is a typo
@@ -525,6 +586,12 @@ def parse_request(query, limits):
         window_disabled=window_disabled,
         equals=tuple(equals),
         matches=tuple(matches),
+        at_least=tuple(at_least),
+        at_most=tuple(at_most),
+        excludes=tuple(excludes),
+        nulls=tuple(nulls),
+        groups=tuple(groups),
+        aggregates=tuple(aggregates),
         columns=tuple(columns),
         order=(_single(query, "order") or "").strip(),
         descending=_flag(query, "desc"),
@@ -658,6 +725,21 @@ def build_query(request, catalog_columns, limits, zoned=()):
         key = f"b{len(binds)}"
         binds[key] = _like_pattern(value)
         where.append(f"UPPER({name}) LIKE UPPER(:{key}) ESCAPE '\\'")
+    # Inclusive bounds, not strict ones: "at least" and "at most" are the
+    # questions operators ask, and two params are enough to say between.
+    for operator, pairs in ((">=", request.at_least), ("<=", request.at_most),
+                            ("!=", request.excludes)):
+        for column, value in pairs:
+            name = _validate(column, columns, entry, "filter on")
+            key = f"b{len(binds)}"
+            binds[key] = value
+            where.append(f"{name} {operator} :{key}")
+    for column, is_null in request.nulls:
+        name = _validate(column, columns, entry, "null-test")
+        where.append(f"{name} IS {'NULL' if is_null else 'NOT NULL'}")
+
+    if request.groups or request.aggregates:
+        return _grouped(request, entry, columns, zoned, where, binds)
 
     selected = tuple(
         _validate(column, columns, entry, "select") for column in request.columns)
@@ -683,6 +765,63 @@ def build_query(request, catalog_columns, limits, zoned=()):
         f"SELECT {', '.join(_projected(column, zoned) for column in selected)} "
         f"FROM {entry.view}"
         + (f" WHERE {' AND '.join(where)}" if where else "")
+        + f" ORDER BY {order} {'DESC' if descending else 'ASC'}"
+        " FETCH FIRST :limit ROWS ONLY"
+    )
+    return sql, binds
+
+
+def _expr(column, zoned):
+    """The bare expression for one column -- the CAST without the alias."""
+    return f"CAST({column} AS DATE)" if column in zoned else column
+
+
+def _grouped(request, entry, columns, zoned, where, binds):
+    """The GROUP BY shape: group columns plus aggregates, top-N by default.
+
+    The same shape the reporting datasets run all day, with the same bounds:
+    identifiers from the catalog, an allowlisted aggregate vocabulary, the row
+    limit capping the groups, and the statement timeout backstopping a scan
+    that cannot stop early. Zoned columns keep their CAST inside MIN/MAX and
+    in GROUP BY position, for the same DPY-3022 reason they carry it in a
+    plain projection.
+    """
+    group_names = tuple(
+        _validate(column, columns, entry, "group by") for column in request.groups)
+    selects = [f"{_expr(name, zoned)} AS {name}" if name in zoned else name
+               for name in group_names]
+
+    aliases = []
+    for function, column in request.aggregates:
+        name = _validate(column, columns, entry, "aggregate")
+        alias = f"{function.upper()}_{name}"
+        if not _IDENTIFIER.match(alias):
+            raise _invalid(f"the aggregate alias {alias} is not a legal name")
+        if alias in aliases:
+            raise _invalid(f"duplicate aggregate {function}:{name}")
+        aliases.append(alias)
+        selects.append(f"{function.upper()}({_expr(name, zoned)}) AS {alias}")
+    if not aliases:
+        aliases.append("ROW_COUNT")
+        selects.append("COUNT(*) AS ROW_COUNT")
+
+    token = request.order.strip().upper() if request.order else ""
+    if token and token not in group_names and token not in aliases:
+        raise _invalid(
+            "a grouped query orders by its group columns or aggregate "
+            f"aliases: {', '.join((*group_names, *aliases))}")
+    order = token or aliases[0]
+    # Top-N reads largest-first; an explicit group-column order reads as a
+    # listing and stays ascending unless asked.
+    descending = (request.descending if request.descending is not None
+                  else order in aliases)
+    binds["limit"] = request.first
+
+    sql = (
+        f"SELECT {', '.join(selects)} FROM {entry.view}"
+        + (f" WHERE {' AND '.join(where)}" if where else "")
+        + (f" GROUP BY {', '.join(_expr(name, zoned) for name in group_names)}"
+           if group_names else "")
         + f" ORDER BY {order} {'DESC' if descending else 'ASC'}"
         " FETCH FIRST :limit ROWS ONLY"
     )

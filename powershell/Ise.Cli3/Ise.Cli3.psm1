@@ -499,10 +499,36 @@ function Invoke-IseDcQuery {
     the authentication guard and the one-at-a-time lane all still apply, and at
     least the hard floor between statements is still charged. For the statement
     that cannot wait, not for making every statement immediate.
+    .PARAMETER Min
+    Inclusive lower bounds as @{ COLUMN = value }; with -Max on the same
+    column it says between. Values travel as binds like every filter.
+    .PARAMETER Max
+    Inclusive upper bounds as @{ COLUMN = value }.
+    .PARAMETER Exclude
+    Exclusions as @{ COLUMN = value }: rows where COLUMN equals the value are
+    left out.
+    .PARAMETER IsNull
+    Columns that must be NULL.
+    .PARAMETER NotNull
+    Columns that must not be NULL.
+    .PARAMETER GroupBy
+    Group server-side by up to three columns. The result is a bounded top-N:
+    group columns plus aggregates (COUNT by default), largest-first, capped by
+    -First -- the whole fleet aggregated in one statement instead of paging
+    rows through Group-Object.
+    .PARAMETER Aggregate
+    Aggregates as function:COLUMN (count, sum, avg, min, max), up to five.
+    With -GroupBy they project per group; alone they aggregate the whole
+    window into one row. Results carry derived names: avg:RESPONSE_TIME comes
+    back as avg_response_time.
     .EXAMPLE
     Invoke-IseDcQuery -View radius_authentications -Last 2h -First 20
     .EXAMPLE
     Invoke-IseDcQuery -View radius_errors_view -Last 4h -Match @{ NETWORK_DEVICE_NAME = 'core-*' }
+    .EXAMPLE
+    Invoke-IseDcQuery -View radius_authentications -Last 1h -Min @{ RESPONSE_TIME = 500 }
+    .EXAMPLE
+    Invoke-IseDcQuery -View radius_authentications -Last 1d -GroupBy DEVICE_NAME -Aggregate avg:RESPONSE_TIME, max:RESPONSE_TIME
     .EXAMPLE
     Invoke-IseDcQuery -View endpoints_data -Filter @{ ENDPOINT_POLICY = 'Cisco-IP-Phone' } -AsSql
     #>
@@ -511,6 +537,13 @@ function Invoke-IseDcQuery {
         [Parameter(Mandatory, Position = 0)][string]$View,
         [hashtable]$Filter,
         [hashtable]$Match,
+        [hashtable]$Min,
+        [hashtable]$Max,
+        [hashtable]$Exclude,
+        [string[]]$IsNull,
+        [string[]]$NotNull,
+        [string[]]$GroupBy,
+        [string[]]$Aggregate,
         [string]$Last,
         [string[]]$Column,
         [string]$OrderBy,
@@ -523,12 +556,18 @@ function Invoke-IseDcQuery {
 
     $query = @{ view = $View }
     if ($Last) { $query['last'] = $Last }
-    if ($Filter -and $Filter.Count) {
-        $query['eq'] = @(foreach ($key in ($Filter.Keys | Sort-Object)) { "${key}:$($Filter[$key])" })
+    $pairs = @{ eq = $Filter; like = $Match; ge = $Min; le = $Max; ne = $Exclude }
+    foreach ($name in ($pairs.Keys | Sort-Object)) {
+        $table = $pairs[$name]
+        if ($table -and $table.Count) {
+            $query[$name] = @(foreach ($key in ($table.Keys | Sort-Object)) { "${key}:$($table[$key])" })
+        }
     }
-    if ($Match -and $Match.Count) {
-        $query['like'] = @(foreach ($key in ($Match.Keys | Sort-Object)) { "${key}:$($Match[$key])" })
-    }
+    if ($IsNull) { $query['null'] = @($IsNull) }
+    if ($NotNull) { $query['notnull'] = @($NotNull) }
+    # Group order is projection order, so it is the one array not sorted.
+    if ($GroupBy) { $query['group'] = @($GroupBy) }
+    if ($Aggregate) { $query['agg'] = @($Aggregate) }
     if ($Column) { $query['cols'] = ($Column -join ',') }
     if ($PSBoundParameters.ContainsKey('OrderBy')) {
         $query['order'] = $OrderBy
@@ -582,7 +621,11 @@ function Invoke-IseDcQuery {
     Write-Verbose ("$($response.view): $($response.row_count) rows in " +
                    "$($response.elapsed_seconds)s; cooldown $($response.cooldown_seconds)s")
 
-    $typeName = ConvertTo-IseDcTypeName -View $(if ($response.view) { $response.view } else { $View })
+    # Grouped rows are a different shape from the view's rows, and the view's
+    # format table would render them as empty columns; the generic type lets
+    # PowerShell show what actually came back.
+    $typeName = if ($GroupBy -or $Aggregate) { 'Ise.Dc.Grouped' }
+                else { ConvertTo-IseDcTypeName -View $(if ($response.view) { $response.view } else { $View }) }
     foreach ($row in @($response.rows)) {
         if ($null -eq $row) { continue }
         $row.PSObject.TypeNames.Insert(0, $typeName)
