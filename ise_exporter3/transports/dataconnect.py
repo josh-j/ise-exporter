@@ -633,9 +633,34 @@ class DataConnectTransport(Transport):
         with self._lock:
             return self._query(sql, parameters, adaptive=adaptive)
 
-    def _query(self, sql, parameters=None, *, adaptive=True):
+    def query_forced(self, sql, parameters=None, *, lane_timeout=None):
+        """Run one statement without waiting out the duty-cycle cooldowns.
+
+        An operator overriding the pacing is overriding the *waits*, nothing
+        else: the statement keeps the flock serialisation, the timeout, the
+        auth guard and every ceiling, and it still charges the next cooldown --
+        non-adaptively, so the floor between statements holds. What it skips is
+        the in-process cooldown and the deadline another process published,
+        both of which exist to shape sustained load, not to bound one read.
+
+        ``lane_timeout`` bounds how long to wait for a scheduled statement that
+        currently holds the lane; forcing must not turn into an unbounded block
+        on an HTTP thread behind a lane that is itself sleeping out a cooldown.
+        """
+        if not self._lock.acquire(timeout=(
+                lane_timeout if lane_timeout is not None else -1)):
+            raise TransportError(
+                "busy",
+                f"a scheduled statement held the Data Connect lane for "
+                f"{lane_timeout:.0f}s")
+        try:
+            return self._query(sql, parameters, adaptive=False, forced=True)
+        finally:
+            self._lock.release()
+
+    def _query(self, sql, parameters=None, *, adaptive=True, forced=False):
         view = view_of(sql)
-        if not self._batch_active:
+        if not self._batch_active and not forced:
             self._wait(self._next_query_at - time.monotonic())
 
         gate = self._batch_gate
@@ -664,7 +689,11 @@ class DataConnectTransport(Transport):
                 self._batch_views.append(view)
             else:
                 cooldown = self._cooldown(duration, adaptive)
-                self._next_query_at = time.monotonic() + cooldown
+                # max(), not assignment: a forced statement skipped the pending
+                # deadline rather than waiting it out, and overriding one wait
+                # must not also refund the cooldown the scheduler still owes.
+                self._next_query_at = max(
+                    self._next_query_at, time.monotonic() + cooldown)
                 telemetry.dataconnect_query_cooldown_seconds.labels(view=view).set(cooldown)
                 floor, self._gate_floor = self._gate_floor, 0.0
                 self._release_gate(gate, cooldown, floor)

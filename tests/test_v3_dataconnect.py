@@ -257,6 +257,53 @@ def test_a_catalog_read_does_not_erase_another_processs_cooldown(transport):
         assert float(handle.read().strip()) == pytest.approx(far_future, abs=1)
 
 
+def test_a_forced_statement_skips_the_waits_but_not_the_debts(transport):
+    # Forcing overrides the waits, nothing else. Both pending deadlines -- the
+    # in-process cooldown and the one another process published -- must survive
+    # the forced statement, or one operator override would refund a cooldown
+    # every scheduled dataset is still being paced by.
+    far_future = time.time() + 3600
+    os.makedirs(os.path.dirname(transport.pacing_file), exist_ok=True)
+    with open(transport.pacing_file, "w") as handle:
+        handle.write(f"{far_future:.6f}\n")
+    transport._next_query_at = time.monotonic() + 300
+    transport._connection = _StubConnection(columns=("X",), rows=[(1,)])
+
+    started = time.monotonic()
+    rows = transport.query_forced("SELECT x FROM system_summary")
+    assert time.monotonic() - started < 5
+    assert rows == [{"x": 1}]
+
+    assert transport._next_query_at - time.monotonic() == pytest.approx(300, abs=5)
+    with open(transport.pacing_file) as handle:
+        assert float(handle.read().strip()) >= far_future - 1
+
+
+def test_a_forced_statement_gives_up_on_a_held_lane_rather_than_hanging(transport):
+    # The lane may legitimately be held by a scheduled statement sleeping out
+    # its own cooldown. Forcing runs on an HTTP thread, so it asks for the lane
+    # with a deadline instead of joining that sleep.
+    taken = threading.Event()
+    release = threading.Event()
+
+    def hold():
+        with transport._lock:
+            taken.set()
+            release.wait(10)
+
+    worker = threading.Thread(target=hold, daemon=True)
+    worker.start()
+    taken.wait(5)
+    try:
+        with pytest.raises(TransportError) as raised:
+            transport.query_forced("SELECT x FROM system_summary",
+                                   lane_timeout=0.2)
+        assert raised.value.reason == "busy"
+    finally:
+        release.set()
+        worker.join(5)
+
+
 # --- a logon that never answers ---------------------------------------------
 
 def test_a_stalled_logon_cannot_hold_the_lane_and_the_gate_forever(

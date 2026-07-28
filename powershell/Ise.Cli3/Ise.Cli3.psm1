@@ -484,6 +484,13 @@ function Invoke-IseDcQuery {
     When the query is refused because another one is in flight or the duty cycle
     is still being paid off, wait the requested time and retry instead of
     failing.
+    .PARAMETER Force
+    Run now instead of waiting out the duty-cycle cooldown, and charge only the
+    measured Oracle time rather than the amplified cooldown. An override of the
+    waits, not of the guards: the row and byte ceilings, the statement timeout,
+    the authentication guard and the one-at-a-time lane all still apply, and at
+    least the hard floor between statements is still charged. For the statement
+    that cannot wait, not for making every statement immediate.
     .EXAMPLE
     Invoke-IseDcQuery -View radius_authentications -Last 2h -First 20
     .EXAMPLE
@@ -502,7 +509,8 @@ function Invoke-IseDcQuery {
         [switch]$Descending,
         [int]$First,
         [switch]$AsSql,
-        [switch]$Wait
+        [switch]$Wait,
+        [switch]$Force
     )
 
     $query = @{ view = $View }
@@ -521,6 +529,7 @@ function Invoke-IseDcQuery {
     elseif ($Descending) { $query['desc'] = '1' }
     if ($PSBoundParameters.ContainsKey('First')) { $query['first'] = [string]$First }
     if ($AsSql) { $query['explain'] = '1' }
+    if ($Force) { $query['force'] = '1' }
 
     $response = $null
     $waited = 0
@@ -625,7 +634,7 @@ function Invoke-IseDcTypedQuery {
     $arguments = @{ View = $View }
     if ($Filter.Count) { $arguments['Filter'] = $Filter }
     if ($Match.Count) { $arguments['Match'] = $Match }
-    foreach ($name in @('Last', 'First', 'Column', 'Wait')) {
+    foreach ($name in @('Last', 'First', 'Column', 'Wait', 'Force')) {
         if ($Bound.ContainsKey($name)) { $arguments[$name] = $Bound[$name] }
     }
     Invoke-IseDcQuery @arguments
@@ -664,7 +673,8 @@ function Get-IseDcRadiusAuth {
         [string]$Last,
         [int]$First,
         [string[]]$Column,
-        [switch]$Wait
+        [switch]$Wait,
+        [switch]$Force
     )
     if ($Failed -and $Passed) {
         throw [System.ArgumentException]::new(
@@ -706,7 +716,8 @@ function Get-IseDcRadiusAccounting {
         [string]$Last,
         [int]$First,
         [string[]]$Column,
-        [switch]$Wait
+        [switch]$Wait,
+        [switch]$Force
     )
     $view = 'radius_accounting'
     $filter = @{}
@@ -740,7 +751,8 @@ function Get-IseDcRadiusError {
         [string]$Last,
         [int]$First,
         [string[]]$Column,
-        [switch]$Wait
+        [switch]$Wait,
+        [switch]$Force
     )
     $filter = @{}
     $match = @{}
@@ -771,7 +783,8 @@ function Get-IseDcEndpoint {
         [string]$Policy,
         [int]$First,
         [string[]]$Column,
-        [switch]$Wait
+        [switch]$Wait,
+        [switch]$Force
     )
     $filter = @{}
     $match = @{}
@@ -809,7 +822,8 @@ function Get-IseDcTacacsAuth {
         [string]$Last,
         [int]$First,
         [string[]]$Column,
-        [switch]$Wait
+        [switch]$Wait,
+        [switch]$Force
     )
     $filter = @{}
     $match = @{}
@@ -844,7 +858,8 @@ function Get-IseDcTacacsCommand {
         [string]$Last,
         [int]$First,
         [string[]]$Column,
-        [switch]$Wait
+        [switch]$Wait,
+        [switch]$Force
     )
     $filter = @{}
     $match = @{}
@@ -873,7 +888,8 @@ function Get-IseDcTacacsAuthorization {
         [string]$Last,
         [int]$First,
         [string[]]$Column,
-        [switch]$Wait
+        [switch]$Wait,
+        [switch]$Force
     )
     $filter = @{}
     $match = @{}
@@ -905,7 +921,8 @@ function Get-IseDcPosture {
         [string]$Last,
         [int]$First,
         [string[]]$Column,
-        [switch]$Wait
+        [switch]$Wait,
+        [switch]$Force
     )
     $filter = @{}
     $match = @{}
@@ -930,7 +947,8 @@ function Get-IseDcNodeHealth {
         [string]$Last,
         [int]$First,
         [string[]]$Column,
-        [switch]$Wait
+        [switch]$Wait,
+        [switch]$Force
     )
     $filter = @{}
     $match = @{}
@@ -957,7 +975,8 @@ function Get-IseDcNodePerformance {
         [string]$Last,
         [int]$First,
         [string[]]$Column,
-        [switch]$Wait
+        [switch]$Wait,
+        [switch]$Force
     )
     $filter = @{}
     $match = @{}

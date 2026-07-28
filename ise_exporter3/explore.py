@@ -69,6 +69,7 @@ MAX_VALUE_LENGTH = 512
 # window is worse than a refusal.
 PARAMETERS = frozenset({
     "view", "last", "eq", "like", "cols", "order", "desc", "first", "explain",
+    "force",
 })
 
 # Oracle's unquoted identifier grammar. The catalog is Oracle's own dictionary,
@@ -328,6 +329,7 @@ class Request:
     descending: bool | None = None
     first: int = DEFAULT_ROWS
     explain: bool = False
+    force: bool = False
 
 
 # --- request parsing --------------------------------------------------------
@@ -452,6 +454,7 @@ def parse_request(query, limits):
         descending=_flag(query, "desc"),
         first=first,
         explain=bool(_flag(query, "explain")),
+        force=bool(_flag(query, "force")),
     )
 
 
@@ -667,7 +670,8 @@ class Explorer:
                 result=error.error).inc()
             raise
         telemetry.dataconnect_explorer_queries_total.labels(
-            result="explain" if payload["rows"] is None else "success").inc()
+            result="explain" if payload["rows"] is None
+            else "forced" if payload["forced"] else "success").inc()
         return payload
 
     def status(self):
@@ -721,21 +725,33 @@ class Explorer:
                 "busy", "another ad-hoc query is already running; Data Connect "
                 "runs one statement at a time", status=429)
         try:
-            wait = self._pacing_wait()
-            if wait > self.max_wait:
-                raise ExploreError(
-                    "cooldown",
-                    f"Data Connect is {wait:.0f}s into its duty-cycle cooldown",
-                    status=503, retry_after=round(wait, 1))
+            if not request.force:
+                wait = self._pacing_wait()
+                if wait > self.max_wait:
+                    raise ExploreError(
+                        "cooldown",
+                        f"Data Connect is {wait:.0f}s into its duty-cycle "
+                        "cooldown", status=503, retry_after=round(wait, 1))
             started = time.monotonic()
             try:
-                rows = self.transport.query(sql, binds)
+                if request.force:
+                    # The override skips the cooldown waits and the adaptive
+                    # charge, nothing else: ceilings, timeout, auth guard and
+                    # the lane serialisation all still apply, and the lane wait
+                    # is bounded so forcing cannot hang an HTTP thread behind
+                    # a sleeping scheduled statement.
+                    rows = self.transport.query_forced(
+                        sql, binds, lane_timeout=self.max_wait)
+                else:
+                    rows = self.transport.query(sql, binds)
             except TransportError as error:
                 self._record(request, 0, time.monotonic() - started, error.reason)
                 raise ExploreError(
-                    error.reason, error.detail, status=502) from error
+                    error.reason, error.detail,
+                    status=429 if error.reason == "busy" else 502) from error
             elapsed = time.monotonic() - started
-            self._record(request, len(rows), elapsed, "success")
+            self._record(request, len(rows), elapsed,
+                         "forced" if request.force else "success")
             return self._answer(
                 request, sql, binds, rows=rows, elapsed=elapsed,
                 cooldown=self._pacing_wait())
@@ -756,6 +772,7 @@ class Explorer:
             "truncated": None if rows is None else len(rows) == request.first,
             "elapsed_seconds": None if elapsed is None else round(elapsed, 3),
             "cooldown_seconds": None if cooldown is None else round(cooldown, 1),
+            "forced": None if rows is None else request.force,
         }
 
     def _record(self, request, rows, elapsed, result):

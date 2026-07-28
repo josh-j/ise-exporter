@@ -340,6 +340,9 @@ try {
     $null = Invoke-IseDcQuery -View radius_authentications -OrderBy TIMESTAMP
     Assert-Like '-OrderBy without -Descending asks for ascending' '*desc=0*' $listenerState.Requests[-1]
 
+    $null = Invoke-IseDcQuery -View radius_authentications -Last 2h -Force
+    Assert-Like '-Force travels as force=1' '*force=1*' $listenerState.Requests[-1]
+
     $sql = Invoke-IseDcQuery -View radius_authentications -Last 1d -AsSql
     Assert-Like '-AsSql hits explain=1' '*explain=1*' $listenerState.Requests[-1]
     Assert-Equal '-AsSql is typed' 'Ise.Dc.Sql' $sql.PSObject.TypeNames[0]
@@ -365,6 +368,9 @@ try {
     Assert-Equal '-Passed is the same flag, inverted' (
         '/api/v1/dataconnect/query?eq=FAILED%3A0&first=5&view=radius_authentications'
     ) $listenerState.Requests[-1]
+
+    $null = Get-IseDcRadiusAuth -Failed -Last 1h -Force
+    Assert-Like 'the typed cmdlets pass -Force through' '*force=1*' $listenerState.Requests[-1]
 
     $failure = try { Get-IseDcRadiusAuth -Failed -Passed; '' } catch { $_.Exception.Message }
     Assert-Like '-Failed and -Passed together are refused' '*not both*' $failure

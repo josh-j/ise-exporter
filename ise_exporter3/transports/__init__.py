@@ -28,6 +28,7 @@ FAILURE_REASONS = frozenset({
     "authentication_failed",
     "authorization_failed",
     "baseline_pending",
+    "busy",
     "connection_failed",
     "dependency_pending",
     "http_error",
@@ -48,6 +49,9 @@ FAILURE_EXPLANATIONS = {
     "authentication_failed": "ISE rejected the configured credentials",
     "authorization_failed": "The configured account lacks access to this API",
     "baseline_pending": "The provider's initial baseline snapshot has not completed yet",
+    # Only the forced operator path reports this: a scheduled collection waits
+    # its turn on the lane rather than failing over it.
+    "busy": "The Data Connect lane is held by another statement",
     "connection_failed": "The configured host could not be reached",
     "dependency_pending": "Shared state another dataset fills is not ready yet",
     "http_error": "ISE returned an unexpected HTTP status",

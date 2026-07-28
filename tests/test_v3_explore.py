@@ -103,11 +103,18 @@ class StubTransport:
         self.cooldown = wait if cooldown is None else cooldown
         self.hold = hold
         self.calls = []
+        self.forced_calls = []
 
     def query(self, sql, parameters=None, *, adaptive=True):
         self.calls.append((sql, parameters, adaptive))
         if self.hold is not None:
             self.hold.wait(5)
+        if self.error is not None:
+            raise self.error
+        return [dict(row) for row in self.rows]
+
+    def query_forced(self, sql, parameters=None, *, lane_timeout=None):
+        self.forced_calls.append((sql, parameters, lane_timeout))
         if self.error is not None:
             raise self.error
         return [dict(row) for row in self.rows]
@@ -519,6 +526,70 @@ def test_a_long_cooldown_is_refused_with_the_wait_rather_than_waited_out():
 def test_a_short_cooldown_is_simply_waited_out_by_the_transport():
     explorer = _explorer(wait=explore.MAX_PACING_WAIT_SECONDS - 1)
     assert explorer.query(_query(view="radius_authentications"))["row_count"] == 1
+
+
+def test_force_runs_through_a_cooldown_that_would_otherwise_refuse():
+    explorer = _explorer(wait=explore.MAX_PACING_WAIT_SECONDS + 300)
+    answer = explorer.query(_query(view="radius_authentications", force=1))
+    assert answer["row_count"] == 1
+    assert answer["forced"] is True
+    # On the forced lane, never the adaptive one -- and the lane wait is
+    # bounded, because forcing must not hang an HTTP thread behind a sleeping
+    # scheduled statement.
+    assert explorer.transport.calls == []
+    [(_sql, binds, lane_timeout)] = explorer.transport.forced_calls
+    assert binds["limit"] == 100
+    assert lane_timeout == explorer.max_wait
+    assert explorer.status()["last_query"]["result"] == "forced"
+
+
+def test_an_unforced_answer_says_it_was_not_forced():
+    explorer = _explorer()
+    assert explorer.query(
+        _query(view="radius_authentications"))["forced"] is False
+    assert explorer.query(
+        _query(view="radius_authentications", explain=1))["forced"] is None
+
+
+def test_force_is_counted_apart_from_paced_successes():
+    explorer = _explorer()
+    before = _counted("forced")
+    explorer.query(_query(view="radius_authentications", force=1))
+    assert _counted("forced") == before + 1
+
+
+def test_a_forced_query_is_still_refused_while_the_lane_is_held():
+    # Forcing skips the waits, not the serialisation: the transport reports a
+    # held lane as busy, and that must reach the operator as 429, not 502.
+    explorer = _explorer(error=TransportError(
+        "busy", "a scheduled statement held the Data Connect lane for 15s"))
+    with pytest.raises(ExploreError) as raised:
+        explorer.query(_query(view="radius_authentications", force=1))
+    assert raised.value.error == "busy"
+    assert raised.value.status == 429
+
+
+def test_force_still_flows_through_the_single_flight_lock():
+    hold = threading.Event()
+    explorer = Explorer(StubTransport(hold=hold))
+    started = threading.Event()
+
+    def run():
+        started.set()
+        explorer.query(_query(view="radius_authentications"))
+
+    worker = threading.Thread(target=run, daemon=True)
+    worker.start()
+    started.wait(5)
+    for _ in range(100):
+        if explorer._lock.locked():
+            break
+        time.sleep(0.01)
+    with pytest.raises(ExploreError) as raised:
+        explorer.query(_query(view="endpoints_data", force=1))
+    assert raised.value.error == "busy"
+    hold.set()
+    worker.join(5)
 
 
 def test_the_routes_answer_pending_until_discovery_has_run():
