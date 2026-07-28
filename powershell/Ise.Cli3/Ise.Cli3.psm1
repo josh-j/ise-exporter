@@ -470,7 +470,9 @@ function Invoke-IseDcQuery {
     The statement timeout still applies, and the scan is charged what it
     really cost.
     .PARAMETER Column
-    Projection. Defaults to the view's curated default columns.
+    Projection. By default the whole row comes back -- every column the account
+    can see -- and the format views trim what a table displays; name columns
+    here to fetch less on purpose.
     .PARAMETER OrderBy
     Order column. Naming one also chooses the direction: ascending unless
     -Descending is given, rather than silently keeping the server's time-DESC

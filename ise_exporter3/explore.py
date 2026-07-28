@@ -514,6 +514,22 @@ def default_projection(entry, columns):
     return tuple(column for column in entry.default_columns if column in columns)
 
 
+def full_projection(entry, columns):
+    """Every column the account can see, curated-first.
+
+    The curated list orders the leading fields the way a table reads; it must
+    never narrow the data. Serving only the curated subset by default read as
+    "missing data" against a live catalogue of thirty-column views: a row is
+    the unit of navigation, and trimming it is display's job -- which the
+    shell's format views already do client-side. cols= remains the way to ask
+    for less on purpose.
+    """
+    preferred = [column for column in entry.default_columns if column in columns]
+    chosen = set(preferred)
+    return tuple(preferred + sorted(
+        column for column in columns if column not in chosen))
+
+
 def _projected(column, entry):
     if column in entry.zoned_columns:
         return f"CAST({column} AS DATE) AS {column}"
@@ -587,10 +603,9 @@ def build_query(request, catalog_columns, limits):
     selected = tuple(
         _validate(column, columns, entry, "select") for column in request.columns)
     if not selected:
-        # No curated preference, or none of it survived this catalogue: project
-        # the columns the account can see rather than SELECT *, so the zoned
+        # The whole row, named explicitly rather than SELECT *: the zoned
         # columns still get their CAST and the statement says what it fetched.
-        selected = default_projection(entry, columns) or tuple(sorted(columns))
+        selected = full_projection(entry, columns)
 
     # An unwindowed current-state browse keeps its stable key order. Everything
     # else that has a time column reads newest-first -- a window is "what

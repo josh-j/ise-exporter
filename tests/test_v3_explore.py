@@ -226,6 +226,27 @@ def test_a_current_state_view_is_only_windowed_on_request():
     assert "ORDER BY UPDATE_TIME DESC" in sql
 
 
+def test_the_default_projection_is_the_whole_row_curated_first():
+    # A live RADIUS_AUTHENTICATIONS carries ~30 columns; the curated list is a
+    # reading order, not a filter. Serving only the curated subset by default
+    # read as "missing data across all views" on a real appliance.
+    wide = set(RADIUS_COLUMNS) | {"POLICY_SET_NAME", "NAS_PORT_TYPE", "AUDIT_ID"}
+    schema = {"RADIUS_AUTHENTICATIONS": wide}
+    sql, _binds = _build(schema=schema, view="radius_authentications")
+    # Curated order leads...
+    assert sql.startswith("SELECT TIMESTAMP, USERNAME, CALLING_STATION_ID")
+    # ...and every remaining catalog column follows, alphabetically.
+    for column in ("POLICY_SET_NAME", "NAS_PORT_TYPE", "AUDIT_ID"):
+        assert column in sql
+    select_list = sql.split(" FROM ")[0]
+    assert select_list.count(",") == len(wide) - 1
+
+    # Asking for less is still asking for less.
+    sql, _binds = _build(schema=schema, view="radius_authentications",
+                         cols="TIMESTAMP,USERNAME")
+    assert sql.split(" FROM ")[0] == "SELECT TIMESTAMP, USERNAME"
+
+
 def test_last_all_makes_the_row_limit_the_only_bound():
     # The explicit trade: no time bound, newest-first so Oracle stops at FETCH
     # FIRST rather than sorting the history, and the row limit does the
