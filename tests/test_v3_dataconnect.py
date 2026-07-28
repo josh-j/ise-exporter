@@ -257,6 +257,30 @@ def test_a_catalog_read_does_not_erase_another_processs_cooldown(transport):
         assert float(handle.read().strip()) == pytest.approx(far_future, abs=1)
 
 
+def test_schema_discovery_types_the_zoned_columns(transport):
+    # TIMESTAMP WITH TIME ZONE cannot be fetched raw in thin mode when it
+    # carries a named region (DPY-3022). The dictionary is the only place the
+    # types live, and the discovery read was already paid for.
+    transport._connection = _StubConnection(
+        columns=("TABLE_NAME", "COLUMN_NAME", "DATA_TYPE"),
+        rows=[
+            ("RADIUS_AUTHENTICATIONS", "TIMESTAMP", "TIMESTAMP(6)"),
+            ("RADIUS_AUTHENTICATIONS", "TIMESTAMP_TIMEZONE",
+             "TIMESTAMP(6) WITH TIME ZONE"),
+            ("ENDPOINTS_DATA", "UPDATE_TIME", "TIMESTAMP(6) WITH TIME ZONE"),
+            ("ENDPOINTS_DATA", "MAC_ADDRESS", "VARCHAR2"),
+            ("NODE_LIST", "INSTALLED_TIME", "TIMESTAMP(6) WITH LOCAL TIME ZONE"),
+        ])
+    schema = transport.discover_schema()
+    assert schema["RADIUS_AUTHENTICATIONS"] == {"TIMESTAMP", "TIMESTAMP_TIMEZONE"}
+    assert transport.zoned_columns("RADIUS_AUTHENTICATIONS") == {
+        "TIMESTAMP_TIMEZONE"}
+    assert transport.zoned_columns("ENDPOINTS_DATA") == {"UPDATE_TIME"}
+    # LOCAL converts to the session zone on fetch and needs no cast.
+    assert transport.zoned_columns("NODE_LIST") == set()
+    assert transport.zoned_columns("NEVER_DISCOVERED") == set()
+
+
 def test_a_forced_statement_skips_the_waits_but_not_the_debts(transport):
     # Forcing overrides the waits, nothing else. Both pending deadlines -- the
     # in-process cooldown and the one another process published -- must survive

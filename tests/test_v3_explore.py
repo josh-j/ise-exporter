@@ -226,6 +226,28 @@ def test_a_current_state_view_is_only_windowed_on_request():
     assert "ORDER BY UPDATE_TIME DESC" in sql
 
 
+def test_a_zoned_column_the_dictionary_reports_is_cast_without_curation():
+    # TIMESTAMP_TIMEZONE exists on most event views and is curated nowhere.
+    # With the whole row as the default projection, the dictionary's own types
+    # are what keep every default query from dying on DPY-3022.
+    wide = set(RADIUS_COLUMNS) | {"TIMESTAMP_TIMEZONE"}
+    request = parse_request(_query(view="radius_authentications"), LIMITS)
+    sql, _binds = build_query(request, wide, LIMITS,
+                              zoned={"TIMESTAMP_TIMEZONE"})
+    assert "CAST(TIMESTAMP_TIMEZONE AS DATE) AS TIMESTAMP_TIMEZONE" in sql
+    assert ", TIMESTAMP_TIMEZONE," not in sql
+
+
+def test_the_explorer_passes_the_discovered_types_into_the_statement():
+    transport = StubTransport(
+        schema={"RADIUS_AUTHENTICATIONS":
+                set(RADIUS_COLUMNS) | {"TIMESTAMP_TIMEZONE"}})
+    transport.zoned_columns = lambda view: {"TIMESTAMP_TIMEZONE"}
+    explorer = Explorer(transport)
+    answer = explorer.query(_query(view="radius_authentications", explain=1))
+    assert "CAST(TIMESTAMP_TIMEZONE AS DATE)" in answer["sql"]
+
+
 def test_the_default_projection_is_the_whole_row_curated_first():
     # A live RADIUS_AUTHENTICATIONS carries ~30 columns; the curated list is a
     # reading order, not a filter. Serving only the curated subset by default

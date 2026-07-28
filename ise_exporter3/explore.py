@@ -132,6 +132,7 @@ VIEW_CATALOG = _catalog(
             "ISE_NODE", "AUTHENTICATION_METHOD", "AUTHORIZATION_RULE",
             "FAILED", "RESPONSE_TIME",
         ),
+        zoned_columns=("TIMESTAMP_TIMEZONE",),
     ),
     View(
         name="radius_authentications_week",
@@ -139,6 +140,7 @@ VIEW_CATALOG = _catalog(
         description="RADIUS authentication events over Cisco's week retention",
         time_column="TIMESTAMP",
         time_kind="timestamp",
+        zoned_columns=("TIMESTAMP_TIMEZONE",),
     ),
     View(
         name="radius_authentication_summary",
@@ -162,6 +164,7 @@ VIEW_CATALOG = _catalog(
             "ISE_NODE", "ACCT_STATUS_TYPE", "ACCT_SESSION_TIME",
             "AUTHORIZATION_POLICY",
         ),
+        zoned_columns=("TIMESTAMP_TIMEZONE",),
     ),
     View(
         name="radius_errors_view",
@@ -174,6 +177,7 @@ VIEW_CATALOG = _catalog(
             "TIMESTAMP", "MESSAGE_CODE", "NETWORK_DEVICE_NAME",
             "AUTHENTICATION_METHOD", "ISE_NODE",
         ),
+        zoned_columns=("TIMESTAMP_TIMEZONE",),
     ),
     View(
         name="tacacs_authentication_last_two_days",
@@ -194,7 +198,10 @@ VIEW_CATALOG = _catalog(
             "EPOCH_TIME", "USERNAME", "DEVICE_NAME", "STATUS",
             "AUTHORIZATION_POLICY", "SHELL_PROFILE", "MATCHED_COMMAND_SET",
         ),
-        zoned_columns=("GENERATED_TIME",),
+        # Alone among the two-day TACACS views, Cisco documents GENERATED_TIME
+        # here as VARCHAR2 (docs/dataconnect-views.json) -- a curated CAST on a
+        # string column would break the statement, so the discovered dictionary
+        # type is the only authority for this one.
     ),
     View(
         name="tacacs_accounting_last_two_days",
@@ -213,6 +220,7 @@ VIEW_CATALOG = _catalog(
         description="one row per posture assessment, keyed on endpoint MAC",
         time_column="TIMESTAMP",
         time_kind="timestamp",
+        zoned_columns=("TIMESTAMP_TIMEZONE",),
         default_columns=(
             "TIMESTAMP", "ENDPOINT_MAC_ADDRESS", "POSTURE_STATUS",
             "POSTURE_POLICY_MATCHED", "ENDPOINT_OPERATING_SYSTEM",
@@ -254,7 +262,9 @@ VIEW_CATALOG = _catalog(
             "MAC_ADDRESS", "ENDPOINT_POLICY", "IDENTITY_GROUP_ID",
             "POSTURE_APPLICABLE", "UPDATE_TIME",
         ),
-        zoned_columns=("UPDATE_TIME", "CREATE_TIME", "REG_TIMESTAMP"),
+        # Exactly the doc's TSTZ set: REG_TIMESTAMP exists but is not zoned,
+        # and casting a non-date column is worse than fetching it raw.
+        zoned_columns=("UPDATE_TIME", "CREATE_TIME"),
         window_optional=True,
     ),
     View(
@@ -291,6 +301,7 @@ VIEW_CATALOG = _catalog(
             "TIMESTAMP", "ISE_NODE", "USERNAME", "MESSAGE_SEVERITY",
             "CATEGORY", "MESSAGE_CODE", "MESSAGE_TEXT",
         ),
+        zoned_columns=("TIMESTAMP_TIMEZONE",),
     ),
     View(
         name="system_diagnostics_view",
@@ -302,6 +313,7 @@ VIEW_CATALOG = _catalog(
             "TIMESTAMP", "ISE_NODE", "MESSAGE_SEVERITY", "CATEGORY",
             "MESSAGE_CODE", "MESSAGE_TEXT",
         ),
+        zoned_columns=("TIMESTAMP_TIMEZONE",),
     ),
 )
 
@@ -530,8 +542,8 @@ def full_projection(entry, columns):
         column for column in columns if column not in chosen))
 
 
-def _projected(column, entry):
-    if column in entry.zoned_columns:
+def _projected(column, zoned):
+    if column in zoned:
         return f"CAST({column} AS DATE) AS {column}"
     return column
 
@@ -563,7 +575,7 @@ def _like_pattern(value):
     return "".join(out)
 
 
-def build_query(request, catalog_columns, limits):
+def build_query(request, catalog_columns, limits, zoned=()):
     """Assemble one bounded statement. The only place SQL is built.
 
     Identifiers are members of the discovered catalog and nothing else; every
@@ -577,6 +589,9 @@ def build_query(request, catalog_columns, limits):
         raise ExploreError(
             "view_unavailable",
             f"this Data Connect account cannot see {entry.view}", status=409)
+    # The dictionary's own types name most of these; the curated list survives
+    # as a fallback for a schema discovered before types were collected.
+    zoned = frozenset(zoned) | frozenset(entry.zoned_columns)
 
     time_column = resolve_time_column(entry, columns)
     if request.window_requested and not time_column:
@@ -621,7 +636,7 @@ def build_query(request, catalog_columns, limits):
     binds["limit"] = request.first
 
     sql = (
-        f"SELECT {', '.join(_projected(column, entry) for column in selected)} "
+        f"SELECT {', '.join(_projected(column, zoned) for column in selected)} "
         f"FROM {entry.view}"
         + (f" WHERE {' AND '.join(where)}" if where else "")
         + f" ORDER BY {order} {'DESC' if descending else 'ASC'}"
@@ -761,8 +776,11 @@ class Explorer:
     def _query(self, parameters):
         request = parse_request(parameters, self.limits)
         schema = self._schema()
+        zoned = getattr(self.transport, "zoned_columns", lambda _view: ())(
+            request.entry.view)
         sql, binds = build_query(
-            request, schema.get(request.entry.view, ()), self.limits)
+            request, schema.get(request.entry.view, ()), self.limits,
+            zoned=zoned)
         if request.explain:
             # Explain is the one answer that costs nothing, so it stays
             # available while the lane is busy or cooling down -- reading the

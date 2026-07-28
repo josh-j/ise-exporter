@@ -908,14 +908,24 @@ class DataConnectTransport(Transport):
         absent view and a dead exporter.
         """
         rows = self.query_catalog(
-            "SELECT table_name, column_name FROM user_tab_columns")
-        schema = {}
+            "SELECT table_name, column_name, data_type FROM user_tab_columns")
+        schema, zoned = {}, {}
         for row in rows:
             table = str(row.get("table_name") or "").upper()
             column = str(row.get("column_name") or "").upper()
-            if table and column:
-                schema.setdefault(table, set()).add(column)
+            if not (table and column):
+                continue
+            schema.setdefault(table, set()).add(column)
+            # TIMESTAMP WITH TIME ZONE cannot be fetched raw by the thin driver
+            # when it carries a named region (DPY-3022); the reader of this set
+            # projects such columns through a CAST. LOCAL time zone converts on
+            # fetch and needs no help. Typed here because the dictionary is the
+            # only place the types exist, and this read was already paid for.
+            dtype = str(row.get("data_type") or "").upper()
+            if "WITH TIME ZONE" in dtype and "LOCAL" not in dtype:
+                zoned.setdefault(table, set()).add(column)
         self._schema = schema
+        self._schema_zoned = zoned
         publish_schema_contract(schema)
         logger.info("discovered %d Data Connect reporting views", len(schema))
         return schema
@@ -923,6 +933,10 @@ class DataConnectTransport(Transport):
     @property
     def schema(self):
         return getattr(self, "_schema", None)
+
+    def zoned_columns(self, view):
+        """Discovered TIMESTAMP WITH TIME ZONE columns of one view."""
+        return getattr(self, "_schema_zoned", {}).get(str(view).upper(), set())
 
     def prepare(self):
         if self.schema is not None:
