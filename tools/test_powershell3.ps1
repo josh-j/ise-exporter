@@ -123,15 +123,16 @@ $rows = @{
     endpoints_data = @(
         # probe_data is the decoded shape the exporter sends: the attributes it
         # could prove, plus what the header said was there. The declared count
-        # exceeds the parsed one because ISE serialises more attributes than
-        # its own 2000-byte column holds.
+        # exceeds the parsed one because Cisco's view exposes only the first
+        # 2000 bytes of the profiling buffer.
         @{ mac_address = 'AA:BB:CC:11:22:33'; endpoint_policy = 'Cisco-IP-Phone'
            update_time = '2026-07-26 07:19:00'; endpoint_ip = '10.10.1.51'
            hostname = 'phone-51'
            probe_data = @{
                encoding = 'ise-tlv'; count = 3; declared = 137; truncated = $true
-               note = ('ISE serialised 137 attributes into a column that held 3; ' +
-                       '134 were cut off in the database, not here')
+               note = ('ISE serialised 137 attributes; this view exposes the first ' +
+                       '2000 bytes of the profiling buffer, which held 3. The other ' +
+                       '134 are in ISE but not reachable through Data Connect')
                attributes = @{
                    OUI = 'Cisco Systems, Inc'
                    NetworkDeviceName = 'campus-corp-wired'
@@ -147,6 +148,22 @@ $rows = @{
         @{ mac_address = 'AA:BB:CC:99:99:99'; endpoint_policy = 'Unknown'
            update_time = '2026-07-20 01:00:00'; endpoint_ip = $null
            hostname = $null }
+    )
+}
+
+# What /api/v1/pxgrid/sessions serves: the exporter's projection of the live
+# session directory, already reduced to the fields the operator surface shows.
+$sessions = @{
+    row_count = 1; matched = 1; truncated = $false; snapshot_age_seconds = 12.0
+    sessions = @(
+        @{ mac_address = 'AA:BB:CC:11:22:33'; ip_address = '10.200.40.144'
+           user_name = 'jdoe'; nad = 'campus-corp-wired'; nas_ip_address = '10.200.30.1'
+           nas_port = 'GigabitEthernet1/0/1'; endpoint_profile = 'Cisco-IP-Phone'
+           posture_status = 'Compliant'; authorization_profiles = 'PermitAccess'
+           security_group = 'Employees'; ise_node = 'laba-psn-01'
+           auth_method = 'dot1x'; auth_protocol = 'PAP_ASCII'
+           session_state = 'STARTED'; audit_session_id = '0a0a0a0a00000001'
+           last_update = '2026-07-29 16:40:00' }
     )
 }
 
@@ -204,6 +221,36 @@ $serverScript = {
             }
             elseif ($path -eq '/api/v1/dataconnect/status') {
                 Write-Json $context 200 $status
+            }
+            elseif ($path -eq '/api/v1/mnt/session') {
+                $mac = $request.QueryString['mac']
+                if ($mac -eq '02:1E:5E:99:99:99') {
+                    Write-Json $context 200 @{ mac_address = $mac; found = $false
+                                               session = $null }
+                }
+                else {
+                    Write-Json $context 200 @{
+                        mac_address = $mac; found = $true
+                        session = @{
+                            user_name = 'ise-exporter-test-user'
+                            acct_input_octets = '84213'
+                            acct_output_octets = '12904'
+                            audit_session_id = '0B0B0B0B00000001'
+                            selected_azn_profiles = 'Lab_Employee_Full'
+                            execution_steps = '11001,11017,11507'
+                            empty_on_purpose = ''
+                        }
+                    }
+                }
+            }
+            elseif ($path -eq '/api/v1/pxgrid/sessions') {
+                if ($request.QueryString['mac'] -eq 'refuse') {
+                    Write-Json $context 409 @{
+                        error = 'pxgrid_unconfigured'
+                        detail = 'this exporter has no pxGrid target configured'
+                    }
+                }
+                else { Write-Json $context 200 $sessions }
             }
             elseif ($path -eq '/api/v1/dataconnect/query') {
                 $refusal = switch ($view) {
@@ -274,7 +321,7 @@ $serverScript = {
 $runspace = [runspacefactory]::CreateRunspace()
 $runspace.Open()
 foreach ($pair in @{ state = $listenerState; root = $root; views = $views;
-                     status = $status; rows = $rows }.GetEnumerator()) {
+                     status = $status; rows = $rows; sessions = $sessions }.GetEnumerator()) {
     $runspace.SessionStateProxy.SetVariable($pair.Key, $pair.Value)
 }
 $server = [powershell]::Create()
@@ -304,7 +351,7 @@ try {
     Import-Module $manifestPath -Force
     $module = Get-Module Ise.Cli3
     Assert-That 'manifest imports' ($null -ne $module)
-    Assert-Equal 'ModuleVersion is 3.1.0' '3.1.0' $module.Version
+    Assert-Equal 'ModuleVersion is 3.2.0' '3.2.0' $module.Version
 
     $manifest = Import-PowerShellDataFile $manifestPath
     $declared = @($manifest.FunctionsToExport | Sort-Object)
@@ -332,7 +379,42 @@ try {
     Assert-Like '-Section prints the section asked for' '*schema_pending*' $one
     Assert-That '-Section prints only that section' ($one.Length -lt $readme.Length)
     Assert-That 'a section stops at the next heading' (
-        @($one -split "`n" | Where-Object { $_ -match '^##\s' }).Count -eq 1)
+        @((Get-IseCliReadme -Section 'refused' -Raw) -split "`n" |
+            Where-Object { $_ -match '^##\s' }).Count -eq 1)
+
+    # Show-Markdown was tried and rejected: it collapses every table onto one
+    # line, emits cursor escapes inside fenced code, and never wraps a
+    # paragraph. These are the four things it got wrong.
+    $rendered = Get-IseCliReadme -Width 78
+    $plain = ($rendered -replace "$([char]27)\[[0-9;]*m", '') -split "`n"
+    Assert-That 'rendered output carries no markdown headings' (
+        @($plain | Where-Object { $_ -match '^#' }).Count -eq 0)
+    # A markdown table row starts with a pipe; a PowerShell pipeline inside a
+    # fenced block has one in the middle and must survive untouched.
+    Assert-That 'and no markdown table rows' (
+        @($plain | Where-Object { $_ -match '^\s*\|' }).Count -eq 0)
+    Assert-Like 'while pipelines in examples keep their pipe' `
+        '*| Group-Object failure_reason*' $rendered
+    Assert-That 'and no leftover backticks or bold markers' (
+        @($plain | Where-Object { $_ -match '``' -or $_ -match '\*\*' }).Count -eq 0)
+    # Prose wraps; a command does not, because a wrapped command is a broken
+    # one. Code carries its own colour, so "only code may overflow" is a rule
+    # the output can actually be measured against rather than guessed at.
+    $code = "$([char]27)[38;5;150m"
+    $over = @($rendered -split "`n" | Where-Object {
+        (($_ -replace "$([char]27)\[[0-9;]*m", '').Length) -gt 78 })
+    Assert-That 'nothing but code exceeds the width' (
+        @($over | Where-Object { -not $_.StartsWith("  $code") }).Count -eq 0)
+    Assert-That 'and the prose really did wrap' (
+        @($plain | Where-Object {
+            $_ -match 'duty cycle' -and $_.Length -le 78 }).Count -gt 0)
+    Assert-Like 'while keeping the table readable' '*cooling down*' $rendered
+    Assert-Like 'and the commands intact' '*Get-IseRadiusLiveLog -Last 1h*' $rendered
+
+    $raw = Get-IseCliReadme -Raw
+    Assert-Like '-Raw is still the markdown source' '*## What costs what*' $raw
+    Assert-That '-Raw carries no ANSI' (
+        $raw -notmatch "$([char]27)\[")
     $threw = $false
     try { Get-IseCliReadme -Section 'no-such-section' } catch { $threw = $true }
     Assert-That 'an unknown section says so instead of printing nothing' $threw
@@ -603,6 +685,110 @@ try {
     Assert-That 'and the column exists so the blank is legible' (
         $joined[2].PSObject.Properties.Name -contains 'auth_identity')
 
+    $before = $listenerState.Requests.Count
+    $viaPxGrid = @(Get-IseContextVisibility -Mac 'AA:BB:CC:11:22:33' -ViaPxGrid)
+    Assert-Equal '-ViaPxGrid costs one endpoint read plus one free session read' 2 (
+        $listenerState.Requests.Count - $before)
+    Assert-Equal 'and the second read is pxGrid, not a second Oracle statement' `
+        '/api/v1/pxgrid/sessions?mac=AA%3ABB%3ACC%3A11%3A22%3A33' `
+        $listenerState.Requests[-1]
+    Assert-Equal 'the live session lands in its own namespace' `
+        'jdoe' $viaPxGrid[0].session_user_name
+    Assert-Equal 'and the network device' 'campus-corp-wired' $viaPxGrid[0].session_nad
+    Assert-Equal 'and what the session was authorized as' `
+        'PermitAccess' $viaPxGrid[0].session_authorization_profiles
+    Assert-Equal 'the real authMethod is used, not the session state' `
+        'dot1x' $viaPxGrid[0].session_auth_method
+    Assert-Equal 'and the table still has an identity to name' 'jdoe' $viaPxGrid[0].identity
+    Assert-Equal 'and a device' 'campus-corp-wired' $viaPxGrid[0].nad
+
+    # -First bounds the endpoint rows. The session list is a different set,
+    # sorted by MAC and cut at the route's ceiling, so forwarding it would
+    # fetch the N lowest-MAC sessions on the appliance rather than the sessions
+    # belonging to these N endpoints -- and every endpoint past the cut would
+    # come back with empty session_* columns and no way to tell why.
+    $null = Get-IseContextVisibility -Mac 'AA:BB:CC:11:22:33' -ViaPxGrid -First 2 `
+        -WarningAction SilentlyContinue
+    Assert-That 'the endpoint row limit does not become the session ceiling' (
+        $listenerState.Requests[-1] -notmatch 'first=')
+
+    # Measured on a live appliance: 50 of 53 probe attributes have no pxGrid
+    # counterpart and 28 of 31 pxGrid fields have no probe counterpart, so
+    # making these exclusive threw away most of what is knowable.
+    $both = @(Get-IseContextVisibility -Mac 'AA:BB:CC:11:22:33' -WithLastAuth -ViaPxGrid `
+        -WarningAction SilentlyContinue)
+    Assert-Equal 'auth_* survives alongside session_*' 'jdoe' $both[0].auth_identity
+    Assert-Equal 'and session_* alongside auth_*' 'jdoe' $both[0].session_user_name
+
+    $full = @(Get-IseContextVisibility -Mac 'AA:BB:CC:11:22:33' -Full `
+        -WarningAction SilentlyContinue)
+    Assert-Equal '-Full brings the profiling attributes too' `
+        'Cisco Systems, Inc' $full[0].probe_oui
+    Assert-Equal 'with ISE spellings normalised into properties' `
+        'campus-corp-wired' $full[0].probe_networkdevicename
+    Assert-That '-Full reaches all three sources at once' (
+        $full[0].auth_identity -and $full[0].session_user_name -and $full[0].probe_oui)
+    # PROBE_DATA is already on the row this cmdlet fetches, so surfacing it
+    # costs no extra statement.
+    $before = $listenerState.Requests.Count
+    $null = Get-IseContextVisibility -Mac 'AA:BB:CC:11:22:33' -WithProbe `
+        -WarningAction SilentlyContinue
+    Assert-Equal '-WithProbe costs nothing extra' 1 (
+        $listenerState.Requests.Count - $before)
+    Assert-That 'an empty profiling attribute is not made into a column' (
+        $full[0].PSObject.Properties.Name -notcontains 'probe_assethwrevision')
+
+    # An exporter without pxGrid has to say so and name the alternative, not
+    # hand back an HTTP code and let the operator guess.
+    $refusal = $null
+    try { Get-IseContextVisibility -Mac 'refuse' -ViaPxGrid } catch { $refusal = $_ }
+    Assert-Like 'an exporter without pxGrid says so and names the alternative' `
+        '*no pxGrid target configured*-WithLastAuth*' "$($refusal.Exception.Message)"
+
+    # MnT has no bulk form, so this is one request per endpoint. It carries the
+    # accounting counters and correlation ids nothing else does.
+    $before = $listenerState.Requests.Count
+    $withSession = @(Get-IseContextVisibility -Mac 'AA:BB:CC:11:22:33' -WithSession `
+        -WarningAction SilentlyContinue)
+    # The stub answers every query with all three endpoints, so this is one
+    # endpoint read plus one MnT read each -- which is the shape that matters:
+    # per endpoint, not per result set.
+    Assert-Equal '-WithSession costs one MnT read per endpoint' 4 (
+        $listenerState.Requests.Count - $before)
+    Assert-Like 'and the MnT read names the endpoint' '*mnt/session?mac=*' `
+        $listenerState.Requests[-1]
+    Assert-Equal 'accounting counters arrive, and nothing else has them' `
+        '84213' $withSession[0].mnt_acct_input_octets
+    Assert-Equal 'so does the correlation id pxGrid lacks' `
+        '0B0B0B0B00000001' $withSession[0].mnt_audit_session_id
+    Assert-That 'an empty MnT field is not made into a column' (
+        $withSession[0].PSObject.Properties.Name -notcontains 'mnt_empty_on_purpose')
+
+    # Three endpoints, a limit of one: the refusal has to happen before the
+    # requests, not be discovered in the output afterwards.
+    $before = $listenerState.Requests.Count
+    $warnings = @()
+    $capped = @(Get-IseContextVisibility -WithSession -SessionLimit 1 `
+        -WarningVariable warnings)
+    Assert-Equal 'the limit bounds the requests, not the rows' 2 (
+        $listenerState.Requests.Count - $before)
+    Assert-Equal 'every endpoint still comes back' 3 $capped.Count
+    Assert-Like 'and the shortfall is said out loud' '*no bulk form*' (
+        $warnings -join ' ')
+
+    # -Full is the sources that cost nothing per endpoint: the endpoint read,
+    # one authentication read and one free pxGrid read. Per-endpoint work has
+    # to be asked for by name.
+    $before = $listenerState.Requests.Count
+    $null = Get-IseContextVisibility -Mac 'AA:BB:CC:11:22:33' -Full `
+        -WarningAction SilentlyContinue
+    $issued = @($listenerState.Requests | Select-Object -Last (
+        $listenerState.Requests.Count - $before))
+    Assert-Equal '-Full is three reads for the whole result, not per endpoint' 3 `
+        $issued.Count
+    Assert-That '-Full does not quietly enable the per-endpoint MnT fetch' (
+        @($issued | Where-Object { $_ -like '*mnt/session*' }).Count -eq 0)
+
     $probe = @(Get-IseEndpointProbe -Mac 'AA:BB:CC:11:22:33' -WarningAction SilentlyContinue)
     Assert-Equal 'the probe read fetches only the two columns it needs' (
         '/api/v1/dataconnect/query?cols=MAC_ADDRESS%2CPROBE_DATA' +
@@ -637,7 +823,7 @@ try {
     $warnings = @()
     $null = Get-IseEndpointProbe -Mac 'AA:BB:CC:11:22:33' -WarningVariable warnings
     Assert-Like 'a truncated probe field warns rather than passing off a prefix' `
-        '*cut off in the database*' ($warnings -join ' ')
+        '*not reachable through Data Connect*' ($warnings -join ' ')
 
     Write-Host ''
     Write-Host 'refusals' -ForegroundColor Cyan

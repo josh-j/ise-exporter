@@ -73,6 +73,17 @@ QUERY_TIMEOUT_SECONDS = 15
 MAX_CRASH_LEASE_SECONDS = 3600
 MAX_LEASE_FUTURE_SECONDS = 36 * 86400
 
+# How far light cut-ins may push the shared deadline before they have to queue
+# like everything else. One lookup during a long cooldown is the point of the
+# light lane and costs the scheduler a few seconds; a loop of them charges a
+# full cooldown each time while never waiting itself, which would push the
+# deadline out faster than real time drains it and starve the scheduler for as
+# long as the loop ran. Bounding the light lane's own contribution -- rather
+# than the total backlog -- is what tells those two apart: the single lookup
+# still cuts in during a five-minute scan cooldown, the loop stops cutting in
+# after a minute of it and starts waiting.
+LIGHT_DEBT_CEILING_SECONDS = 60.0
+
 AUTH_FAILURE_THRESHOLD = 3
 AUTH_FAILURE_BACKOFF_SECONDS = 900
 CONNECT_FAILURE_THRESHOLD = 3
@@ -427,6 +438,10 @@ class DataConnectTransport(Transport):
         self._connect_failures = 0
         self._blocked_until = 0.0
         self._next_query_at = 0.0
+        # How far light cut-ins have pushed that deadline, and when. Drained at
+        # real time, because the scheduler is meanwhile waiting at real time.
+        self._light_debt = 0.0
+        self._light_debt_at = 0.0
         # A deadline another process published that this query did not wait out
         # (the catalog path). Releasing the gate must never publish less.
         self._gate_floor = 0.0
@@ -729,6 +744,49 @@ class DataConnectTransport(Transport):
         finally:
             self._lock.release()
 
+    def light_debt_seconds(self):
+        """How far light cut-ins have currently pushed the shared deadline.
+
+        Drained at real time: a debt charged a minute ago has been paid by the
+        minute the scheduler spent waiting it out, so this measures the cut-ins
+        still standing between the scheduler and the lane rather than every one
+        ever made.
+        """
+        return max(0.0, self._light_debt - (
+            time.monotonic() - self._light_debt_at))
+
+    def light_available(self):
+        """Whether a lookup may still cut in, or has to queue like a scan.
+
+        A hint by construction, exactly like ``pacing_wait_hint``: it takes no
+        lock and the answer can change before the statement runs. It is only
+        ever used to refuse a cut-in early, never to grant one that the
+        accounting would not otherwise allow.
+        """
+        return self.light_debt_seconds() < LIGHT_DEBT_CEILING_SECONDS
+
+    def query_light(self, sql, parameters=None, *, lane_timeout=None):
+        """Run one bounded lookup now, and charge it in full.
+
+        The lane and every guard still apply; what this skips is the *wait*. A
+        keyed read of a current-state view costs the same on a loud appliance as
+        a quiet one, so making it queue behind a scan's cooldown delays an
+        answer that was never part of the load the cooldown exists to shape.
+
+        The accounting is the difference from ``query_forced``. A forced
+        statement charges only measured time, which erodes the duty cycle by
+        design because an incident is worth that. This charges the full adaptive
+        cooldown and *adds* it to the outstanding one rather than taking the
+        later of the two, so the shared deadline moves out by exactly what the
+        lookup spent. Over any window the appliance sees the same total Oracle
+        time it would have; only the order of service changed.
+        """
+        self._acquire_lane(forced=True, lane_timeout=lane_timeout)
+        try:
+            return self._query(sql, parameters, adaptive=True, additive=True)
+        finally:
+            self._lock.release()
+
     def query_forced(self, sql, parameters=None, *, lane_timeout=None):
         """Run one statement without waiting out the duty-cycle cooldowns.
 
@@ -749,7 +807,7 @@ class DataConnectTransport(Transport):
         finally:
             self._lock.release()
 
-    def _query(self, sql, parameters=None, *, adaptive=True):
+    def _query(self, sql, parameters=None, *, adaptive=True, additive=False):
         view = view_of(sql)
         gate = self._batch_gate
         if not self._batch_active:
@@ -777,11 +835,25 @@ class DataConnectTransport(Transport):
                 self._batch_views.append(view)
             else:
                 cooldown = self._cooldown(duration, adaptive)
-                # max(), not assignment: a forced statement skipped the pending
-                # deadline rather than waiting it out, and overriding one wait
-                # must not also refund the cooldown the scheduler still owes.
-                self._next_query_at = max(
-                    self._next_query_at, time.monotonic() + cooldown)
+                if additive:
+                    # A statement that cut into an outstanding cooldown pays on
+                    # top of it, not into it. max() would let a lookup hide
+                    # inside a scan's cooldown and cost the appliance real time
+                    # the duty cycle never accounted for; adding keeps the
+                    # budget exact while still answering immediately.
+                    now = time.monotonic()
+                    # Charged to the light lane as well as to the deadline, so
+                    # the next cut-in can see what the last one already owes.
+                    self._light_debt = self.light_debt_seconds() + cooldown
+                    self._light_debt_at = now
+                    self._next_query_at = max(self._next_query_at, now) + cooldown
+                else:
+                    # max(), not assignment: a forced statement skipped the
+                    # pending deadline rather than waiting it out, and
+                    # overriding one wait must not also refund the cooldown the
+                    # scheduler still owes.
+                    self._next_query_at = max(
+                        self._next_query_at, time.monotonic() + cooldown)
                 telemetry.dataconnect_query_cooldown_seconds.labels(view=view).set(cooldown)
                 floor, self._gate_floor = self._gate_floor, 0.0
                 self._release_gate(gate, cooldown, floor)

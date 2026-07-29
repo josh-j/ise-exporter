@@ -24,6 +24,7 @@ from ise_exporter3.plan import PlannedDataset
 from ise_exporter3.runtime import Runner
 from ise_exporter3.transports import TransportError
 from ise_exporter3.transports.dataconnect import (
+    LIGHT_DEBT_CEILING_SECONDS,
     MAX_CRASH_LEASE_SECONDS,
     MAX_STATEMENT_TIMEOUT_PERIODS,
     MIN_QUERY_INTERVAL_SECONDS,
@@ -979,3 +980,122 @@ def test_an_empty_diagnostic_view_publishes_zero_rather_than_nothing(tmp_path):
             {"source": "system"}) in ctx.samples
     assert ("ise3_psn_diagnostic_events_total", 0.0,
             {"source": "aaa"}) in ctx.samples
+
+
+# --- cutting into a cooldown, and paying for it ------------------------------
+
+def test_a_light_statement_runs_without_waiting_the_cooldown_out(transport):
+    # The lane is taken forced, which is what skips the wait. Without this a
+    # lookup queues behind whatever scan is being paid off.
+    transport._connection = _StubConnection(columns=("X",), rows=[(1,)])
+    transport._next_query_at = time.monotonic() + 600
+    waits = []
+    transport._wait = lambda seconds: waits.append(seconds)
+    rows = transport.query_light("SELECT x FROM endpoints_data")
+    assert rows == [{"x": 1}]
+    assert waits == []
+
+
+def test_a_light_statement_adds_its_cooldown_rather_than_hiding_inside_one(
+        transport):
+    # The safety property. max() would let a lookup run inside a scan's
+    # cooldown for free, so the appliance would spend real Oracle time the duty
+    # cycle never accounted for. Adding keeps the budget exact.
+    transport._connection = _StubConnection(columns=("X",), rows=[(1,)])
+    before = time.monotonic() + 600
+    transport._next_query_at = before
+    transport._wait = lambda seconds: None
+    transport.query_light("SELECT x FROM endpoints_data")
+    # At least the hard floor, on top of what was already owed.
+    assert transport._next_query_at >= before + MIN_QUERY_INTERVAL_SECONDS
+
+
+def test_a_forced_statement_still_takes_the_later_deadline_not_the_sum(
+        transport):
+    # Forcing is the incident override and is allowed to erode the budget; it
+    # must not silently start behaving like the light path and adding debt.
+    transport._connection = _StubConnection(columns=("X",), rows=[(1,)])
+    before = time.monotonic() + 600
+    transport._next_query_at = before
+    transport._wait = lambda seconds: None
+    transport.query_forced("SELECT x FROM endpoints_data")
+    assert transport._next_query_at == pytest.approx(before, abs=0.5)
+
+
+def test_a_light_statement_is_charged_the_full_adaptive_cooldown(transport):
+    # Not the forced discount. A lookup that cut in pays what its time really
+    # costs at the declared duty cycle.
+    transport._connection = _StubConnection(columns=("X",), rows=[(1,)])
+    transport._next_query_at = 0.0
+    transport._wait = lambda seconds: None
+    charged = []
+    original = transport._cooldown
+    transport._cooldown = lambda duration, adaptive=True: charged.append(
+        adaptive) or original(duration, adaptive)
+    transport.query_light("SELECT x FROM endpoints_data")
+    assert charged == [True]
+
+
+def test_the_light_lane_stops_cutting_in_before_it_can_starve_the_scheduler(
+        transport):
+    # The bound that makes the light path safe. Each cut-in charges a full
+    # cooldown and waits none of it, so a loop pushes the shared deadline out
+    # faster than real time drains it: the scheduled datasets behind it would
+    # never run again. Bounding what the light lane itself owes -- not the
+    # total backlog -- is what separates the loop from the single lookup.
+    transport._connection = _StubConnection(columns=("X",), rows=[(1,)])
+    transport._next_query_at = 0.0
+    transport._wait = lambda seconds: None
+    assert transport.light_available()
+
+    for _ in range(40):
+        if not transport.light_available():
+            break
+        transport.query_light("SELECT x FROM endpoints_data")
+    else:
+        raise AssertionError("the light lane never ran out of room")
+
+    assert transport.light_debt_seconds() >= LIGHT_DEBT_CEILING_SECONDS
+    # Bounded by roughly the ceiling, not merely finite: what the scheduler is
+    # owed by lookups has to stay a number an operator can reason about. One
+    # more cooldown past the ceiling is the most a cut-in can add.
+    assert transport.light_debt_seconds() < LIGHT_DEBT_CEILING_SECONDS * 2
+
+
+def test_a_single_lookup_still_cuts_into_a_long_cooldown(transport):
+    # The ceiling must not cost the feature its whole purpose. One lookup
+    # during a five-minute scan cooldown owes the scheduler a few seconds and
+    # is exactly what the light lane is for.
+    transport._connection = _StubConnection(columns=("X",), rows=[(1,)])
+    transport._next_query_at = time.monotonic() + 600
+    transport._wait = lambda seconds: None
+    transport.query_light("SELECT x FROM endpoints_data")
+    assert transport.light_debt_seconds() < LIGHT_DEBT_CEILING_SECONDS
+    assert transport.light_available()
+
+
+def test_the_light_debt_is_drained_by_the_time_the_scheduler_spent_waiting(
+        transport):
+    # A debt charged and then waited out is paid. Without draining, the ceiling
+    # would be a lifetime quota and the light lane would shut itself off for
+    # good on a long-running exporter.
+    transport._light_debt = LIGHT_DEBT_CEILING_SECONDS + 10
+    transport._light_debt_at = time.monotonic()
+    assert not transport.light_available()
+
+    transport._light_debt_at = time.monotonic() - (
+        LIGHT_DEBT_CEILING_SECONDS + 11)
+    assert transport.light_debt_seconds() == 0.0
+    assert transport.light_available()
+
+
+def test_a_forced_statement_owes_the_light_lane_nothing(transport):
+    # Forcing is a different bargain -- it charges only measured time and is
+    # meant to erode the budget. Letting it fill the light lane's debt would
+    # make an incident override quietly disable lookups afterwards.
+    transport._connection = _StubConnection(columns=("X",), rows=[(1,)])
+    transport._next_query_at = 0.0
+    transport._wait = lambda seconds: None
+    transport.query_forced("SELECT x FROM endpoints_data")
+    assert transport.light_debt_seconds() == 0.0
+    assert transport.light_available()

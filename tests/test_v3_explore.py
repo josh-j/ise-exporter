@@ -93,7 +93,7 @@ class StubTransport:
     limits = LIMITS
 
     def __init__(self, schema=_UNSET, rows=None, error=None, wait=0.0,
-                 cooldown=None, hold=None):
+                 cooldown=None, hold=None, light_room=True):
         self.schema = SCHEMA if schema is _UNSET else schema
         self.rows = rows if rows is not None else [{"timestamp": "t"}]
         self.error = error
@@ -102,8 +102,12 @@ class StubTransport:
         # never what it said before one.
         self.cooldown = wait if cooldown is None else cooldown
         self.hold = hold
+        # Whether the light lane still has room to cut in, which is the
+        # transport's answer and not the request's.
+        self.light_room = light_room
         self.calls = []
         self.forced_calls = []
+        self.light_calls = []
 
     def query(self, sql, parameters=None, *, adaptive=True):
         self.calls.append((sql, parameters, adaptive))
@@ -118,6 +122,15 @@ class StubTransport:
         if self.error is not None:
             raise self.error
         return [dict(row) for row in self.rows]
+
+    def query_light(self, sql, parameters=None, *, lane_timeout=None):
+        self.light_calls.append((sql, parameters, lane_timeout))
+        if self.error is not None:
+            raise self.error
+        return [dict(row) for row in self.rows]
+
+    def light_available(self):
+        return self.light_room
 
     def pacing_wait_hint(self):
         return self.cooldown if self.calls else self.wait
@@ -1062,3 +1075,118 @@ def test_the_index_lists_the_namespace_that_spends_budget():
     assert "/api/v1/dataconnect/views" in payload["routes"]
     assert "/api/v1/dataconnect/query" in payload["routes"]
     assert "/api/v1/dataconnect/status" in payload["routes"]
+
+
+# --- a lookup does not queue behind a scan ----------------------------------
+
+def _parsed(query):
+    return parse_request(query, LIMITS)
+
+
+def _light_request(**overrides):
+    """A keyed lookup of one endpoint, which is the shape this admits."""
+    query = {"view": ["endpoints_data"], "eq": ["MAC_ADDRESS:AA:BB:CC:11:22:33"],
+             "first": ["1"]}
+    query.update({key: [value] for key, value in overrides.items()})
+    return _parsed(query)
+
+
+def test_a_keyed_lookup_in_a_current_state_view_is_light():
+    assert _light_request().light is True
+
+
+def test_an_unfiltered_read_of_the_same_view_is_not():
+    # Without a bind it can return the whole endpoint database, which is a scan
+    # however few rows the caller asked to see.
+    assert _parsed({"view": ["endpoints_data"], "first": ["1"]}).light is False
+
+
+@pytest.mark.parametrize("overrides,why", [
+    ({"first": "100"}, "a page is browsing, not a lookup"),
+    ({"group": "ENDPOINT_POLICY"}, "grouping reads the whole view"),
+    ({"agg": "count:MAC_ADDRESS"}, "an aggregate reads the whole view"),
+    ({"last": "1h"}, "asking for a window is asking for a scan"),
+    ({"last": "all"}, "last=all removes the bound that made it cheap"),
+])
+def test_what_disqualifies_a_request_from_cutting_in(overrides, why):
+    assert _light_request(**overrides).light is False, why
+
+
+def test_an_event_view_is_never_light_however_it_is_filtered():
+    # radius_authentications is always window-bounded, and that window is the
+    # scan. A MAC equality narrows the result, not the work.
+    assert _parsed({
+        "view": ["radius_authentications"], "first": ["1"],
+        "eq": ["CALLING_STATION_ID:AA:BB:CC:11:22:33"]}).light is False
+
+
+def test_a_lookup_is_served_through_a_cooldown_that_would_refuse_a_scan():
+    # This is the whole point: a cooldown long enough to refuse an ordinary
+    # request must not also refuse "which policy is this MAC on".
+    explorer = _explorer(wait=600.0)
+    answer = explorer.query({
+        "view": ["endpoints_data"], "first": ["1"],
+        "eq": ["MAC_ADDRESS:AA:BB:CC:11:22:33"]})
+    assert answer["row_count"] == 1
+    # Through the cutting-in door, not the forcing one: no override was asked
+    # for and none should be recorded.
+    assert len(explorer.transport.light_calls) == 1
+    assert explorer.transport.forced_calls == []
+    assert answer["forced"] is False
+
+
+def test_the_same_cooldown_still_refuses_a_scan():
+    explorer = _explorer(wait=600.0)
+    with pytest.raises(ExploreError) as raised:
+        explorer.query({"view": ["endpoints_data"], "first": ["500"]})
+    assert raised.value.error == "cooldown"
+
+
+def test_cutting_in_is_bounded_so_it_cannot_hang_on_live_oracle_work():
+    explorer = _explorer(wait=600.0)
+    explorer.query({
+        "view": ["endpoints_data"], "first": ["1"],
+        "eq": ["MAC_ADDRESS:AA:BB:CC:11:22:33"]})
+    _sql, _binds, lane_timeout = explorer.transport.light_calls[0]
+    assert lane_timeout == explore.MAX_PACING_WAIT_SECONDS
+
+
+def test_cutting_in_is_counted_the_way_forcing_is():
+    # An unexplained gap in the reporting datasets has to be attributable, and
+    # "a lookup went first" is part of that answer.
+    before = REGISTRY.get_sample_value(
+        "ise3_dataconnect_explorer_queries_total", {"result": "light"}) or 0.0
+    _explorer(wait=600.0).query({
+        "view": ["endpoints_data"], "first": ["1"],
+        "eq": ["MAC_ADDRESS:AA:BB:CC:11:22:33"]})
+    after = REGISTRY.get_sample_value(
+        "ise3_dataconnect_explorer_queries_total", {"result": "light"})
+    assert after == before + 1
+
+
+def test_a_lookup_waits_its_turn_once_the_light_lane_is_out_of_room():
+    # Eligibility is the request's shape; permission is the transport's, because
+    # only it knows how far cut-ins have already pushed the scheduler. Without
+    # this, a loop of lookups charges a full cooldown each time while never
+    # waiting itself, and the scheduled datasets behind it never run again.
+    explorer = _explorer(wait=600.0, light_room=False)
+    with pytest.raises(ExploreError) as raised:
+        explorer.query({
+            "view": ["endpoints_data"], "first": ["1"],
+            "eq": ["MAC_ADDRESS:AA:BB:CC:11:22:33"]})
+    # Refused with the same wait as a scan, which is the honest answer: the
+    # cooldown it would have cut into is one the lookups themselves built.
+    assert raised.value.error == "cooldown"
+    assert explorer.transport.light_calls == []
+
+
+def test_a_lookup_that_waited_is_not_reported_as_one_that_cut_in():
+    # The payload says what the statement did, not what the request was
+    # eligible for. A lookup served on a free lane took nobody's turn.
+    explorer = _explorer(light_room=False)
+    answer = explorer.query({
+        "view": ["endpoints_data"], "first": ["1"],
+        "eq": ["MAC_ADDRESS:AA:BB:CC:11:22:33"]})
+    assert answer["light"] is False
+    assert len(explorer.transport.calls) == 1
+    assert explorer.transport.light_calls == []

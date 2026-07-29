@@ -886,12 +886,34 @@ class PxGridTransport(Transport):
                 self._session_snapshot_at = time.time()
                 telemetry.pxgrid_stream_sessions.set(len(self._sessions))
 
-    def get_sessions(self, *, max_age=300):
+    def snapshot_age(self):
+        """How old the held session snapshot is, in seconds.
+
+        Wall clock, matching ``_session_snapshot_at``. Returns ``None`` when no
+        baseline has been taken, so a caller reporting the age says "unknown"
+        rather than "fifty-six years".
+        """
+        if not self._session_snapshot_at:
+            return None
+        return max(0.0, time.time() - self._session_snapshot_at)
+
+    def get_sessions(self, *, max_age=300, refresh=True):
+        """The held sessions, reconciling first if the baseline has aged out.
+
+        ``refresh=False`` asks for whatever is held and nothing more. That is
+        not the same as a very large ``max_age``: a reconcile is a full
+        getSessions against the appliance, and a caller that must never cause
+        one -- the operator API, where a page reload would otherwise schedule
+        it -- has to be able to say so rather than pick a number big enough
+        that it usually does not happen. The pubsub subscription keeps the held
+        set current between baselines, so what comes back is stale only in the
+        sense that a session lost with the stream has not been noticed yet.
+        """
         if not self._connected.is_set():
             error = self._stream_error
             raise error if isinstance(error, TransportError) else TransportError(
                 "connection_failed", "pxGrid session stream is not connected")
-        if time.time() - self._session_snapshot_at >= max(1, max_age):
+        if refresh and time.time() - self._session_snapshot_at >= max(1, max_age):
             self._refresh_sessions(force=True)
         with self._state_lock:
             return [dict(row) for row in self._sessions.values()]

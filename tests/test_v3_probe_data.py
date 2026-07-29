@@ -125,22 +125,22 @@ def test_a_value_over_127_bytes_needs_the_second_varint_byte():
 
 
 def test_the_declared_count_is_what_makes_the_truncation_visible():
-    # ISE serialises into a column narrower than the data. On a live endpoint
-    # the header routinely says 137 pairs and the column carries 53, and an
-    # operator reading 53 attributes must not think that is all of them.
+    # Cisco's view exposes the first 2000 bytes of the profiling LOB, so on a
+    # busy endpoint the header says 137 pairs and the projection carries 53.
+    # An operator reading 53 must not think that is all ISE knows.
     body = ise_tlv([("OUI", "Zabbly"), ("ip", "10.0.0.1")], declared=137)
     decoded = probe_data.decode(body)
     assert decoded["count"] == 2
     assert decoded["declared"] == 137
     assert decoded["truncated"] is True
-    assert "135 were cut off in the database" in decoded["note"]
+    assert "The other 135 are in ISE but not reachable" in decoded["note"]
 
 
 def test_a_pair_cut_in_half_by_the_column_is_dropped_not_half_reported():
     body = ise_tlv([("OUI", "Zabbly"), ("ip", "10.0.0.1"),
                     ("chaddr", "10:66:6a:69:19:42"),
                     ("NetworkDeviceName", "campus-corp-wired")])
-    # Chop inside the final value, the way a 2000-byte column does. The name
+    # Chop inside the final value, the way the 2000-byte substr does. The name
     # survives the cut and its value does not; reporting the name with an empty
     # value would claim ISE knows this device has no name.
     decoded = probe_data.decode(body[:-4])

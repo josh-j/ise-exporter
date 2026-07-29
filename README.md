@@ -311,6 +311,7 @@ ise> Get-IseRadiusLiveLog -Last 1h                  # Operations > RADIUS > Live
 ise> Get-IseRadiusLiveLog -Status Fail -Last 4h | Group-Object failure_reason
 ise> Get-IseContextVisibility -Profile 'Cisco-IP-Phone*' -First 500
 ise> Get-IseContextVisibility -Last 1h -WithLastAuth   # + the Authentication tab
+ise> Get-IseContextVisibility -Last 1h -ViaPxGrid      # the same, live and free
 ```
 
 They are ordinary Data Connect reads on the same paced transport, so they cost

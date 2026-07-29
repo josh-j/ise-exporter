@@ -151,8 +151,9 @@ def _uncontain(payload):
 # omitted one, so the alternation holds all the way through.
 #
 # The header is the useful part. It states how many pairs ISE serialised, which
-# is what makes the truncation below detectable instead of invisible: on a live
-# endpoint the column routinely declares 137 pairs and carries 53.
+# is what makes the truncation below detectable instead of invisible. Cisco's
+# view exposes only the first 2000 bytes of the profiling LOB, so on a busy
+# endpoint the header declares 137 pairs and the projection carries 53.
 _ISE_TAG = 0x11
 _MIN_ISE_TOKENS = 4
 
@@ -230,12 +231,21 @@ def _described(parsed, container):
         missing = max(0, parsed["declared"] - parsed["pairs"])
         # Said in words on the field, because the difference between "this
         # endpoint has 53 attributes" and "this endpoint has 137 attributes and
-        # ISE kept 53" is the difference between a wrong answer and a partial
-        # one, and only the field knows which this is.
+        # Data Connect shows 53" is the difference between a wrong answer and a
+        # partial one, and only the field knows which this is.
+        #
+        # The cut is Cisco's and it is deliberate. ENDPOINTS_DATA projects the
+        # column as utl_raw.cast_to_varchar2(dbms_lob.substr(EDF_KRYOBUFFER,
+        # 2000)): the profiling buffer is a LOB holding the whole attribute
+        # set, and the view exposes its first 2000 bytes. Nothing downstream
+        # can widen that, so the note points at where the rest still lives
+        # rather than at a limit somebody might try to raise here.
         field["note"] = (
-            f"ISE serialised {parsed['declared']} attributes into a column that "
-            f"held {parsed['pairs']}; {missing} were cut off in the database, "
-            "not here")
+            f"ISE serialised {parsed['declared']} attributes; this view exposes "
+            f"the first 2000 bytes of the profiling buffer, which held "
+            f"{parsed['pairs']}. The other {missing} are in ISE but not "
+            "reachable through Data Connect -- read the endpoint over ERS for "
+            "the whole set")
     return field
 
 

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import threading
+import time
 from types import MethodType
 
 from prometheus_client import REGISTRY
@@ -549,3 +550,38 @@ def test_the_session_stream_is_started_by_demand_not_by_advertisement():
 
     assert transport.satisfies(("capability:pxgrid_session_topic",))[0]
     assert transport._supervisor == "started"
+
+
+def test_asking_for_the_held_snapshot_really_does_not_reconcile():
+    # What /api/v1/pxgrid/sessions depends on. The route serves memory this
+    # process already holds and must never be the reason a full getSessions
+    # runs -- an operator refreshing a page would otherwise schedule one. Its
+    # own test can only prove which argument it passes; this proves the
+    # argument means what it needs it to, against the transport that has to
+    # honour it.
+    transport = _state_transport()
+    transport._connected = threading.Event()
+    transport._connected.set()
+    transport._sessions = {"a": {"macAddress": "02:1E:5E:00:00:01"}}
+    reconciles = []
+    transport._refresh_sessions = MethodType(
+        lambda self, *, force=False: reconciles.append(force), transport)
+
+    # A baseline older than any max_age a caller could name.
+    transport._session_snapshot_at = 1.0
+    assert len(transport.get_sessions(refresh=False)) == 1
+    assert reconciles == []
+
+    # And the same transport does reconcile without it, so the assertion above
+    # is not passing because this stub never refreshes at all.
+    transport.get_sessions()
+    assert reconciles == [True]
+
+
+def test_an_age_measured_from_the_epoch_is_reported_as_no_age_at_all():
+    # Before any baseline, _session_snapshot_at is 0.0. Subtracting that from
+    # the wall clock is a fifty-six-year-old snapshot, which is not an answer.
+    transport = _state_transport()
+    assert transport.snapshot_age() is None
+    transport._session_snapshot_at = time.time() - 30
+    assert 29 <= transport.snapshot_age() <= 31

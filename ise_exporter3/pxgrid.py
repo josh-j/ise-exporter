@@ -78,3 +78,65 @@ def bool_label(value):
     if text in {"false", "no", "0", "unregistered", "noncompliant", "disabled"}:
         return "false"
     return "unknown"
+
+
+# The fields an operator reading Context Visibility is looking at, and no more.
+# A pxGrid session record is large and mostly internal; serving it whole over the
+# operator API would put the appliance's session table in a terminal and make
+# every field an accidental contract. This is the same discipline session_detail
+# keeps for the MnT cache: project what is read, resolve the spelling once.
+def project_session(record):
+    """One pxGrid session reduced to the fields the operator surface shows."""
+    if not isinstance(record, dict):
+        return None
+    mac = normalize_mac(first(
+        record, "macAddress", "mac_address", "callingStationId",
+        "calling_station_id"))
+    if not mac:
+        # Without a MAC there is nothing to join an endpoint to, and an
+        # unjoinable session on a Context Visibility row is noise.
+        return None
+    addresses = as_list(first(record, "ipAddresses", "ip_addresses"))
+    address = str(addresses[0] if addresses else first(
+        record, "framedIpAddress", "framed_ip_address", "ipAddress")).strip()
+    profiles = as_list(first(
+        record, "selectedAuthzProfiles", "selected_authz_profiles",
+        "authorizationProfiles"))
+    # nasIdentifier is what ISE 3.3 actually calls the device by. The other two
+    # spellings are kept because other releases and the pubsub topic use them,
+    # but reading them first left every NAD column empty against a live
+    # appliance -- networkDeviceProfileName, the field that *is* always there,
+    # is the device profile ("Cisco") and not its name.
+    nad = first(record, "nasIdentifier", "nas_identifier", "nasName",
+                "networkDeviceName", "network_device_name")
+    # ISE names the serving node in `providers` and writes the string "None"
+    # when there is nothing to name, which is not a node.
+    providers = [str(name).strip() for name in as_list(first(record, "providers"))
+                 if str(name).strip() and str(name).strip().lower() != "none"]
+    return {
+        "mac_address": mac,
+        "ip_address": address,
+        "user_name": str(first(record, "userName", "user_name") or ""),
+        "nad": str(nad or ""),
+        "nas_ip_address": str(first(
+            record, "nasIpAddress", "nas_ip_address") or ""),
+        "nas_port": str(first(record, "nasPortId", "nas_port_id") or ""),
+        "endpoint_profile": str(first(
+            record, "endpointProfile", "endpoint_profile") or ""),
+        # Real fields, not the session state standing in for them.
+        "auth_method": str(first(record, "authMethod", "auth_method") or ""),
+        "auth_protocol": str(first(record, "authProtocol", "auth_protocol") or ""),
+        "posture_status": str(first(
+            record, "postureStatus", "posture_status") or ""),
+        "authorization_profiles": ", ".join(
+            str(profile).strip() for profile in profiles if str(profile).strip()),
+        "security_group": str(first(
+            record, "securityGroup", "security_group") or ""),
+        "ise_node": ", ".join(providers) or str(first(
+            record, "psnName", "psn_name", "iseNode", "ise_node", "server") or ""),
+        "session_state": session_state(record),
+        "audit_session_id": str(first(
+            record, "auditSessionId", "audit_session_id") or ""),
+        "last_update": str(first(
+            record, "timestamp", "lastUpdateTime", "last_update_time") or ""),
+    }

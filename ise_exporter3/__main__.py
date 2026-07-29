@@ -202,13 +202,19 @@ def command_run(args):
     # file would be the only thing left keeping them apart.
     oracle = transports.get("oracle")
     explorer = Explorer(oracle) if oracle is not None else None
+    # Same reasoning as the explorer: the operator API reads the transport the
+    # scheduler already owns, so the session snapshot it serves is the one the
+    # subscription keeps current rather than a second one nobody is refreshing.
+    pxgrid = transports.get("pxgrid")
+    mnt = transports.get("mnt")
     # Two listeners, not one: Prometheus must reach /metrics from off-host, and
     # the operator API must not leave the host. Binding them together would mean
     # choosing one of those, and neither is the right thing to give up.
     metrics_http = HttpServer("0.0.0.0", config.exporter.port, registry)
     api_http = HttpServer(
         config.exporter.api_host, config.exporter.api_port, registry,
-        routes=OperatorApi(config, plan, scheduler, explorer).routes())
+        routes=OperatorApi(
+            config, plan, scheduler, explorer, pxgrid, mnt).routes())
     try:
         metrics_http.start()
         api_http.start()

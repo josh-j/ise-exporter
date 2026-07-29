@@ -29,7 +29,9 @@ Three things bound what an ad-hoc statement can be:
   non-blocking lock makes concurrent requests fail fast rather than queue, and a
   request that would sit through a long cooldown is refused with the wait, so
   the caller decides whether to wait rather than holding a connection open for
-  minutes.
+  minutes. A keyed lookup may cut into a cooldown instead of waiting it out --
+  see ``Request.light`` -- but the transport bounds how far cut-ins may push
+  the scheduler, so the self-limiting property above survives a loop of them.
 
 The curated ``VIEW_CATALOG`` is metadata *about* the views, not a substitute for
 the catalog: its column lists are a preference for what to show first, resolved
@@ -62,6 +64,12 @@ MAX_ROWS = 1000
 # statements, short enough that an HTTP client is not left holding a connection
 # through a production duty cycle -- at 3% a two-second statement costs a minute.
 MAX_PACING_WAIT_SECONDS = 15.0
+
+# The row cap that separates a lookup from a listing. A light request is meant
+# to answer "what is this one thing", so the ceiling is deliberately far below
+# the default page: asking for a hundred rows is browsing, and browsing waits
+# its turn like everything else.
+LIGHT_ROWS = 25
 
 # Bounds on the request itself, so a malformed or hostile query string cannot
 # make a statement large before any of it is validated.
@@ -422,6 +430,50 @@ class Request:
     first: int = DEFAULT_ROWS
     explain: bool = False
     force: bool = False
+
+    @property
+    def light(self):
+        """Whether this is a lookup of one thing rather than a scan of many.
+
+        ``query_catalog`` already carries this idea: a dictionary read keeps the
+        gate, the timeout and every ceiling, but is exempt from the duty
+        amplification because it does not scale with the event history. The same
+        reasoning admits a keyed lookup in a current-state view. "Which policy
+        is this MAC on" costs the same on an idle appliance and a loud one, and
+        making an operator either wait out a scan's cooldown or reach for
+        -Force to ask it charges an incident override for a question that costs
+        nothing.
+
+        Deliberately narrow, because the cost has to follow from the request
+        rather than from hope:
+
+        - a current-state view, so there is no window to scan. An event view is
+          never light, whatever it is filtered by;
+        - unwindowed by the view's nature, not by ``last=all``, which turns an
+          event view into a scan bounded only by rows;
+        - at least one equality bind, so it cannot return the whole view;
+        - a lookup-sized row cap;
+        - no grouping or aggregate, both of which read the whole window.
+
+        A light request skips the *wait*, not the accounting: it charges its
+        full adaptive cooldown, added to the outstanding one. That is what makes
+        it different from -Force, which charges only measured time. The duty
+        cycle is unchanged; only the order of service is.
+
+        Eligibility, not permission. This says the request is shaped like a
+        lookup; whether one may still cut in is the transport's answer, because
+        only it knows how much the light lane already owes the scheduler.
+        """
+        return (
+            not self.explain
+            and not self.groups
+            and not self.aggregates
+            and not self.window_requested
+            and not self.window_disabled
+            and bool(self.entry.window_optional)
+            and bool(self.equals)
+            and self.first <= LIGHT_ROWS
+        )
 
 
 # --- request parsing --------------------------------------------------------
@@ -936,7 +988,8 @@ class Explorer:
             raise
         telemetry.dataconnect_explorer_queries_total.labels(
             result="explain" if payload["rows"] is None
-            else "forced" if payload["forced"] else "success").inc()
+            else "forced" if payload["forced"]
+            else "light" if payload["light"] else "success").inc()
         return payload
 
     def status(self):
@@ -993,7 +1046,15 @@ class Explorer:
                 "busy", "another ad-hoc query is already running; Data Connect "
                 "runs one statement at a time", status=429)
         try:
-            if not request.force:
+            # Eligible is not the same as permitted. The request decides
+            # whether it is *shaped* like a lookup; the transport decides
+            # whether the light lane has any room left, because only it knows
+            # how far cut-ins have already pushed the scheduler. Past that a
+            # lookup queues like a scan -- and is refused with the same wait,
+            # which is the honest answer: the cooldown it would be cutting into
+            # is one the lookups themselves built.
+            light = request.light and self.transport.light_available()
+            if not request.force and not light:
                 wait = self._pacing_wait()
                 if wait > self.max_wait:
                     raise ExploreError(
@@ -1010,6 +1071,12 @@ class Explorer:
                     # a sleeping scheduled statement.
                     rows = self.transport.query_forced(
                         sql, binds, lane_timeout=self.max_wait)
+                elif light:
+                    # Cuts into the cooldown and pays for it. Same bounded lane
+                    # wait as forcing, because an HTTP thread must not block on
+                    # live Oracle work whichever door it came through.
+                    rows = self.transport.query_light(
+                        sql, binds, lane_timeout=self.max_wait)
                 else:
                     rows = self.transport.query(sql, binds)
             except TransportError as error:
@@ -1019,15 +1086,16 @@ class Explorer:
                     status=429 if error.reason == "busy" else 502) from error
             elapsed = time.monotonic() - started
             self._record(request, len(rows), elapsed,
-                         "forced" if request.force else "success")
+                         "forced" if request.force
+                         else "light" if light else "success")
             return self._answer(
                 request, sql, binds, rows=rows, elapsed=elapsed,
-                cooldown=self._pacing_wait())
+                cooldown=self._pacing_wait(), light=light)
         finally:
             self._lock.release()
 
     def _answer(self, request, sql, binds, *, rows=None, elapsed=None,
-                cooldown=None):
+                cooldown=None, light=False):
         return {
             "view": request.entry.name,
             "sql": sql,
@@ -1041,6 +1109,12 @@ class Explorer:
             "elapsed_seconds": None if elapsed is None else round(elapsed, 3),
             "cooldown_seconds": None if cooldown is None else round(cooldown, 1),
             "forced": None if rows is None else request.force,
+            # Cutting into a cooldown is counted for the same reason forcing is:
+            # an unexplained gap in the reporting datasets has to be
+            # attributable, and "a lookup went first" is part of that answer.
+            # What the statement did, not what the request was eligible for: a
+            # lookup that waited out the cooldown did not cut into it.
+            "light": None if rows is None else light,
         }
 
     def _record(self, request, rows, elapsed, result):

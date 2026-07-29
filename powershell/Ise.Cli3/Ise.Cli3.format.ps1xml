@@ -443,10 +443,12 @@
               <TableColumnItem><PropertyName>endpoint_ip</PropertyName></TableColumnItem>
               <TableColumnItem><PropertyName>hostname</PropertyName></TableColumnItem>
               <TableColumnItem><PropertyName>endpoint_policy</PropertyName></TableColumnItem>
-              <!-- Blank without -WithLastAuth: ENDPOINTS_DATA has no
-                   authenticated user, and an empty column says so. -->
-              <TableColumnItem><PropertyName>auth_identity</PropertyName></TableColumnItem>
-              <TableColumnItem><PropertyName>auth_nad</PropertyName></TableColumnItem>
+              <!-- Blank until a source is attached: ENDPOINTS_DATA has no
+                   authenticated user, and an empty column says so. Resolved
+                   from whichever of the three supplied one, so the table reads
+                   the same under any combination. -->
+              <TableColumnItem><PropertyName>identity</PropertyName></TableColumnItem>
+              <TableColumnItem><PropertyName>nad</PropertyName></TableColumnItem>
               <TableColumnItem><PropertyName>update_time</PropertyName></TableColumnItem>
             </TableColumnItems>
           </TableRowEntry>

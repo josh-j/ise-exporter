@@ -1,6 +1,6 @@
 @{
     RootModule        = 'Ise.Cli3.psm1'
-    ModuleVersion     = '3.1.0'
+    ModuleVersion     = '3.2.0'
     GUID              = 'a3f1c6d2-5b7e-4c19-9f82-6d4e1b0a7c53'
     Author            = 'Joshua Johnson'
     Description       = 'Read-only operator cmdlets for ise-exporter3, over its local API.'

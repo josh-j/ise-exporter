@@ -28,6 +28,222 @@ $script:IseDcViews = $null
 # time anybody reads it.
 $script:IseReadmePath = Join-Path $PSScriptRoot 'Ise.Cli3.Readme.md'
 
+function Get-IseMarkdownStyle {
+    <#
+    .SYNOPSIS
+    ANSI codes when the terminal wants them, empty strings when it does not.
+    #>
+    param()
+
+    $plain = [pscustomobject]@{
+        Head = ''; Sub = ''; Code = ''; Rule = ''; Emphasis = ''; Reset = ''
+    }
+    if ($env:NO_COLOR) { return $plain }
+    if (-not $Host.UI.SupportsVirtualTerminal) { return $plain }
+    $e = [char]27
+    [pscustomobject]@{
+        Head     = "$e[1;36m"      # section headings
+        Sub      = "$e[1m"         # sub-headings and bold runs
+        Code     = "$e[38;5;150m"  # command lines and inline literals
+        Rule     = "$e[38;5;240m"  # table rules, the quiet furniture
+        Emphasis = "$e[38;5;180m"  # table headers
+        Reset    = "$e[0m"
+    }
+}
+
+function Format-IseMarkdownInline {
+    <#
+    .SYNOPSIS
+    Strip the markers a terminal cannot use, keep what they meant.
+    #>
+    param([string]$Text, $Style)
+
+    # Links first: the label is the readable part and the URL is noise in a
+    # shell, except when there is no label to keep.
+    $out = [regex]::Replace($Text, '\[([^\]]+)\]\(([^)]+)\)', '$1 ($2)')
+    $out = [regex]::Replace($out, '\*\*([^*]+)\*\*',
+        { param($m) "$($Style.Sub)$($m.Groups[1].Value)$($Style.Reset)" })
+    $out = [regex]::Replace($out, '`([^`]+)`',
+        { param($m) "$($Style.Code)$($m.Groups[1].Value)$($Style.Reset)" })
+    $out
+}
+
+function Get-IseVisibleLength {
+    # Column widths have to be measured in what the eye sees, not in what the
+    # escape sequences add.
+    param([string]$Text)
+    ([regex]::Replace($Text, "$([char]27)\[[0-9;]*m", '')).Length
+}
+
+function Format-IseWrapped {
+    param([string]$Text, [int]$Width, [string]$Indent = '')
+
+    $words = $Text -split '\s+' | Where-Object { $_ }
+    if (-not $words) { return @('') }
+    $lines, $current = @(), $Indent
+    foreach ($word in $words) {
+        $candidate = if ($current -eq $Indent) { "$current$word" } else { "$current $word" }
+        if ((Get-IseVisibleLength $candidate) -gt $Width -and $current -ne $Indent) {
+            $lines += $current
+            $current = "$Indent$word"
+        }
+        else { $current = $candidate }
+    }
+    @($lines + $current)
+}
+
+function Format-IseMarkdown {
+    <#
+    .SYNOPSIS
+    Render the guide for a terminal: wrapped prose, aligned tables, quiet code.
+    .DESCRIPTION
+    Show-Markdown exists and was tried first. It collapses every table onto one
+    line with the pipes and dashes intact, emits cursor-movement escapes inside
+    fenced code, and never wraps a paragraph -- so the parts of this guide that
+    carry the most information are the parts it renders worst. This does the
+    four things that actually matter for reading a reference in a shell.
+    #>
+    param([string[]]$Line, [int]$Width = 0)
+
+    $style = Get-IseMarkdownStyle
+    if ($Width -le 0) {
+        $Width = try { [Console]::WindowWidth - 2 } catch { 96 }
+    }
+    # Long measures are hard to read even on a wide terminal, and unreadably
+    # hard on a maximised one.
+    $Width = [math]::Max(48, [math]::Min($Width, 96))
+
+    $out = [System.Collections.Generic.List[string]]::new()
+    $index = 0
+    while ($index -lt $Line.Count) {
+        $text = $Line[$index]
+
+        if ($text -match '^```') {
+            # Code is quoted, not reflowed: a wrapped command is a broken one.
+            $index++
+            while ($index -lt $Line.Count -and $Line[$index] -notmatch '^```') {
+                $out.Add("  $($style.Code)$($Line[$index])$($style.Reset)")
+                $index++
+            }
+            $index++
+            $out.Add('')
+            continue
+        }
+
+        if ($text -match '^\s*\|') {
+            $rows = @()
+            while ($index -lt $Line.Count -and $Line[$index] -match '^\s*\|') {
+                $cells = $Line[$index].Trim() -replace '^\|', '' -replace '\|$', ''
+                $rows += , @($cells -split '\|' | ForEach-Object { $_.Trim() })
+                $index++
+            }
+            # The |---|---| rule carries no content; the alignment it describes
+            # is rebuilt below from the real widths.
+            $body = @($rows | Where-Object {
+                ($_ -join '') -notmatch '^[-: ]+$' })
+            if ($body.Count) {
+                $columns = ($body | ForEach-Object { $_.Count } |
+                    Measure-Object -Maximum).Maximum
+                $rendered = foreach ($row in $body) {
+                    , @(for ($c = 0; $c -lt $columns; $c++) {
+                        Format-IseMarkdownInline ([string]$row[$c]) $style })
+                }
+                $widths = for ($c = 0; $c -lt $columns; $c++) {
+                    ($rendered | ForEach-Object {
+                        Get-IseVisibleLength $_[$c] } |
+                        Measure-Object -Maximum).Maximum
+                }
+                $natural = (($widths | Measure-Object -Sum).Sum) +
+                    (2 * ($columns - 1)) + 2
+                if ($natural -le $Width) {
+                    $first = $true
+                    foreach ($row in $rendered) {
+                        $cells = for ($c = 0; $c -lt $columns; $c++) {
+                            $pad = $widths[$c] - (Get-IseVisibleLength $row[$c])
+                            "$($row[$c])$(' ' * [math]::Max(0, $pad))"
+                        }
+                        $prefix = if ($first) { $style.Emphasis } else { '' }
+                        $suffix = if ($first) { $style.Reset } else { '' }
+                        $out.Add("  $prefix$(($cells -join '  ').TrimEnd())$suffix")
+                        if ($first) {
+                            $rule = ($widths | ForEach-Object { '-' * $_ }) -join '  '
+                            $out.Add("  $($style.Rule)$rule$($style.Reset)")
+                            $first = $false
+                        }
+                    }
+                }
+                else {
+                    # Too wide to align. Squeezing the columns would wrap every
+                    # cell into an unreadable stack; turning each row into a
+                    # labelled block keeps it readable at any width, which is
+                    # what a comparison table is for.
+                    $labels = $rendered[0]
+                    $label = ($labels[1..($columns - 1)] | ForEach-Object {
+                        Get-IseVisibleLength $_ } | Measure-Object -Maximum).Maximum
+                    foreach ($row in $rendered[1..($rendered.Count - 1)]) {
+                        $out.Add("  $($style.Sub)$($row[0])$($style.Reset)")
+                        for ($c = 1; $c -lt $columns; $c++) {
+                            if (-not $row[$c]) { continue }
+                            $pad = $label - (Get-IseVisibleLength $labels[$c])
+                            $lead = "    $($labels[$c])$(' ' * [math]::Max(0, $pad))  "
+                            $wrapped = @(Format-IseWrapped $row[$c] $Width (
+                                ' ' * (Get-IseVisibleLength $lead)))
+                            $wrapped[0] = $lead + $wrapped[0].TrimStart()
+                            $out.AddRange([string[]]$wrapped)
+                        }
+                        $out.Add('')
+                    }
+                }
+                $out.Add('')
+            }
+            continue
+        }
+
+        if ($text -match '^(#{1,6})\s+(.*)$') {
+            $depth = $matches[1].Length
+            $title = Format-IseMarkdownInline $matches[2] $style
+            if ($out.Count -and $out[$out.Count - 1] -ne '') { $out.Add('') }
+            if ($depth -le 2) {
+                $out.Add("$($style.Head)$title$($style.Reset)")
+                $out.Add("$($style.Rule)$('-' * (Get-IseVisibleLength $title))$($style.Reset)")
+            }
+            else {
+                $out.Add("$($style.Sub)$title$($style.Reset)")
+            }
+            $out.Add('')
+            $index++
+            continue
+        }
+
+        if ($text -match '^\s*$') {
+            if ($out.Count -and $out[$out.Count - 1] -ne '') { $out.Add('') }
+            $index++
+            continue
+        }
+
+        if ($text -match '^(\s*)([-*+]|\d+\.)\s+(.*)$') {
+            $lead = "$($matches[1])  "
+            $body = Format-IseMarkdownInline $matches[3] $style
+            $wrapped = @(Format-IseWrapped $body ($Width - $lead.Length - 2) "$lead  ")
+            $wrapped[0] = "$lead* " + $wrapped[0].TrimStart()
+            $out.AddRange([string[]]$wrapped)
+            $index++
+            continue
+        }
+
+        # A paragraph is every following non-blank, non-structural line.
+        $paragraph = @()
+        while ($index -lt $Line.Count -and $Line[$index] -notmatch '^\s*$' -and
+               $Line[$index] -notmatch '^(#{1,6}\s|```|\s*\||\s*([-*+]|\d+\.)\s)') {
+            $paragraph += $Line[$index].Trim()
+            $index++
+        }
+        $joined = Format-IseMarkdownInline ($paragraph -join ' ') $style
+        $out.AddRange([string[]](Format-IseWrapped $joined $Width '  '))
+    }
+    $out
+}
+
 function Get-IseCliReadme {
     <#
     .SYNOPSIS
@@ -40,11 +256,19 @@ function Get-IseCliReadme {
     Whole thing by default. -Section prints one part, matched on its heading and
     accepting wildcards, because the answer wanted mid-incident is one section
     and not eleven. -List names the sections without printing any of them.
+
+    Rendered for a terminal: prose wrapped to the window, tables aligned,
+    commands set apart. -Raw emits the markdown source instead, for piping
+    somewhere that would rather do its own formatting.
     .PARAMETER Section
     Heading to print; wildcards accepted, matched case-insensitively. A pattern
     matching several headings prints all of them, in document order.
     .PARAMETER List
     List the section headings instead of printing anything.
+    .PARAMETER Raw
+    Emit the markdown source rather than the rendered form.
+    .PARAMETER Width
+    Wrap at this many columns instead of the window width.
     .EXAMPLE
     Get-IseCliReadme
     .EXAMPLE
@@ -53,11 +277,15 @@ function Get-IseCliReadme {
     Get-IseCliReadme -Section 'refused'
     .EXAMPLE
     Get-IseCliReadme | Out-Host -Paging
+    .EXAMPLE
+    Get-IseCliReadme -Raw | Out-File ise-cli3.md
     #>
     [CmdletBinding(DefaultParameterSetName = 'Whole')]
     param(
         [Parameter(ParameterSetName = 'Section', Position = 0)][string]$Section,
-        [Parameter(ParameterSetName = 'List')][switch]$List
+        [Parameter(ParameterSetName = 'List')][switch]$List,
+        [switch]$Raw,
+        [int]$Width = 0
     )
 
     if (-not (Test-Path -LiteralPath $script:IseReadmePath)) {
@@ -74,7 +302,10 @@ function Get-IseCliReadme {
         ForEach-Object { $_ -replace '^##\s+', '' })
 
     if ($List) { return $headings }
-    if (-not $Section) { return ($lines -join [Environment]::NewLine) }
+    if (-not $Section) {
+        return $(if ($Raw) { $lines -join [Environment]::NewLine }
+                 else { (Format-IseMarkdown $lines $Width) -join [Environment]::NewLine })
+    }
 
     $pattern = if ($Section -match '[*?]') { $Section } else { "*$Section*" }
     $wanted = @($headings | Where-Object { $_ -like $pattern })
@@ -91,7 +322,8 @@ function Get-IseCliReadme {
         }
         if ($keeping) { $out.Add($line) }
     }
-    $out -join [Environment]::NewLine
+    if ($Raw) { return $out -join [Environment]::NewLine }
+    (Format-IseMarkdown $out $Width) -join [Environment]::NewLine
 }
 
 function Get-IseApiRoot {
@@ -192,6 +424,16 @@ function New-IseApiError {
         'dataconnect_unconfigured' {
             'This exporter has no Data Connect target configured, so there is ' +
             'nothing for the Get-IseDc* cmdlets to read.'
+        }
+        'pxgrid_unconfigured' {
+            'This exporter has no pxGrid target configured, so there is no ' +
+            'session directory to read. Use -WithLastAuth to take the session ' +
+            'context from Data Connect instead.'
+        }
+        'connection_failed' {
+            # The one refusal that is about the far end rather than a guard.
+            'The exporter could not reach the source: ' +
+            'Get-IseDataset -Unhealthy shows what else it is affecting.'
         }
         'unknown_view' { "That is not a legal view name. Get-IseDcView lists what this account can see." }
         'view_unavailable' {
@@ -580,6 +822,13 @@ function Invoke-IseDcQuery {
     the authentication guard and the one-at-a-time lane all still apply, and at
     least the hard floor between statements is still charged. For the statement
     that cannot wait, not for making every statement immediate.
+
+    Not needed for a lookup. A keyed read of a current-state view -- one exact
+    filter, at most 25 rows, no window, no grouping -- is already served through
+    a cooldown, and pays its full charge on top of the outstanding one rather
+    than taking the discount this switch does. Cutting in is bounded: once
+    lookups have pushed the shared deadline out by about a minute they queue
+    like anything else, so a script in a loop cannot starve the scheduler.
     .PARAMETER Min
     Inclusive lower bounds as @{ COLUMN = value }; with -Max on the same
     column it says between. Values travel as binds like every filter.
@@ -1298,14 +1547,28 @@ function Get-IseContextVisibility {
     matters here more than anywhere else. With -Last it narrows to endpoints
     whose row changed inside the window.
 
-    -WithLastAuth adds the screen's Authentication tab: identity, network
-    device, authorization profiles, method, posture and serving node, taken from
+    Three sources can be attached, and they are nearly disjoint, so they add
+    rather than compete. Measured on a live appliance: 50 of an endpoint's 53
+    readable probe attributes have no pxGrid counterpart, and 28 of pxGrid's 31
+    session fields have no probe counterpart. -Full turns all three on.
+
+    -WithProbe merges everything ISE profiled about the endpoint: AD resolution,
+    registration state, OUI, certainty, DHCP and the rest, as probe_* columns.
+    It costs nothing extra -- PROBE_DATA is already in the row this cmdlet
+    fetches, and was being discarded. Cisco's view truncates it, so a busy
+    endpoint's attribute set arrives partial and says so.
+
+    -WithLastAuth adds the screen's Authentication tab as auth_* columns, from
     each endpoint's most recent RADIUS authentication. That is a second
     statement against a second view, so it charges the duty cycle twice, and it
-    only reaches endpoints that authenticated inside the auth window -- anything
-    quieter than that comes back with those fields empty rather than wrong.
-    Without it the identity columns stay blank, because ENDPOINTS_DATA does not
-    carry the authenticated user; only the portal one.
+    only reaches endpoints that authenticated inside the auth window.
+
+    -ViaPxGrid adds live session state as session_* columns, free. Between them
+    they answer different questions: auth_* is the last authentication whenever
+    it happened, session_* is what is connected now.
+
+    Whatever supplied them, `identity` and `nad` are set from whichever source
+    had one, so the table reads the same under any combination.
     .PARAMETER Mac
     MAC address; wildcards accepted.
     .PARAMETER Ip
@@ -1318,10 +1581,36 @@ function Get-IseContextVisibility {
     Portal user recorded on the endpoint; wildcards accepted.
     .PARAMETER Last
     Only endpoints whose row changed inside this window: 30m, 2h, 1d.
+    .PARAMETER WithProbe
+    Merge the endpoint's profiling attributes as probe_* columns. Free: the
+    column is already fetched.
     .PARAMETER WithLastAuth
-    Attach each endpoint's most recent authentication. Costs a second statement.
+    Attach each endpoint's most recent authentication as auth_* columns. Costs
+    a second statement.
     .PARAMETER AuthLast
     Window for the authentication lookup -WithLastAuth performs. Defaults to 1d.
+    .PARAMETER ViaPxGrid
+    Attach live session state as session_* columns, from pxGrid's session
+    directory. Free -- the exporter already holds the snapshot, kept current by
+    the subscription active_sessions pays for -- and live rather than "most
+    recent inside a window". What it cannot do is answer for an endpoint that is
+    not connected. Requires a configured pxGrid target; without one the cmdlet
+    says so rather than silently returning nothing.
+    .PARAMETER WithSession
+    Attach MnT's session detail as mnt_* columns: accounting counters, the
+    policy execution steps, the correlation ids, and the authorization detail.
+    39 of its 47 fields have no counterpart in any other source.
+
+    MnT has no bulk form, so this is one request per endpoint against the PAN
+    budget -- not the Oracle duty cycle, but a real budget all the same. It
+    therefore refuses rather than scales: past -SessionLimit endpoints it stops
+    and says so instead of issuing hundreds of requests nobody asked for. Meant
+    for one endpoint, or a handful.
+    .PARAMETER SessionLimit
+    How many endpoints -WithSession will fetch detail for. Defaults to 25.
+    .PARAMETER Full
+    Every source this cmdlet can reach: -WithProbe, -WithLastAuth, -ViaPxGrid.
+    Not -WithSession, which is per-endpoint and has to be asked for.
     .EXAMPLE
     Get-IseContextVisibility -Profile 'Cisco-IP-Phone*' -First 500
     .EXAMPLE
@@ -1336,7 +1625,12 @@ function Get-IseContextVisibility {
         [string]$Hostname,
         [string]$Profile,
         [string]$User,
+        [switch]$WithProbe,
         [switch]$WithLastAuth,
+        [switch]$ViaPxGrid,
+        [switch]$WithSession,
+        [int]$SessionLimit = 25,
+        [switch]$Full,
         [string]$AuthLast = '1d',
         [string]$Last,
         [int]$First,
@@ -1358,11 +1652,47 @@ function Get-IseContextVisibility {
     $endpoints = @(Invoke-IseDcTypedQuery -View $view -Filter $filter -Match $match `
         -Bound $PSBoundParameters)
 
+    # They no longer collide, so there is nothing to refuse: auth_* is the last
+    # authentication whenever it happened, session_* is what is connected now,
+    # probe_* is what ISE profiled. Asking for all three is the point of -Full.
+    if ($Full) { $WithProbe = $WithLastAuth = $ViaPxGrid = $true }
+    # Counted rather than capped after the fact: the refusal has to happen
+    # before the requests, not be discovered in the output afterwards.
+    $fetched = 0
+
+    # pxGrid first, because it is the free one. The exporter is holding this
+    # snapshot already; reading it spends no Oracle duty cycle and no cooldown,
+    # which is the whole reason to prefer it when an endpoint is connected.
+    $lastAuth = @{}
+    $sessions = @{}
+    if ($ViaPxGrid -and $endpoints.Count) {
+        $query = @{}
+        if ($Mac) { $query['mac'] = $Mac }
+        # Deliberately not -First. That bounds the *endpoint* rows; the session
+        # list is a different set, sorted by MAC and cut at the ceiling, so
+        # sending 50 here would fetch the 50 lowest-MAC sessions on the
+        # appliance rather than the sessions belonging to these 50 endpoints --
+        # and every endpoint sorting past the cut would silently come back with
+        # empty session_* columns. The route's own ceiling is the right bound,
+        # and reading memory the exporter already holds costs nothing to widen.
+        $answer = Invoke-IseApi -Path '/api/v1/pxgrid/sessions' -Query $query
+        if ($answer.truncated) {
+            Write-Warning ("pxGrid holds $($answer.matched) sessions and this read " +
+                           "kept $($answer.row_count); endpoints whose session was " +
+                           'left behind will show empty session_* columns. Narrow ' +
+                           'with -Mac to bring them into range.')
+        }
+        foreach ($session in @($answer.sessions)) {
+            if ($null -eq $session) { continue }
+            $key = ConvertTo-IseMacKey $session.mac_address
+            if ($key -and -not $sessions.ContainsKey($key)) { $sessions[$key] = $session }
+        }
+    }
+
     # One statement for the authentications, not one per endpoint: the query API
     # binds a single value per column, so N endpoints would be N statements and
     # N cooldowns. Newest-first over the window, keep the first sighting of each
     # MAC, and join in memory.
-    $lastAuth = @{}
     if ($WithLastAuth -and $endpoints.Count) {
         $authArguments = @{
             View = 'radius_authentications'; Last = $AuthLast
@@ -1385,28 +1715,112 @@ function Get-IseContextVisibility {
 
     foreach ($row in $endpoints) {
         if ($null -eq $row) { continue }
+        $key = ConvertTo-IseMacKey $row.mac_address
+
         if ($WithLastAuth) {
-            $auth = $lastAuth[(ConvertTo-IseMacKey $row.mac_address)]
+            $auth = $lastAuth[$key]
             # Written even when nothing matched: a column that exists and is
             # empty says "this endpoint did not authenticate in the window",
             # while a missing property says nothing at all.
-            Add-Member -InputObject $row -Force -NotePropertyName 'auth_time' `
-                -NotePropertyValue $auth.timestamp
-            Add-Member -InputObject $row -Force -NotePropertyName 'auth_identity' `
-                -NotePropertyValue $auth.username
-            Add-Member -InputObject $row -Force -NotePropertyName 'auth_nad' `
-                -NotePropertyValue $auth.device_name
-            Add-Member -InputObject $row -Force -NotePropertyName 'auth_profiles' `
-                -NotePropertyValue $auth.authorization_profiles
-            Add-Member -InputObject $row -Force -NotePropertyName 'auth_method' `
-                -NotePropertyValue $auth.authentication_method
-            Add-Member -InputObject $row -Force -NotePropertyName 'auth_posture' `
-                -NotePropertyValue $auth.posture_status
-            Add-Member -InputObject $row -Force -NotePropertyName 'auth_node' `
-                -NotePropertyValue $auth.ise_node
+            foreach ($pair in @(
+                @('auth_time', $auth.timestamp),
+                @('auth_identity', $auth.username),
+                @('auth_nad', $auth.device_name),
+                @('auth_profiles', $auth.authorization_profiles),
+                @('auth_method', $auth.authentication_method),
+                @('auth_posture', $auth.posture_status),
+                @('auth_node', $auth.ise_node))) {
+                Add-Member -InputObject $row -Force `
+                    -NotePropertyName $pair[0] -NotePropertyValue $pair[1]
+            }
         }
+
+        if ($ViaPxGrid) {
+            $session = $sessions[$key]
+            # Every projected field, prefixed. Provenance is the point: an
+            # operator reading session_nad knows it came from a live session
+            # and not from an authentication that may be a day old.
+            foreach ($name in @(
+                'user_name', 'ip_address', 'nad', 'nas_ip_address', 'nas_port',
+                'endpoint_profile', 'auth_method', 'auth_protocol',
+                'posture_status', 'authorization_profiles', 'security_group',
+                'ise_node', 'session_state', 'audit_session_id', 'last_update')) {
+                Add-Member -InputObject $row -Force `
+                    -NotePropertyName "session_$name" `
+                    -NotePropertyValue $(if ($session) { $session.$name } else { $null })
+            }
+        }
+
+        if ($WithSession -and $fetched -lt $SessionLimit) {
+            $fetched++
+            $detail = $null
+            try {
+                $answer = Invoke-IseApi -Path '/api/v1/mnt/session' `
+                    -Query @{ mac = $row.mac_address }
+                if ($answer.found) { $detail = $answer.session }
+            }
+            catch {
+                # One endpoint's detail failing is not the whole read failing:
+                # say which, and carry on with the rest.
+                Write-Warning ("$($row.mac_address): session detail unavailable " +
+                               "($($_.Exception.Message))")
+            }
+            if ($detail) {
+                foreach ($field in $detail.PSObject.Properties) {
+                    if ([string]::IsNullOrEmpty($field.Value)) { continue }
+                    $name = ($field.Name -replace '[^A-Za-z0-9]+', '_').Trim('_')
+                    Add-Member -InputObject $row -Force `
+                        -NotePropertyName "mnt_$($name.ToLowerInvariant())" `
+                        -NotePropertyValue $field.Value
+                }
+            }
+        }
+
+        if ($WithProbe) {
+            # Free: PROBE_DATA is already on the row, and was being discarded.
+            # Names are normalised because ISE writes 'AD-Join-Point' and
+            # 'Total Certainty Factor', neither of which reads well as a
+            # PowerShell property; probe_data.attributes keeps the originals.
+            $probe = $row.probe_data
+            if ($probe -and $probe.attributes) {
+                foreach ($attribute in $probe.attributes.PSObject.Properties) {
+                    if ([string]::IsNullOrEmpty($attribute.Value)) { continue }
+                    $name = ($attribute.Name -replace '[^A-Za-z0-9]+', '_').Trim('_')
+                    Add-Member -InputObject $row -Force `
+                        -NotePropertyName "probe_$($name.ToLowerInvariant())" `
+                        -NotePropertyValue $attribute.Value
+                }
+            }
+            if ($probe -and $probe.truncated) {
+                Write-Warning "$($row.mac_address): $($probe.note)"
+            }
+        }
+
+        # One pair of columns the table can always name, whichever source
+        # happened to supply them. Without this the default table goes blank
+        # the moment somebody swaps -WithLastAuth for -ViaPxGrid.
+        if ($WithLastAuth -or $ViaPxGrid -or $WithProbe -or $WithSession) {
+            $identity = @($row.auth_identity, $row.session_user_name,
+                          $row.probe_user, $row.portal_user) |
+                Where-Object { -not [string]::IsNullOrEmpty($_) } |
+                Select-Object -First 1
+            $device = @($row.session_nad, $row.auth_nad,
+                        $row.probe_networkdevicename) |
+                Where-Object { -not [string]::IsNullOrEmpty($_) } |
+                Select-Object -First 1
+            Add-Member -InputObject $row -Force -NotePropertyName 'identity' `
+                -NotePropertyValue $identity
+            Add-Member -InputObject $row -Force -NotePropertyName 'nad' `
+                -NotePropertyValue $device
+        }
+
         if (-not $All) { $row.PSObject.TypeNames.Insert(0, 'Ise.Dc.ContextVisibility') }
         $row
+    }
+    if ($WithSession -and $endpoints.Count -gt $SessionLimit) {
+        Write-Warning ("MnT has no bulk form, so session detail was fetched for " +
+                       "the first $SessionLimit of $($endpoints.Count) endpoints. " +
+                       'Narrow the result or raise -SessionLimit.')
     }
 }
 

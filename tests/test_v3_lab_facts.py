@@ -29,6 +29,9 @@ import requests
 import urllib3
 
 from ise_exporter3 import probe_data
+from ise_exporter3.config import Config
+from ise_exporter3.pxgrid import project_session
+from ise_exporter3.transports import build_transports
 from ise_exporter3.transports.dataconnect import SCHEMA_COLUMN_CONTRACTS
 
 
@@ -577,10 +580,12 @@ def test_probe_data_is_ise_framed_and_the_column_truncates_it(oracle):
     a varint pair count, then 0x11-tagged varint-length UTF-8 records that
     alternate name and value. Read off this appliance and implemented from it.
 
-    The second half matters more than the first. ENDPOINTS_DATA.PROBE_DATA is a
-    2000-byte column and a real endpoint's probe data does not fit, so ISE
-    stores a prefix. The header still declares the full count, which is the only
-    reason a reader can tell a complete attribute set from a cut-off one.
+    The second half matters more than the first. ENDPOINTS_DATA projects this
+    column as utl_raw.cast_to_varchar2(dbms_lob.substr(EDF_KRYOBUFFER, 2000)):
+    the profiling buffer is a LOB holding the whole attribute set, and the view
+    exposes its first 2000 bytes. The header still declares the full count,
+    which is the only reason a reader can tell a complete attribute set from a
+    cut-off one.
     """
     cursor = oracle.cursor()
 
@@ -613,6 +618,136 @@ def test_probe_data_is_ise_framed_and_the_column_truncates_it(oracle):
     for field in decoded:
         if field["truncated"]:
             assert field["count"] < field["declared"]
-            assert "cut off in the database" in field["note"]
+            assert "not reachable through Data Connect" in field["note"]
         else:
             assert field["count"] == field["declared"]
+
+
+def test_the_session_projection_reads_fields_this_appliance_really_sends(tmp_path):
+    """Every projected session field resolves against a live record.
+
+    The projection was written from the field names that seemed likely, and
+    against a real session two of them were wrong: the device name lives in
+    nasIdentifier (networkDeviceProfileName is the device *profile*), and the
+    method is authMethod rather than the session state standing in for it. A
+    wrong name does not fail -- it returns an empty column on every row, which
+    is the kind of quiet wrong this suite exists to catch.
+
+    Needs at least one active session. The lab usually has none, so this skips
+    rather than failing; tools/lab_sessions3.py makes some.
+    """
+    pytest.importorskip("websocket")
+    transport = _pxgrid_transport(tmp_path)
+    if transport is None:
+        pytest.skip("no pxGrid target is configured for this lab")
+    try:
+        data = transport._query(
+            "com.cisco.ise.session", "getSessions", {},
+            api="pxgrid_get_sessions",
+            max_bytes=transport.config.limits.pxgrid_session_bytes)
+    except Exception as error:                   # noqa: BLE001 - skip, not fail
+        pytest.skip(f"pxGrid is not answering: {type(error).__name__}")
+    finally:
+        transport.close()
+    records = (data.get("sessions") if isinstance(data, dict) else data) or []
+    if not records:
+        pytest.skip("no active sessions on the appliance right now")
+
+    projected = [project_session(record) for record in records]
+    projected = [row for row in projected if row]
+    assert projected, "every session was dropped for want of a MAC"
+
+    # The fields ISE fills on any authenticated session. Anything here coming
+    # back empty means a field name has moved.
+    for row in projected:
+        for field in ("mac_address", "user_name", "nad", "nas_ip_address",
+                      "session_state", "last_update", "auth_method"):
+            assert row[field], f"{field} is empty; ISE renamed the field it reads"
+
+
+def _pxgrid_transport(state_directory):
+    """The lab's configured pxGrid transport, or None.
+
+    REST only: prepare() activates and discovers, and the STOMP supervisor is
+    started elsewhere, so this opens no second subscription against a client
+    name the running exporter may already hold.
+
+    The auth guard is deliberately shared state, and a test run is not the
+    exporter, so it is pointed at a scratch directory. A probe must not be able
+    to move the lockout counter the running service depends on.
+    """
+    import tomllib
+
+    path = os.environ.get("ISE_LAB_EXPORTER_CONFIG")
+    if not path or not os.path.isfile(path):
+        return None
+    os.environ.setdefault("ISE_PXGRID_PASSWORD", _secret("lab_ise_pxgrid_pw"))
+    os.environ.setdefault("ISE_PASS", _secret("lab_ise_ui_admin_pw"))
+    os.environ.setdefault(
+        "ISE_DATACONNECT_PASSWORD", _secret("lab_ise_dataconnect_pw"))
+    with open(path, "rb") as handle:
+        document = tomllib.load(handle)
+    document.setdefault("exporter", {})["state_db"] = str(
+        state_directory / "state.sqlite3")
+    try:
+        config = Config.from_document(document, path=path, environ=os.environ)
+        transport = build_transports(config, kinds={"pxgrid"}).get("pxgrid")
+    except Exception:                            # noqa: BLE001 - skip, not fail
+        return None
+    if transport is None:
+        return None
+    transport.prepare()
+    return transport
+
+
+def test_mnt_session_detail_is_the_richest_per_endpoint_source(session):
+    """DATASETS_FACTS §6.5: 42 fields, and the two shapes that read as breakage.
+
+    MnT carries the accounting counters and correlation ids nothing else does,
+    so a shrinking field set here is a real capability loss. The two error
+    shapes are asserted because both look like faults and are not: a MAC with
+    no session is HTTP 500 with cpm-code 34110, and the record count must be an
+    integer rather than the word ``all``.
+
+    Needs an active session; ``tools/lab_sessions3.py start`` makes some.
+    """
+    root = ET.fromstring(_mnt(session, "/Session/ActiveList").content)
+    macs = [child.text for node in root.iter() if node.tag == "activeSession"
+            for child in node if child.tag == "calling_station_id" and child.text]
+    if not macs:
+        pytest.skip("no active sessions on the appliance right now")
+
+    detail = ET.fromstring(_mnt(session, f"/Session/MACAddress/{macs[0]}").content)
+    fields = {child.tag: child.text for node in detail.iter() for child in node
+              if len(child) == 0 and child.text and child.text.strip()}
+    fields.update({child.tag: child.text for child in detail
+                   if len(child) == 0 and child.text and child.text.strip()})
+    assert len(fields) >= 20, "MnT session detail lost most of its fields"
+    # The four groups §6.5 says nothing else carries.
+    for name in ("acct_session_id", "audit_session_id", "selected_azn_profiles",
+                 "identity_store"):
+        assert name in fields, f"MnT stopped sending {name}"
+
+    # A MAC with no session: an ordinary state, reported as a server error.
+    absent = session.get(
+        f"https://{HOST}/admin/API/mnt/Session/MACAddress/AA:BB:CC:DD:EE:FF",
+        headers={"Accept": "application/xml"}, timeout=TIMEOUT)
+    assert absent.status_code == 500
+    assert "<cpm-code>34110</cpm-code>" in absent.text
+
+    # The record count is an integer. 'all' is a 400, which is easy to read as
+    # "the API is broken" rather than "that argument is wrong".
+    good = session.get(
+        f"https://{HOST}/admin/API/mnt/AuthStatus/MACAddress/{macs[0]}/86400/100/All",
+        headers={"Accept": "application/xml"}, timeout=TIMEOUT)
+    assert good.status_code == 200
+    bad = session.get(
+        f"https://{HOST}/admin/API/mnt/AuthStatus/MACAddress/{macs[0]}/86400/all/all",
+        headers={"Accept": "application/xml"}, timeout=TIMEOUT)
+    assert bad.status_code == 400
+
+    # Documented as absent on 3.3 so nobody designs a dataset around it.
+    missing = session.get(
+        f"https://{HOST}/admin/API/mnt/AccountStatus/MACAddress/{macs[0]}/86400",
+        headers={"Accept": "application/xml"}, timeout=TIMEOUT)
+    assert missing.status_code == 404

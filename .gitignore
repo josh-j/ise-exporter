@@ -8,3 +8,5 @@ certs/
 dist/
 test-results/
 docs/
+# An agent's local memory index, not project content.
+.mem-vocab/
