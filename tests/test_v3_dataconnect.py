@@ -25,8 +25,10 @@ from ise_exporter3.transports.dataconnect import (
     MAX_CRASH_LEASE_SECONDS,
     MAX_STATEMENT_TIMEOUT_PERIODS,
     MIN_QUERY_INTERVAL_SECONDS,
+    REPLACEMENT_CHARACTER,
     SCHEMA_COLUMN_CONTRACTS,
     DataConnectTransport,
+    _lenient_characters,
     classify_oracle_error,
     publish_schema_contract,
     view_of,
@@ -193,6 +195,8 @@ class _StubCursor:
         self._connection = connection
         self.description = None
         self._rows = []
+        self.outputtypehandler = None
+        self.arraysize = 100
 
     def __enter__(self):
         return self
@@ -202,21 +206,26 @@ class _StubCursor:
 
     def execute(self, sql, parameters=None):
         self._connection.statements.append(sql)
+        self._connection.handlers.append(self.outputtypehandler)
         if str(sql).upper().startswith("ALTER SESSION"):
             return
         self.description = [_StubColumn(name) for name in self._connection.columns]
         self._rows = list(self._connection.rows)
 
     def fetchmany(self, size):
+        if self._connection.fetch_error is not None:
+            raise self._connection.fetch_error
         batch, self._rows = self._rows[:size], self._rows[size:]
         return batch
 
 
 class _StubConnection:
-    def __init__(self, columns=(), rows=()):
+    def __init__(self, columns=(), rows=(), fetch_error=None):
         self.columns = columns
         self.rows = rows
         self.statements = []
+        self.handlers = []
+        self.fetch_error = fetch_error
         self.call_timeout = 0
 
     def cursor(self):
@@ -236,6 +245,105 @@ def test_the_session_precondition_is_issued_once_under_the_statement_deadline(
     assert connection.statements[0] == "ALTER SESSION DISABLE PARALLEL QUERY"
     transport._execute("SELECT x FROM user_views", None, "schema_metadata")
     assert connection.statements.count("ALTER SESSION DISABLE PARALLEL QUERY") == 1
+
+
+# --- one undecodable byte must not cost the whole result ---------------------
+
+class _StubVar:
+    def __init__(self, **kwargs):
+        self.kwargs = kwargs
+
+
+def _fetch_metadata(type_code, internal_size=0):
+    return SimpleNamespace(type_code=type_code, internal_size=internal_size)
+
+
+@pytest.mark.parametrize("type_code", [
+    oracledb.DB_TYPE_VARCHAR, oracledb.DB_TYPE_NVARCHAR,
+    oracledb.DB_TYPE_CHAR, oracledb.DB_TYPE_NCHAR,
+])
+def test_character_columns_are_fetched_with_a_lenient_decode(type_code):
+    # Thin-mode python-oracledb has no encoding setting at all: NLS is ignored
+    # and the connect-time parameter is desupported. Per-column encoding_errors
+    # is the only lever, so this asserts it is actually pulled.
+    cursor = SimpleNamespace(arraysize=100, var=lambda typ, **kwargs: _StubVar(
+        typ=typ, **kwargs))
+    var = _lenient_characters(cursor, _fetch_metadata(type_code, 4000))
+    assert var.kwargs["encoding_errors"] == "replace"
+    assert var.kwargs["typ"] is type_code
+
+
+def test_a_lenient_character_column_keeps_room_for_the_whole_value():
+    # size=0 would leave the driver's default, which is shorter than an extended
+    # VARCHAR2: relaxing the decode must not start truncating instead.
+    cursor = SimpleNamespace(arraysize=100, var=lambda typ, **kwargs: _StubVar(
+        typ=typ, **kwargs))
+    var = _lenient_characters(
+        cursor, _fetch_metadata(oracledb.DB_TYPE_VARCHAR, 32767))
+    assert var.kwargs["size"] == 32767
+
+
+@pytest.mark.parametrize("type_code", [
+    oracledb.DB_TYPE_NUMBER, oracledb.DB_TYPE_DATE, oracledb.DB_TYPE_CLOB,
+])
+def test_non_character_columns_keep_the_drivers_own_handling(type_code):
+    cursor = SimpleNamespace(arraysize=100, var=lambda *_a, **_k: _StubVar())
+    assert _lenient_characters(cursor, _fetch_metadata(type_code)) is None
+
+
+def test_the_statement_installs_the_lenient_handler_before_it_executes(transport):
+    # The session precondition ahead of it returns no rows, so only the
+    # statement that fetches has to carry the handler -- but it must carry it
+    # before execute(), because that is when the driver asks for the types.
+    connection = _StubConnection(columns=("X",), rows=[("ok",)])
+    transport._connection = connection
+    transport._execute("SELECT x FROM user_views", None, "schema_metadata")
+    assert connection.statements[-1] == "SELECT x FROM user_views"
+    assert connection.handlers[-1] is _lenient_characters
+
+
+def test_a_replaced_byte_is_counted_rather_than_silently_returned(transport):
+    # The repaired value is still served -- one bad byte in one endpoint cannot
+    # be allowed to deny every other row -- but a mangled value that nothing
+    # counts is indistinguishable from what ISE really stores.
+    before = REGISTRY.get_sample_value(
+        "ise3_dataconnect_replaced_characters_total",
+        {"view": "endpoints_data"}) or 0.0
+    transport._connection = _StubConnection(
+        columns=("DESCRIPTION",),
+        rows=[(f"branch{REPLACEMENT_CHARACTER}office",), ("clean",)])
+    rows = transport._execute("SELECT description FROM x", None, "endpoints_data")
+    assert [row["description"] for row in rows] == [
+        f"branch{REPLACEMENT_CHARACTER}office", "clean"]
+    after = REGISTRY.get_sample_value(
+        "ise3_dataconnect_replaced_characters_total", {"view": "endpoints_data"})
+    assert after == before + 1
+
+
+def test_an_undecodable_value_names_the_appliance_not_the_codec(transport):
+    # A LOB has no per-column decode setting, so this path survives. What must
+    # not survive is the bare codec message: it sends an operator hunting for a
+    # bug in the exporter when the bytes are sitting in the ISE database.
+    failure = UnicodeDecodeError("utf-8", b"\xb6", 0, 1, "invalid start byte")
+    transport._connection = _StubConnection(
+        columns=("NOTE",), rows=[("x",)], fetch_error=failure)
+    with pytest.raises(TransportError) as caught:
+        transport._execute("SELECT note FROM x", None, "endpoints_data")
+    assert caught.value.reason == "invalid_response"
+    assert "endpoints_data" in caught.value.detail
+    assert "character set cannot describe" in caught.value.detail
+
+
+def test_an_undecodable_value_is_not_retried_as_a_dropped_session(transport):
+    # Reconnecting cannot change what the database holds; retrying would spend a
+    # second statement's duty on the same certain failure.
+    failure = UnicodeDecodeError("utf-8", b"\xb6", 0, 1, "invalid start byte")
+    connection = _StubConnection(
+        columns=("NOTE",), rows=[("x",)], fetch_error=failure)
+    transport._connection = connection
+    with pytest.raises(TransportError):
+        transport._execute("SELECT note FROM x", None, "endpoints_data")
+    assert connection.statements.count("SELECT note FROM x") == 1
 
 
 def test_a_catalog_read_does_not_erase_another_processs_cooldown(transport):

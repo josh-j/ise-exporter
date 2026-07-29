@@ -251,6 +251,49 @@ def classify_oracle_error(error):
     return "invalid_response"
 
 
+# The four character types the reporting views project. Thin-mode
+# python-oracledb decodes every one of them as UTF-8 with no way to configure
+# the codec -- NLS is ignored and the `encoding` parameter is desupported -- so
+# the only lever left is the per-column one below.
+_CHARACTER_TYPES = frozenset({
+    oracledb.DB_TYPE_VARCHAR, oracledb.DB_TYPE_NVARCHAR,
+    oracledb.DB_TYPE_CHAR, oracledb.DB_TYPE_NCHAR,
+})
+REPLACEMENT_CHARACTER = "�"
+
+
+def _lenient_characters(cursor, metadata):
+    """Fetch character columns with undecodable bytes replaced, not fatal.
+
+    ISE stores what the network supplied it: a NAD description typed in cp1252,
+    a username carried through a pass-through insert, a profiling attribute
+    copied verbatim off the wire. Any of those can leave bytes in a VARCHAR2
+    that the database's character set cannot describe, and the database returns
+    them unchanged. Strict decoding then makes one bad byte in one row cost the
+    entire result -- a whole view unreadable, and a dataset permanently down,
+    because of a single endpoint.
+
+    A monitoring read has to be able to report the other rows. The byte becomes
+    U+FFFD and the field is counted, so the value is visibly damaged rather than
+    quietly wrong, and the count says how much of the answer to distrust.
+    """
+    if metadata.type_code not in _CHARACTER_TYPES:
+        # Every other type -- numbers, dates, LOBs -- keeps the driver's own
+        # handling. Only character data has a decode step to relax.
+        return None
+    return cursor.var(
+        metadata.type_code,
+        size=max(metadata.internal_size or 0, metadata.type_code.default_size),
+        arraysize=cursor.arraysize,
+        encoding_errors="replace")
+
+
+def _replaced_fields(row):
+    """How many fields of one row carry a byte the database could not describe."""
+    return sum(1 for value in row.values()
+               if isinstance(value, str) and REPLACEMENT_CHARACTER in value)
+
+
 def _materialize(value, limits, *, depth=0):
     """Convert one Oracle field without expanding an unbounded nested value."""
     if depth > limits.field_nesting_depth:
@@ -732,9 +775,10 @@ class DataConnectTransport(Transport):
                 with connection.cursor() as cursor:
                     self._prepare_session(connection, cursor, deadline)
                     self._apply_timeout(connection, deadline)
+                    cursor.outputtypehandler = _lenient_characters
                     cursor.execute(sql, parameters or {})
                     columns = [column.name.lower() for column in cursor.description]
-                    rows, retained = [], 0
+                    rows, retained, replaced = [], 0, 0
                     while True:
                         self._apply_timeout(connection, deadline)
                         batch = cursor.fetchmany(FETCH_BATCH_ROWS)
@@ -745,7 +789,15 @@ class DataConnectTransport(Transport):
                             row = dict(zip(columns, (
                                 _materialize(value, self.limits) for value in raw)))
                             retained += _size_of(row, self.limits)
+                            replaced += _replaced_fields(row)
                             rows.append(row)
+                if replaced:
+                    telemetry.dataconnect_replaced_characters_total.labels(
+                        view=view).inc(replaced)
+                    logger.warning(
+                        "%s returned %d field(s) holding bytes this database's "
+                        "character set cannot describe; they were read with the "
+                        "undecodable bytes replaced", view, replaced)
                 if self._batch_active:
                     self._batch_rows += len(rows)
                     self._batch_bytes += retained
@@ -754,6 +806,18 @@ class DataConnectTransport(Transport):
             except TransportError:
                 self.close()
                 raise
+            except UnicodeDecodeError as error:
+                # Character columns are read leniently above, so reaching here
+                # means a type that has no per-column decode setting -- a LOB, or
+                # a LONG. Reconnecting cannot help: the bytes are what the
+                # database holds. Say that, because the bare codec message sends
+                # an operator looking for a fault in the exporter.
+                self.close()
+                raise TransportError(
+                    "invalid_response",
+                    f"{view} holds a value this database's character set cannot "
+                    f"describe, so it could not be read ({error}); the bytes are "
+                    "in ISE, not in this statement") from error
             except Exception as error:
                 self.close()
                 # ISE expires healthy sessions on a fixed lifetime, so one

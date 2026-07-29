@@ -173,6 +173,15 @@ dataconnect_query_cooldown_seconds = Gauge(
 dataconnect_effective_duty_cycle_percent = Gauge(
     "ise3_dataconnect_effective_duty_cycle_percent",
     "Duty cycle the running process is enforcing, from the oracle budget")
+# Repairing an undecodable byte silently would make a mangled value
+# indistinguishable from the one ISE actually stores, so the repair is counted
+# where the row was read. A non-zero rate here is a fact about the appliance's
+# data, not about the exporter: something wrote bytes into a character column
+# that the database's own character set cannot describe.
+dataconnect_replaced_characters_total = Counter(
+    "ise3_dataconnect_replaced_characters_total",
+    "Character fields returned with an undecodable byte replaced by U+FFFD",
+    ["view"])
 # Ad-hoc operator statements charge the same duty cycle as a scheduled
 # collection, so an unexplained cooldown on the reporting datasets has to be
 # attributable to the person who spent it. The per-view families above already
