@@ -302,6 +302,24 @@ ise> Invoke-IseDcQuery -View radius_errors_view -Last 4h `
 ise> Invoke-IseDcQuery -View endpoints_data -First 1 -All   # every column
 ```
 
+Two cmdlets answer the questions the web UI answers, in the shape it answers
+them — same columns, same order, same newest-first ordering, so the table is
+recognisable without reading the help:
+
+```powershell
+ise> Get-IseRadiusLiveLog -Last 1h                  # Operations > RADIUS > Live Logs
+ise> Get-IseRadiusLiveLog -Status Fail -Last 4h | Group-Object failure_reason
+ise> Get-IseContextVisibility -Profile 'Cisco-IP-Phone*' -First 500
+ise> Get-IseContextVisibility -Last 1h -WithLastAuth   # + the Authentication tab
+```
+
+They are ordinary Data Connect reads on the same paced transport, so they cost
+what any other query costs — and `-WithLastAuth` costs twice, because attaching
+each endpoint's most recent authentication is a second statement against a
+second view. Neither refreshes on a timer: polling on the UI's cadence would
+spend the whole Oracle duty cycle on one terminal and starve the scheduled
+datasets sharing it.
+
 Filters, projections, ordering and row limits are applied server-side through
 bind variables against the discovered catalog — the shell never sends SQL. A
 query returns the whole row; what the default table shows is a curated handful

@@ -385,5 +385,73 @@
         </TableRowEntries>
       </TableControl>
     </View>
+    <!-- The two screen replicas. Column order is the UI's column order, because
+         recognising the table is the whole point of the cmdlet; these are the
+         only views in this file not free to choose their own.
+
+         The UI's full column set does not fit a terminal (Live Logs alone
+         offers seventeen), so these carry the triage columns and stop at the
+         120 the rest of this file keeps to. Endpoint profile, authorization
+         profiles, posture, policy set and the rest are still on every row, one
+         Format-List * away. -->
+    <View>
+      <Name>IseDcRadiusLiveLog</Name>
+      <ViewSelectedBy><TypeName>Ise.Dc.RadiusLiveLog</TypeName></ViewSelectedBy>
+      <TableControl>
+        <TableHeaders>
+          <TableColumnHeader><Label>Time</Label><Width>20</Width></TableColumnHeader>
+          <TableColumnHeader><Label>Status</Label><Width>6</Width></TableColumnHeader>
+          <TableColumnHeader><Label>Identity</Label><Width>16</Width></TableColumnHeader>
+          <TableColumnHeader><Label>Endpoint</Label><Width>18</Width></TableColumnHeader>
+          <TableColumnHeader><Label>Nad</Label><Width>15</Width></TableColumnHeader>
+          <TableColumnHeader><Label>Server</Label><Width>13</Width></TableColumnHeader>
+          <TableColumnHeader><Label>FailureReason</Label></TableColumnHeader>
+        </TableHeaders>
+        <TableRowEntries>
+          <TableRowEntry>
+            <TableColumnItems>
+              <TableColumnItem><PropertyName>timestamp</PropertyName></TableColumnItem>
+              <TableColumnItem><PropertyName>status</PropertyName></TableColumnItem>
+              <TableColumnItem><PropertyName>username</PropertyName></TableColumnItem>
+              <TableColumnItem><PropertyName>calling_station_id</PropertyName></TableColumnItem>
+              <TableColumnItem><PropertyName>device_name</PropertyName></TableColumnItem>
+              <TableColumnItem><PropertyName>ise_node</PropertyName></TableColumnItem>
+              <TableColumnItem><PropertyName>failure_reason</PropertyName></TableColumnItem>
+            </TableColumnItems>
+          </TableRowEntry>
+        </TableRowEntries>
+      </TableControl>
+    </View>
+
+    <View>
+      <Name>IseDcContextVisibility</Name>
+      <ViewSelectedBy><TypeName>Ise.Dc.ContextVisibility</TypeName></ViewSelectedBy>
+      <TableControl>
+        <TableHeaders>
+          <TableColumnHeader><Label>Mac</Label><Width>18</Width></TableColumnHeader>
+          <TableColumnHeader><Label>Ip</Label><Width>15</Width></TableColumnHeader>
+          <TableColumnHeader><Label>Hostname</Label><Width>16</Width></TableColumnHeader>
+          <TableColumnHeader><Label>Profile</Label><Width>18</Width></TableColumnHeader>
+          <TableColumnHeader><Label>Identity</Label><Width>14</Width></TableColumnHeader>
+          <TableColumnHeader><Label>Nad</Label><Width>14</Width></TableColumnHeader>
+          <TableColumnHeader><Label>Updated</Label></TableColumnHeader>
+        </TableHeaders>
+        <TableRowEntries>
+          <TableRowEntry>
+            <TableColumnItems>
+              <TableColumnItem><PropertyName>mac_address</PropertyName></TableColumnItem>
+              <TableColumnItem><PropertyName>endpoint_ip</PropertyName></TableColumnItem>
+              <TableColumnItem><PropertyName>hostname</PropertyName></TableColumnItem>
+              <TableColumnItem><PropertyName>endpoint_policy</PropertyName></TableColumnItem>
+              <!-- Blank without -WithLastAuth: ENDPOINTS_DATA has no
+                   authenticated user, and an empty column says so. -->
+              <TableColumnItem><PropertyName>auth_identity</PropertyName></TableColumnItem>
+              <TableColumnItem><PropertyName>auth_nad</PropertyName></TableColumnItem>
+              <TableColumnItem><PropertyName>update_time</PropertyName></TableColumnItem>
+            </TableColumnItems>
+          </TableRowEntry>
+        </TableRowEntries>
+      </TableControl>
+    </View>
   </ViewDefinitions>
 </Configuration>

@@ -17,7 +17,9 @@
         'Get-IseDcRadiusAuth', 'Get-IseDcRadiusAccounting', 'Get-IseDcRadiusError',
         'Get-IseDcEndpoint', 'Get-IseDcTacacsAuth', 'Get-IseDcTacacsCommand',
         'Get-IseDcTacacsAuthorization', 'Get-IseDcPosture', 'Get-IseDcNodeHealth',
-        'Get-IseDcNodePerformance'
+        'Get-IseDcNodePerformance',
+        # Replicas of the two screens operators actually live in.
+        'Get-IseRadiusLiveLog', 'Get-IseContextVisibility'
     )
     CmdletsToExport   = @()
     VariablesToExport = @()

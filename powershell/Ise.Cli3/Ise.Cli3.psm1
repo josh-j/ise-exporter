@@ -1077,6 +1077,267 @@ function Get-IseDcNodePerformance {
         -Bound $PSBoundParameters
 }
 
+# --- screen replicas ---------------------------------------------------------
+#
+# Two cmdlets that answer the questions the ISE web UI answers, in the shape the
+# UI answers them. They are ordinary Data Connect reads -- same paced transport,
+# same duty cycle, same ceilings -- so what makes them replicas is the column
+# set and the ordering, not a different data path. Whoever knows the screen
+# should recognise the table without reading the help.
+#
+# Neither refreshes on a timer. The UI does; this deliberately does not, because
+# a poll loop against a duty-cycled Oracle account spends the whole reporting
+# budget for as long as it is left running, and the datasets that share it would
+# go stale to feed a screen nobody is watching.
+
+function ConvertTo-IseMacKey {
+    <#
+    .SYNOPSIS
+    A MAC reduced to the only part every ISE column spells the same way.
+    #>
+    param([string]$Value)
+
+    # ENDPOINTS_DATA writes AA:BB:CC:11:22:33; CALLING_STATION_ID carries
+    # whatever the NAD sent, which is that, or AA-BB-CC-11-22-33, or
+    # aabb.cc11.2233, sometimes with a suffix. Joining on the raw strings drops
+    # rows for no reason an operator could see, so both sides reduce to hex.
+    if ([string]::IsNullOrWhiteSpace($Value)) { return '' }
+    ($Value -replace '[^0-9A-Fa-f]', '').ToUpperInvariant()
+}
+
+function Get-IseRadiusLiveLog {
+    <#
+    .SYNOPSIS
+    RADIUS Live Logs: authentication attempts newest-first, as the UI lists them.
+    .DESCRIPTION
+    The Operations > RADIUS > Live Logs table, from RADIUS_AUTHENTICATIONS. Same
+    columns in the same order -- time, status, identity, endpoint, endpoint
+    profile, authorization profiles, network device, server, failure reason --
+    and the same newest-first ordering, which is the whole point of the screen.
+
+    Status is derived, not stored: this view carries the FAILED flag rather than
+    a status string, so `status` is the word for that flag and `failed` is still
+    on the row for anything that would rather test the number.
+
+    It is a snapshot, not a feed. There is no auto-refresh, because refreshing
+    on the UI's cadence would spend the entire Oracle duty cycle on one terminal
+    and starve every scheduled dataset sharing it. Run it again when you want a
+    newer answer; -Wait sits out the cooldown if one is owed.
+    .PARAMETER Identity
+    The user's claimed identity (USERNAME); wildcards accepted.
+    .PARAMETER Endpoint
+    Endpoint ID -- the MAC as the NAD sent it (CALLING_STATION_ID); wildcards
+    accepted.
+    .PARAMETER Nad
+    Network device name; wildcards accepted.
+    .PARAMETER Node
+    The ISE node that served the request (the UI's Server column); wildcards
+    accepted.
+    .PARAMETER Status
+    Pass, Fail, or All. Defaults to All, as the screen does.
+    .PARAMETER AuthzProfile
+    Authorization profile the result carried; wildcards accepted.
+    .PARAMETER FailureReason
+    Failure reason text; wildcards accepted. Implies -Status Fail.
+    .EXAMPLE
+    Get-IseRadiusLiveLog -Last 1h
+    .EXAMPLE
+    Get-IseRadiusLiveLog -Status Fail -Last 4h | Group-Object failure_reason
+    .EXAMPLE
+    Get-IseRadiusLiveLog -Nad 'core-*' -Last 30m -First 200
+    #>
+    [CmdletBinding()]
+    param(
+        [string]$Identity,
+        [string]$Endpoint,
+        [string]$Nad,
+        [string]$Node,
+        [ValidateSet('All', 'Pass', 'Fail')][string]$Status = 'All',
+        [string]$AuthzProfile,
+        [string]$FailureReason,
+        [string]$Last,
+        [int]$First,
+        [string[]]$Column,
+        [switch]$All,
+        [switch]$Wait,
+        [switch]$Force
+    )
+
+    $view = 'radius_authentications'
+    $filter = @{}
+    $match = @{}
+    if ($Identity) {
+        Add-IseDcTerm $filter $match (Resolve-IseDcColumn $view 'USERNAME', 'USER_NAME') $Identity
+    }
+    if ($Endpoint) {
+        Add-IseDcTerm $filter $match (
+            Resolve-IseDcColumn $view 'CALLING_STATION_ID', 'MAC_ADDRESS') $Endpoint
+    }
+    if ($Nad) { Add-IseDcTerm $filter $match 'DEVICE_NAME' $Nad }
+    if ($Node) { Add-IseDcTerm $filter $match 'ISE_NODE' $Node }
+    if ($AuthzProfile) { Add-IseDcTerm $filter $match 'AUTHORIZATION_PROFILES' $AuthzProfile }
+    if ($FailureReason) {
+        Add-IseDcTerm $filter $match 'FAILURE_REASON' $FailureReason
+        # A failure reason only exists on a failure; saying so server-side saves
+        # scanning the passes to discard them.
+        $Status = 'Fail'
+    }
+    if ($Status -eq 'Fail') { $filter['FAILED'] = '1' }
+    if ($Status -eq 'Pass') { $filter['FAILED'] = '0' }
+
+    $arguments = @{ View = $view }
+    if ($filter.Count) { $arguments['Filter'] = $filter }
+    if ($match.Count) { $arguments['Match'] = $match }
+    foreach ($name in @('Last', 'First', 'Column', 'All', 'Wait', 'Force')) {
+        if ($PSBoundParameters.ContainsKey($name)) { $arguments[$name] = $PSBoundParameters[$name] }
+    }
+    # Newest first is what makes it a log rather than a query result. Ordered
+    # server-side so the row cap keeps the newest rows, not an arbitrary page.
+    $arguments['OrderBy'] = Resolve-IseDcColumn $view 'TIMESTAMP', 'TIMESTAMP_TIMEZONE'
+    $arguments['Descending'] = $true
+
+    foreach ($row in @(Invoke-IseDcQuery @arguments)) {
+        if ($null -eq $row) { continue }
+        # Null rather than a guess when the projection left FAILED out: an
+        # unknown status must not read as a pass.
+        $state = $null
+        if ($null -ne $row.failed) {
+            $state = if ([int]$row.failed -ne 0) { 'Fail' } else { 'Pass' }
+        }
+        Add-Member -InputObject $row -Force -NotePropertyName 'status' -NotePropertyValue $state
+        # -All asked for the untyped row on purpose; re-typing it here would put
+        # a format table back and undo exactly what was asked for.
+        if (-not $All) { $row.PSObject.TypeNames.Insert(0, 'Ise.Dc.RadiusLiveLog') }
+        $row
+    }
+}
+
+function Get-IseContextVisibility {
+    <#
+    .SYNOPSIS
+    Context Visibility: the endpoint database as the Endpoints screen shows it.
+    .DESCRIPTION
+    The Context Visibility > Endpoints table, from ENDPOINTS_DATA: MAC, IP,
+    hostname, endpoint profile, identity group, registration and static
+    assignment, and when the row last changed.
+
+    Current state, not history -- without -Last it returns the whole database up
+    to -First, which on a real deployment is tens of thousands of rows, so -First
+    matters here more than anywhere else. With -Last it narrows to endpoints
+    whose row changed inside the window.
+
+    -WithLastAuth adds the screen's Authentication tab: identity, network
+    device, authorization profiles, method, posture and serving node, taken from
+    each endpoint's most recent RADIUS authentication. That is a second
+    statement against a second view, so it charges the duty cycle twice, and it
+    only reaches endpoints that authenticated inside the auth window -- anything
+    quieter than that comes back with those fields empty rather than wrong.
+    Without it the identity columns stay blank, because ENDPOINTS_DATA does not
+    carry the authenticated user; only the portal one.
+    .PARAMETER Mac
+    MAC address; wildcards accepted.
+    .PARAMETER Ip
+    Endpoint IP address; wildcards accepted.
+    .PARAMETER Hostname
+    Endpoint hostname; wildcards accepted.
+    .PARAMETER Profile
+    Endpoint policy -- the profile ISE matched; wildcards accepted.
+    .PARAMETER User
+    Portal user recorded on the endpoint; wildcards accepted.
+    .PARAMETER Last
+    Only endpoints whose row changed inside this window: 30m, 2h, 1d.
+    .PARAMETER WithLastAuth
+    Attach each endpoint's most recent authentication. Costs a second statement.
+    .PARAMETER AuthLast
+    Window for the authentication lookup -WithLastAuth performs. Defaults to 1d.
+    .EXAMPLE
+    Get-IseContextVisibility -Profile 'Cisco-IP-Phone*' -First 500
+    .EXAMPLE
+    Get-IseContextVisibility -Last 1h -WithLastAuth
+    .EXAMPLE
+    Get-IseContextVisibility -Mac 'AA:BB:CC:*' -WithLastAuth | Format-List *
+    #>
+    [CmdletBinding()]
+    param(
+        [string]$Mac,
+        [string]$Ip,
+        [string]$Hostname,
+        [string]$Profile,
+        [string]$User,
+        [switch]$WithLastAuth,
+        [string]$AuthLast = '1d',
+        [string]$Last,
+        [int]$First,
+        [string[]]$Column,
+        [switch]$All,
+        [switch]$Wait,
+        [switch]$Force
+    )
+
+    $view = 'endpoints_data'
+    $filter = @{}
+    $match = @{}
+    if ($Mac) { Add-IseDcTerm $filter $match 'MAC_ADDRESS' $Mac }
+    if ($Ip) { Add-IseDcTerm $filter $match 'ENDPOINT_IP' $Ip }
+    if ($Hostname) { Add-IseDcTerm $filter $match 'HOSTNAME' $Hostname }
+    if ($Profile) { Add-IseDcTerm $filter $match 'ENDPOINT_POLICY' $Profile }
+    if ($User) { Add-IseDcTerm $filter $match 'PORTAL_USER' $User }
+
+    $endpoints = @(Invoke-IseDcTypedQuery -View $view -Filter $filter -Match $match `
+        -Bound $PSBoundParameters)
+
+    # One statement for the authentications, not one per endpoint: the query API
+    # binds a single value per column, so N endpoints would be N statements and
+    # N cooldowns. Newest-first over the window, keep the first sighting of each
+    # MAC, and join in memory.
+    $lastAuth = @{}
+    if ($WithLastAuth -and $endpoints.Count) {
+        $authArguments = @{
+            View = 'radius_authentications'; Last = $AuthLast
+            OrderBy = Resolve-IseDcColumn 'radius_authentications' 'TIMESTAMP'
+            Descending = $true
+        }
+        foreach ($name in @('First', 'Wait', 'Force')) {
+            if ($PSBoundParameters.ContainsKey($name)) {
+                $authArguments[$name] = $PSBoundParameters[$name]
+            }
+        }
+        foreach ($auth in @(Invoke-IseDcQuery @authArguments)) {
+            if ($null -eq $auth) { continue }
+            $key = ConvertTo-IseMacKey $auth.calling_station_id
+            # Newest first, so the first row seen for a MAC is its latest and
+            # every later one is history this screen does not show.
+            if ($key -and -not $lastAuth.ContainsKey($key)) { $lastAuth[$key] = $auth }
+        }
+    }
+
+    foreach ($row in $endpoints) {
+        if ($null -eq $row) { continue }
+        if ($WithLastAuth) {
+            $auth = $lastAuth[(ConvertTo-IseMacKey $row.mac_address)]
+            # Written even when nothing matched: a column that exists and is
+            # empty says "this endpoint did not authenticate in the window",
+            # while a missing property says nothing at all.
+            Add-Member -InputObject $row -Force -NotePropertyName 'auth_time' `
+                -NotePropertyValue $auth.timestamp
+            Add-Member -InputObject $row -Force -NotePropertyName 'auth_identity' `
+                -NotePropertyValue $auth.username
+            Add-Member -InputObject $row -Force -NotePropertyName 'auth_nad' `
+                -NotePropertyValue $auth.device_name
+            Add-Member -InputObject $row -Force -NotePropertyName 'auth_profiles' `
+                -NotePropertyValue $auth.authorization_profiles
+            Add-Member -InputObject $row -Force -NotePropertyName 'auth_method' `
+                -NotePropertyValue $auth.authentication_method
+            Add-Member -InputObject $row -Force -NotePropertyName 'auth_posture' `
+                -NotePropertyValue $auth.posture_status
+            Add-Member -InputObject $row -Force -NotePropertyName 'auth_node' `
+                -NotePropertyValue $auth.ise_node
+        }
+        if (-not $All) { $row.PSObject.TypeNames.Insert(0, 'Ise.Dc.ContextVisibility') }
+        $row
+    }
+}
+
 # Completion reads the cached descriptors, so it costs nothing and stays silent
 # when the exporter is not up: a shell that cannot complete is an inconvenience,
 # one that throws on every Tab is unusable.
@@ -1125,5 +1386,6 @@ Export-ModuleMember -Function @(
     'Get-IseDcRadiusAuth', 'Get-IseDcRadiusAccounting', 'Get-IseDcRadiusError',
     'Get-IseDcEndpoint', 'Get-IseDcTacacsAuth', 'Get-IseDcTacacsCommand',
     'Get-IseDcTacacsAuthorization', 'Get-IseDcPosture', 'Get-IseDcNodeHealth',
-    'Get-IseDcNodePerformance'
+    'Get-IseDcNodePerformance',
+    'Get-IseRadiusLiveLog', 'Get-IseContextVisibility'
 )

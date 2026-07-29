@@ -54,8 +54,9 @@ $views = @(
         description = 'one row per RADIUS authentication event'
         time_column = 'TIMESTAMP'; time_kind = 'timestamp'
         default_columns = @('TIMESTAMP', 'USERNAME', 'CALLING_STATION_ID', 'DEVICE_NAME', 'FAILED')
-        columns = @('AUTHENTICATION_METHOD', 'CALLING_STATION_ID', 'DEVICE_NAME', 'FAILED',
-                    'FAILURE_REASON', 'ISE_NODE', 'RESPONSE_TIME', 'TIMESTAMP', 'USERNAME')
+        columns = @('AUTHENTICATION_METHOD', 'AUTHORIZATION_PROFILES', 'CALLING_STATION_ID',
+                    'DEVICE_NAME', 'ENDPOINT_PROFILE', 'FAILED', 'FAILURE_REASON', 'ISE_NODE',
+                    'POSTURE_STATUS', 'RESPONSE_TIME', 'TIMESTAMP', 'USERNAME')
         available = $true
     },
     @{
@@ -72,8 +73,8 @@ $views = @(
         description = 'the endpoint database, current state'
         time_column = $null; time_kind = $null
         default_columns = @('MAC_ADDRESS', 'ENDPOINT_POLICY', 'UPDATE_TIME')
-        columns = @('ENDPOINT_POLICY', 'IDENTITY_GROUP_ID', 'MAC_ADDRESS',
-                    'POSTURE_APPLICABLE', 'UPDATE_TIME')
+        columns = @('ENDPOINT_IP', 'ENDPOINT_POLICY', 'HOSTNAME', 'IDENTITY_GROUP_ID',
+                    'MAC_ADDRESS', 'PORTAL_USER', 'POSTURE_APPLICABLE', 'UPDATE_TIME')
         available = $true
     },
     @{
@@ -104,10 +105,16 @@ $rows = @{
     radius_authentications = @(
         @{ timestamp = '2026-07-27 19:48:01'; username = 'jdoe'
            calling_station_id = 'AA:BB:CC:11:22:33'; device_name = 'core-1'
-           failed = 1; failure_reason = '22056 Subject not found' },
+           failed = 1; failure_reason = '22056 Subject not found'
+           ise_node = 'laba-psn-01'; endpoint_profile = 'Cisco-IP-Phone'
+           authorization_profiles = $null; authentication_method = 'dot1x'
+           posture_status = $null },
         @{ timestamp = '2026-07-27 19:47:55'; username = 'asmith'
            calling_station_id = 'AA:BB:CC:44:55:66'; device_name = 'core-2'
-           failed = 0; failure_reason = $null }
+           failed = 0; failure_reason = $null
+           ise_node = 'laba-psn-02'; endpoint_profile = 'Workstation'
+           authorization_profiles = 'PermitAccess'; authentication_method = 'dot1x'
+           posture_status = 'Compliant' }
     )
     radius_accounting = @(
         @{ timestamp = '2026-07-27 19:40:00'; user_name = 'jdoe'
@@ -115,7 +122,17 @@ $rows = @{
     )
     endpoints_data = @(
         @{ mac_address = 'AA:BB:CC:11:22:33'; endpoint_policy = 'Cisco-IP-Phone'
-           update_time = '2026-07-26 07:19:00' }
+           update_time = '2026-07-26 07:19:00'; endpoint_ip = '10.10.1.51'
+           hostname = 'phone-51' },
+        # Dotted-quad spelling on purpose: the same endpoint ISE writes as
+        # AA:BB:CC:44:55:66 in CALLING_STATION_ID, so the join has to normalise.
+        @{ mac_address = 'AABB.CC44.5566'; endpoint_policy = 'Workstation'
+           update_time = '2026-07-26 07:20:00'; endpoint_ip = '10.10.1.52'
+           hostname = 'ws-52' },
+        # Nothing authenticated this one inside the window.
+        @{ mac_address = 'AA:BB:CC:99:99:99'; endpoint_policy = 'Unknown'
+           update_time = '2026-07-20 01:00:00'; endpoint_ip = $null
+           hostname = $null }
     )
 }
 
@@ -304,7 +321,7 @@ try {
     Assert-Equal '-Refresh re-fetches' ($before + 1) $listenerState.Requests.Count
 
     $columns = @(Get-IseDcColumn -View radius_authentications)
-    Assert-Equal 'Get-IseDcColumn lists the catalogue' 9 $columns.Count
+    Assert-Equal 'Get-IseDcColumn lists the catalogue' 12 $columns.Count
     Assert-Equal 'columns are typed' 'Ise.Dc.Column' $columns[0].PSObject.TypeNames[0]
     Assert-That 'columns say which are default' (
         (@($columns | Where-Object { $_.Default }).Count) -eq 5)
@@ -473,6 +490,82 @@ try {
     ) $listenerState.Requests[-1]
 
     Write-Host ''
+    Write-Host 'screen replicas' -ForegroundColor Cyan
+
+    $live = @(Get-IseRadiusLiveLog -Last 1h)
+    Assert-Equal 'live logs order newest-first server-side' (
+        '/api/v1/dataconnect/query?desc=1&last=1h&order=TIMESTAMP' +
+        '&view=radius_authentications'
+    ) $listenerState.Requests[-1]
+    Assert-Equal 'live log rows are typed for the live-log table' `
+        'Ise.Dc.RadiusLiveLog' $live[0].PSObject.TypeNames[0]
+    Assert-Equal 'the FAILED flag becomes the screen word' 'Fail' $live[0].status
+    Assert-Equal 'and a pass says so' 'Pass' $live[1].status
+    Assert-Equal 'the underlying flag survives for anything that wants a number' `
+        1 $live[0].failed
+
+    $null = Get-IseRadiusLiveLog -Status Fail -Last 2h
+    Assert-Like '-Status Fail binds FAILED=1' '*eq=FAILED%3A1*' $listenerState.Requests[-1]
+    $null = Get-IseRadiusLiveLog -Status Pass -Last 2h
+    Assert-Like '-Status Pass binds FAILED=0' '*eq=FAILED%3A0*' $listenerState.Requests[-1]
+
+    $null = Get-IseRadiusLiveLog -Identity 'jdoe' -Endpoint 'AA:BB:*' -Nad 'core-*' `
+        -Node 'laba-psn-01' -Last 30m
+    Assert-Equal 'the live-log filters map onto the documented query string' (
+        '/api/v1/dataconnect/query?desc=1&eq=ISE_NODE%3Alaba-psn-01&eq=USERNAME%3Ajdoe' +
+        '&last=30m&like=CALLING_STATION_ID%3AAA%3ABB%3A%2A&like=DEVICE_NAME%3Acore-%2A' +
+        '&order=TIMESTAMP&view=radius_authentications'
+    ) $listenerState.Requests[-1]
+
+    # A failure reason cannot appear on a pass, so asking for one is asking for
+    # failures; saying that server-side is cheaper than filtering the rows back.
+    $null = Get-IseRadiusLiveLog -FailureReason '22056*' -Last 1h
+    Assert-Like '-FailureReason implies failures' '*eq=FAILED%3A1*' $listenerState.Requests[-1]
+
+    $wideLive = @(Get-IseRadiusLiveLog -Last 1h -All)
+    Assert-Equal '-All still declines the replica table' `
+        'Ise.Dc.Row' $wideLive[0].PSObject.TypeNames[0]
+    Assert-Equal '-All keeps the derived status' 'Fail' $wideLive[0].status
+
+    $context = @(Get-IseContextVisibility)
+    Assert-Equal 'context visibility reads the endpoint database' (
+        '/api/v1/dataconnect/query?view=endpoints_data') $listenerState.Requests[-1]
+    Assert-Equal 'context rows are typed for the context table' `
+        'Ise.Dc.ContextVisibility' $context[0].PSObject.TypeNames[0]
+    Assert-Equal 'context visibility returns every endpoint' 3 $context.Count
+    Assert-That 'without -WithLastAuth there is no identity to show' (
+        $null -eq $context[0].auth_identity)
+
+    $null = Get-IseContextVisibility -Mac 'AA:BB:*' -Ip '10.10.1.*' -Hostname 'phone-*' `
+        -Profile 'Cisco-IP-Phone*' -User 'jdoe'
+    # -User jdoe carries no wildcard, so it is an equality like any other exact
+    # value; only the four patterns become LIKE.
+    Assert-Equal 'the context filters map onto the documented query string' (
+        '/api/v1/dataconnect/query?eq=PORTAL_USER%3Ajdoe' +
+        '&like=ENDPOINT_IP%3A10.10.1.%2A&like=ENDPOINT_POLICY%3ACisco-IP-Phone%2A' +
+        '&like=HOSTNAME%3Aphone-%2A&like=MAC_ADDRESS%3AAA%3ABB%3A%2A&view=endpoints_data'
+    ) $listenerState.Requests[-1]
+
+    $before = $listenerState.Requests.Count
+    $joined = @(Get-IseContextVisibility -WithLastAuth -AuthLast 4h)
+    Assert-Equal '-WithLastAuth costs exactly one extra statement' 2 (
+        $listenerState.Requests.Count - $before)
+    Assert-Equal 'the authentication lookup is newest-first over its own window' (
+        '/api/v1/dataconnect/query?desc=1&last=4h&order=TIMESTAMP' +
+        '&view=radius_authentications'
+    ) $listenerState.Requests[-1]
+    Assert-Equal 'the last authentication reaches the endpoint' 'jdoe' $joined[0].auth_identity
+    Assert-Equal 'and brings the session context with it' 'core-1' $joined[0].auth_nad
+    Assert-Equal 'including what the screen calls authorization profiles' `
+        'PermitAccess' $joined[1].auth_profiles
+    # AABB.CC44.5566 against AA:BB:CC:44:55:66 -- same endpoint, two spellings.
+    Assert-Equal 'a differently punctuated MAC still joins' 'asmith' $joined[1].auth_identity
+    Assert-That 'an endpoint that did not authenticate gets an empty column, not a wrong one' (
+        $null -eq $joined[2].auth_identity)
+    Assert-That 'and the column exists so the blank is legible' (
+        $joined[2].PSObject.Properties.Name -contains 'auth_identity')
+
+    Write-Host ''
     Write-Host 'refusals' -ForegroundColor Cyan
 
     $message = try { Invoke-IseDcQuery -View cooldown_view; '' } catch { $_.Exception.Message }
@@ -510,6 +603,18 @@ try {
     $table = @(Invoke-IseDcQuery -View radius_authentications | Format-Table | Out-String -Width 200) -join ''
     Assert-Like 'the auth table leads with time and user' '*Time*User*Mac*Nad*' $table
     Assert-That 'the auth table does not wrap' (
+        (($table -split "`n" | Measure-Object -Property Length -Maximum).Maximum) -le 120)
+
+    # The replicas take their column order from the UI, so they are the tables
+    # most likely to grow past a terminal; the width is asserted, not assumed.
+    $table = @(Get-IseRadiusLiveLog -Last 1h | Format-Table | Out-String -Width 200) -join ''
+    Assert-Like 'the live-log table reads like the screen' '*Time*Status*Identity*Endpoint*' $table
+    Assert-That 'the live-log table does not wrap' (
+        (($table -split "`n" | Measure-Object -Property Length -Maximum).Maximum) -le 120)
+
+    $table = @(Get-IseContextVisibility | Format-Table | Out-String -Width 200) -join ''
+    Assert-Like 'the context table leads with the endpoint' '*Mac*Ip*Hostname*Profile*' $table
+    Assert-That 'the context table does not wrap' (
         (($table -split "`n" | Measure-Object -Property Length -Maximum).Maximum) -le 120)
 }
 finally {
