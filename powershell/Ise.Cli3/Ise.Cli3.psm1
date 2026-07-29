@@ -1410,6 +1410,107 @@ function Get-IseContextVisibility {
     }
 }
 
+function Get-IseEndpointProbe {
+    <#
+    .SYNOPSIS
+    Everything ISE profiled about an endpoint, one attribute per row.
+    .DESCRIPTION
+    ENDPOINTS_DATA.PROBE_DATA holds the profiling attributes as a byte stream,
+    which the exporter decodes. This is the readable form: one row per
+    attribute, sorted by name, ready for Where-Object and Export-Csv.
+
+    Empty attributes are hidden. ISE writes a name for every attribute it knows
+    of whether or not it has a value, so a real endpoint carries dozens of blank
+    ones and showing them buries the handful that say something. -IncludeEmpty
+    puts them back.
+
+    ISE serialises more attributes than the column can hold, so the answer is
+    often a prefix. That is a truncation in the database and not in this shell,
+    and the cmdlet warns naming how many were cut rather than presenting a
+    partial set as a complete one.
+
+    Only the two columns it needs are fetched, so this is far cheaper than a
+    whole-row endpoint read even though it charges the same duty cycle.
+    .PARAMETER Mac
+    MAC address; wildcards accepted. Without it, every endpoint is read, which
+    on a real deployment is why -First exists.
+    .PARAMETER Name
+    Only attributes whose name matches; wildcards accepted.
+    .PARAMETER IncludeEmpty
+    Show attributes ISE named but left empty.
+    .PARAMETER AsObject
+    One object per endpoint with the attributes as properties, instead of one
+    row per attribute. Convenient for $probe.OUI; awkward to filter.
+    .EXAMPLE
+    Get-IseEndpointProbe -Mac 'AA:BB:CC:11:22:33'
+    .EXAMPLE
+    Get-IseEndpointProbe -Mac 'AA:BB:*' -Name '*MFCInfo*'
+    .EXAMPLE
+    (Get-IseEndpointProbe -Mac 'AA:BB:CC:11:22:33' -AsObject).OUI
+    #>
+    [CmdletBinding()]
+    param(
+        [string]$Mac,
+        [string]$Name,
+        [switch]$IncludeEmpty,
+        [switch]$AsObject,
+        [int]$First,
+        [switch]$Wait,
+        [switch]$Force
+    )
+
+    $filter = @{}
+    $match = @{}
+    if ($Mac) { Add-IseDcTerm $filter $match 'MAC_ADDRESS' $Mac }
+
+    $arguments = @{
+        View = 'endpoints_data'
+        Column = @('MAC_ADDRESS', 'PROBE_DATA')
+    }
+    if ($filter.Count) { $arguments['Filter'] = $filter }
+    if ($match.Count) { $arguments['Match'] = $match }
+    foreach ($parameter in @('First', 'Wait', 'Force')) {
+        if ($PSBoundParameters.ContainsKey($parameter)) {
+            $arguments[$parameter] = $PSBoundParameters[$parameter]
+        }
+    }
+
+    foreach ($row in @(Invoke-IseDcQuery @arguments)) {
+        if ($null -eq $row) { continue }
+        $probe = $row.probe_data
+        if ($null -eq $probe) { continue }
+        if ($probe.truncated) {
+            # A warning rather than a note on each row: it is one fact about
+            # the endpoint, and repeating it per attribute would bury it.
+            Write-Warning ("$($row.mac_address): $($probe.note)")
+        }
+        if (-not $probe.attributes) { continue }
+
+        $pairs = @($probe.attributes.PSObject.Properties |
+            Where-Object { $IncludeEmpty -or -not [string]::IsNullOrEmpty($_.Value) } |
+            Where-Object { -not $Name -or $_.Name -like $Name } |
+            Sort-Object Name)
+
+        if ($AsObject) {
+            $flat = [ordered]@{ mac_address = $row.mac_address }
+            foreach ($pair in $pairs) { $flat[$pair.Name] = $pair.Value }
+            $object = [pscustomobject]$flat
+            $object.PSObject.TypeNames.Insert(0, 'Ise.Dc.ProbeObject')
+            $object
+            continue
+        }
+        foreach ($pair in $pairs) {
+            $attribute = [pscustomobject]@{
+                PSTypeName = 'Ise.Dc.ProbeAttribute'
+                Mac        = $row.mac_address
+                Name       = $pair.Name
+                Value      = $pair.Value
+            }
+            $attribute
+        }
+    }
+}
+
 # Completion reads the cached descriptors, so it costs nothing and stays silent
 # when the exporter is not up: a shell that cannot complete is an inconvenience,
 # one that throws on every Tab is unusable.
@@ -1460,5 +1561,6 @@ Export-ModuleMember -Function @(
     'Get-IseDcEndpoint', 'Get-IseDcTacacsAuth', 'Get-IseDcTacacsCommand',
     'Get-IseDcTacacsAuthorization', 'Get-IseDcPosture', 'Get-IseDcNodeHealth',
     'Get-IseDcNodePerformance',
-    'Get-IseRadiusLiveLog', 'Get-IseContextVisibility'
+    'Get-IseRadiusLiveLog', 'Get-IseContextVisibility',
+    'Get-IseEndpointProbe'
 )

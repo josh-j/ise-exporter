@@ -54,6 +54,7 @@ reporting dataset also waits out.
 | `Get-IseDcNodePerformance` | node key performance metrics |
 | `Get-IseRadiusLiveLog` | the Live Logs screen |
 | `Get-IseContextVisibility` | the Context Visibility screen |
+| `Get-IseEndpointProbe` | one endpoint's profiling attributes |
 
 ## Pointing at an exporter
 
@@ -167,23 +168,57 @@ The pipeline does the rest: `Where-Object`, `Group-Object`, `Export-Csv`,
 
 ### Probe data
 
-`PROBE_DATA` on the endpoint database is a binary stream held in a text column
--- Cisco documents it as "compressed and non-printable characters" -- so it
-arrives as an object rather than a string:
+`PROBE_DATA` on the endpoint database holds everything ISE profiled about an
+endpoint as a byte stream, not text. The exporter decodes it, and
+`Get-IseEndpointProbe` is the readable form: one row per attribute, sorted,
+ready for `Where-Object` and `Export-Csv`.
 
 ```powershell
-$endpoint = Get-IseDcEndpoint -Mac 'AA:BB:CC:11:22:33' -First 1
-$endpoint.probe_data.encoding      # what the bytes turned out to be
-$endpoint.probe_data.attributes    # the name/value pairs, when they can be proved
+Get-IseEndpointProbe -Mac 'AA:BB:CC:11:22:33'
+Get-IseEndpointProbe -Mac 'AA:BB:*' -Name '*MFCInfo*'
+(Get-IseEndpointProbe -Mac 'AA:BB:CC:11:22:33' -AsObject).OUI
 ```
 
-`attributes` is populated only when the framing accounts for every byte. When
-it does not, `attributes` is empty, `encoding` names what the stream looks like
-(`gzip+...`, `java-serialized`, `unframed`), `strings` lists the readable runs,
-and `raw` carries the original bytes base64-encoded so nothing is lost. An
-empty `attributes` with a populated `raw` means "not understood", never
-"nothing there" -- a half-parsed attribute set would look exactly like a real
-one, so it is not offered.
+```
+   Endpoint: 10:66:6a:69:19:42
+
+Name                                   Value
+----                                   -----
+AD-Join-Point                          LAB.LOCAL
+AD-User-SamAccount-Name                user1
+AuthenticationMethod                   PAP_ASCII
+AuthenticationStatus                   AuthenticationPassed
+NetworkDeviceName                      campus-corp-wired
+OUI                                    Zabbly
+```
+
+It fetches only `MAC_ADDRESS` and `PROBE_DATA`, so it is much cheaper than a
+whole-row endpoint read, though it charges the same duty cycle.
+
+Empty attributes are hidden. ISE names an attribute whether or not it has a
+value, so a real endpoint carries dozens of blanks; `-IncludeEmpty` puts them
+back.
+
+**ISE stores more attributes than its own column holds.** The serialised header
+declares the full count and the column keeps a prefix -- 137 declared and 53
+kept is ordinary. That truncation happens in the database, not in the exporter
+or the shell, and the cmdlet warns naming how many were lost rather than
+presenting a prefix as the whole set. Nothing can recover the rest through Data
+Connect; the ERS endpoint API is the place to go for a complete attribute set.
+
+The raw field is still there on an ordinary endpoint row:
+
+```powershell
+(Get-IseDcEndpoint -Mac 'AA:BB:CC:11:22:33' -First 1).probe_data |
+    Select-Object encoding, count, declared, truncated
+```
+
+`encoding` is `ise-tlv` when the appliance's own framing was read. If a future
+release changes that framing, `attributes` comes back empty and the field turns
+into a report on itself -- `strings`, `head`, `separators` and the base64 `raw`
+-- rather than guessing. An empty `attributes` with a populated `raw` means
+"not understood", never "nothing there": a half-parsed attribute set would look
+exactly like a real one, so it is not offered.
 
 `PROBE_DATA` is large, and the whole row is returned by default. On a big
 endpoint database, `-Column` is how to leave it behind:

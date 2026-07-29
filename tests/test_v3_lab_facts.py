@@ -28,6 +28,7 @@ import pytest
 import requests
 import urllib3
 
+from ise_exporter3 import probe_data
 from ise_exporter3.transports.dataconnect import SCHEMA_COLUMN_CONTRACTS
 
 
@@ -567,3 +568,51 @@ def test_a_timestamp_with_time_zone_column_needs_a_cast(oracle):
     cursor.execute(
         "SELECT MAX(CAST(update_time AS DATE)) FROM endpoints_data")
     assert cursor.fetchone() is not None
+
+
+def test_probe_data_is_ise_framed_and_the_column_truncates_it(oracle):
+    """PROBE_DATA's framing, and the fact that the column cannot hold it.
+
+    The framing is undocumented, so this is the check that it has not moved:
+    a varint pair count, then 0x11-tagged varint-length UTF-8 records that
+    alternate name and value. Read off this appliance and implemented from it.
+
+    The second half matters more than the first. ENDPOINTS_DATA.PROBE_DATA is a
+    2000-byte column and a real endpoint's probe data does not fit, so ISE
+    stores a prefix. The header still declares the full count, which is the only
+    reason a reader can tell a complete attribute set from a cut-off one.
+    """
+    cursor = oracle.cursor()
+
+    def handler(inner, metadata):
+        if metadata.name == "PROBE_DATA":
+            return inner.var(metadata.type_code, size=32767,
+                             arraysize=inner.arraysize, bypass_decode=True)
+        return None
+
+    cursor.outputtypehandler = handler
+    cursor.execute(
+        "SELECT probe_data FROM endpoints_data "
+        "WHERE probe_data IS NOT NULL FETCH FIRST 5 ROWS ONLY")
+    samples = [row[0] for row in cursor if row[0]]
+    if not samples:
+        pytest.skip("no endpoint on this appliance carries probe data")
+
+    # bypass_decode is what makes this readable at all: decoded as text the
+    # non-UTF-8 bytes become U+FFFD and the framing is gone with them.
+    assert all(isinstance(sample, bytes) for sample in samples)
+
+    decoded = [probe_data.decode(sample) for sample in samples]
+    assert all(field["encoding"] == "ise-tlv" for field in decoded)
+    assert all(field["attributes"] for field in decoded)
+    # Names ISE puts on every endpoint, whatever else is profiled.
+    assert any("OUI" in field["attributes"] for field in decoded)
+
+    # A complete field agrees with its own header; a truncated one says so
+    # rather than passing off a prefix as the whole attribute set.
+    for field in decoded:
+        if field["truncated"]:
+            assert field["count"] < field["declared"]
+            assert "cut off in the database" in field["note"]
+        else:
+            assert field["count"] == field["declared"]

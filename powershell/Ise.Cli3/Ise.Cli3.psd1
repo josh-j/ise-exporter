@@ -20,7 +20,8 @@
         'Get-IseDcTacacsAuthorization', 'Get-IseDcPosture', 'Get-IseDcNodeHealth',
         'Get-IseDcNodePerformance',
         # Replicas of the two screens operators actually live in.
-        'Get-IseRadiusLiveLog', 'Get-IseContextVisibility'
+        'Get-IseRadiusLiveLog', 'Get-IseContextVisibility',
+        'Get-IseEndpointProbe'
     )
     CmdletsToExport   = @()
     VariablesToExport = @()

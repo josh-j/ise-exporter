@@ -453,5 +453,31 @@
         </TableRowEntries>
       </TableControl>
     </View>
+    <!-- Profiling attributes read one at a time. Name is generous because ISE
+         writes long ones (SelectedAuthenticationIdentityStores), and Value
+         takes what is left rather than a fixed width, since it is the thing
+         being read. -->
+    <View>
+      <Name>IseDcProbeAttribute</Name>
+      <ViewSelectedBy><TypeName>Ise.Dc.ProbeAttribute</TypeName></ViewSelectedBy>
+      <GroupBy>
+        <PropertyName>Mac</PropertyName>
+        <Label>Endpoint</Label>
+      </GroupBy>
+      <TableControl>
+        <TableHeaders>
+          <TableColumnHeader><Label>Name</Label><Width>38</Width></TableColumnHeader>
+          <TableColumnHeader><Label>Value</Label></TableColumnHeader>
+        </TableHeaders>
+        <TableRowEntries>
+          <TableRowEntry>
+            <TableColumnItems>
+              <TableColumnItem><PropertyName>Name</PropertyName></TableColumnItem>
+              <TableColumnItem><PropertyName>Value</PropertyName></TableColumnItem>
+            </TableColumnItems>
+          </TableRowEntry>
+        </TableRowEntries>
+      </TableControl>
+    </View>
   </ViewDefinitions>
 </Configuration>

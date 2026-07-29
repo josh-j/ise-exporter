@@ -121,9 +121,23 @@ $rows = @{
            device_name = 'core-1'; acct_status_type = 'Start' }
     )
     endpoints_data = @(
+        # probe_data is the decoded shape the exporter sends: the attributes it
+        # could prove, plus what the header said was there. The declared count
+        # exceeds the parsed one because ISE serialises more attributes than
+        # its own 2000-byte column holds.
         @{ mac_address = 'AA:BB:CC:11:22:33'; endpoint_policy = 'Cisco-IP-Phone'
            update_time = '2026-07-26 07:19:00'; endpoint_ip = '10.10.1.51'
-           hostname = 'phone-51' },
+           hostname = 'phone-51'
+           probe_data = @{
+               encoding = 'ise-tlv'; count = 3; declared = 137; truncated = $true
+               note = ('ISE serialised 137 attributes into a column that held 3; ' +
+                       '134 were cut off in the database, not here')
+               attributes = @{
+                   OUI = 'Cisco Systems, Inc'
+                   NetworkDeviceName = 'campus-corp-wired'
+                   assetHwRevision = ''
+               }
+           } },
         # Dotted-quad spelling on purpose: the same endpoint ISE writes as
         # AA:BB:CC:44:55:66 in CALLING_STATION_ID, so the join has to normalise.
         @{ mac_address = 'AABB.CC44.5566'; endpoint_policy = 'Workstation'
@@ -588,6 +602,42 @@ try {
         $null -eq $joined[2].auth_identity)
     Assert-That 'and the column exists so the blank is legible' (
         $joined[2].PSObject.Properties.Name -contains 'auth_identity')
+
+    $probe = @(Get-IseEndpointProbe -Mac 'AA:BB:CC:11:22:33' -WarningAction SilentlyContinue)
+    Assert-Equal 'the probe read fetches only the two columns it needs' (
+        '/api/v1/dataconnect/query?cols=MAC_ADDRESS%2CPROBE_DATA' +
+        '&eq=MAC_ADDRESS%3AAA%3ABB%3ACC%3A11%3A22%3A33&view=endpoints_data'
+    ) $listenerState.Requests[-1]
+    Assert-Equal 'one row per attribute' 2 $probe.Count
+    Assert-Equal 'attributes are typed for their own table' `
+        'Ise.Dc.ProbeAttribute' $probe[0].PSObject.TypeNames[0]
+    Assert-Equal 'and sorted by name' 'NetworkDeviceName' $probe[0].Name
+    Assert-Equal 'carrying the value' 'Cisco Systems, Inc' $probe[1].Value
+    Assert-That 'the endpoint stays on every row so a wildcard read is readable' (
+        $probe[0].Mac -eq 'AA:BB:CC:11:22:33')
+
+    # ISE names an attribute whether or not it has a value, so a real endpoint
+    # carries dozens of blanks; showing them buries the ones that say something.
+    Assert-That 'empty attributes are hidden' (
+        @($probe | Where-Object { $_.Name -eq 'assetHwRevision' }).Count -eq 0)
+    $withEmpty = @(Get-IseEndpointProbe -Mac 'AA:BB:CC:11:22:33' -IncludeEmpty `
+        -WarningAction SilentlyContinue)
+    Assert-Equal '-IncludeEmpty puts them back' 3 $withEmpty.Count
+
+    $named = @(Get-IseEndpointProbe -Name '*Device*' -WarningAction SilentlyContinue)
+    Assert-Equal '-Name filters attributes' 1 $named.Count
+    Assert-Equal 'and keeps the one asked for' 'NetworkDeviceName' $named[0].Name
+
+    $flat = Get-IseEndpointProbe -Mac 'AA:BB:CC:11:22:33' -AsObject `
+        -WarningAction SilentlyContinue
+    Assert-Equal '-AsObject makes attributes properties' 'Cisco Systems, Inc' $flat.OUI
+
+    # The truncation is the appliance's, and an operator reading three
+    # attributes must not believe that is all ISE knows.
+    $warnings = @()
+    $null = Get-IseEndpointProbe -Mac 'AA:BB:CC:11:22:33' -WarningVariable warnings
+    Assert-Like 'a truncated probe field warns rather than passing off a prefix' `
+        '*cut off in the database*' ($warnings -join ' ')
 
     Write-Host ''
     Write-Host 'refusals' -ForegroundColor Cyan

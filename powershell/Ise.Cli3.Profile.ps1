@@ -28,6 +28,7 @@ Write-Host '  Get-IseDcView              the reporting views, with their columns
 Write-Host '  Get-IseDcRadiusAuth -Failed -Last 2h        who failed, and why'
 Write-Host '  Get-IseRadiusLiveLog -Last 1h               the Live Logs screen'
 Write-Host '  Get-IseContextVisibility -Last 1h           the Context Visibility screen'
+Write-Host '  Get-IseEndpointProbe -Mac <mac>             everything ISE profiled'
 Write-Host '  Invoke-IseDcQuery -View <name> -Last 1h     anything else'
 Write-Host '  ...every Dc cmdlet charges the declared duty cycle; -AsSql is free' `
     -ForegroundColor DarkGray
