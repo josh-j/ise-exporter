@@ -366,6 +366,21 @@ try {
     Assert-Equal 'grouped rows are typed as grouped, not as the view' `
         'Ise.Dc.Grouped' $grouped[0].PSObject.TypeNames[0]
 
+    # -All is a display choice, not a query change: the exporter already sent
+    # every column, so the switch must not reach the wire.
+    $wide = @(Invoke-IseDcQuery -View radius_authentications -Last 2h -All)
+    Assert-Equal '-All withholds the curated type so no format table narrows it' `
+        'Ise.Dc.Row' $wide[0].PSObject.TypeNames[0]
+    Assert-Equal '-All still returns the rows' 2 $wide.Count
+    Assert-Equal '-All keeps every column on the object' 'jdoe' $wide[0].username
+    Assert-Equal '-All does not travel to the server' `
+        '/api/v1/dataconnect/query?last=2h&view=radius_authentications' `
+        $listenerState.Requests[-1]
+
+    $typedWide = @(Get-IseDcRadiusAuth -Last 2h -All)
+    Assert-Equal '-All reaches the typed cmdlets too' `
+        'Ise.Dc.Row' $typedWide[0].PSObject.TypeNames[0]
+
     $sql = Invoke-IseDcQuery -View radius_authentications -Last 1d -AsSql
     Assert-Like '-AsSql hits explain=1' '*explain=1*' $listenerState.Requests[-1]
     Assert-Equal '-AsSql is typed' 'Ise.Dc.Sql' $sql.PSObject.TypeNames[0]

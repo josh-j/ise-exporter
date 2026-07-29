@@ -484,6 +484,15 @@ function Invoke-IseDcQuery {
     Order descending.
     .PARAMETER First
     Row limit; server default 100, clamped server-side.
+    .PARAMETER All
+    Show every column the rows carry rather than the view's curated table.
+
+    The exporter already returns the whole row; what narrows it is this module's
+    format table, which names a handful of columns per view so the default
+    output reads at a glance in an 80-column terminal. That is a display choice,
+    and -All is how to decline it: the rows come back untyped, so PowerShell
+    formats them generically and every column is visible. Costs nothing extra --
+    same statement, same duty cycle, same rows.
     .PARAMETER AsSql
     Return the SQL and binds the exporter would run, without touching Oracle.
     Free, and allowed even during a cooldown -- so a heavy query can be judged
@@ -549,6 +558,7 @@ function Invoke-IseDcQuery {
         [string]$OrderBy,
         [switch]$Descending,
         [int]$First,
+        [switch]$All,
         [switch]$AsSql,
         [switch]$Wait,
         [switch]$Force
@@ -623,8 +633,13 @@ function Invoke-IseDcQuery {
 
     # Grouped rows are a different shape from the view's rows, and the view's
     # format table would render them as empty columns; the generic type lets
-    # PowerShell show what actually came back.
+    # PowerShell show what actually came back. -All asks for the same escape for
+    # ordinary rows: format lookup takes the first type name that has a view, so
+    # withholding the curated one is the only way to stop it narrowing -- there
+    # is no ps1xml for "every property". Both land on a type with no format view
+    # of its own, which is exactly what makes PowerShell print all of it.
     $typeName = if ($GroupBy -or $Aggregate) { 'Ise.Dc.Grouped' }
+                elseif ($All) { 'Ise.Dc.Row' }
                 else { ConvertTo-IseDcTypeName -View $(if ($response.view) { $response.view } else { $View }) }
     foreach ($row in @($response.rows)) {
         if ($null -eq $row) { continue }
@@ -685,7 +700,7 @@ function Invoke-IseDcTypedQuery {
     $arguments = @{ View = $View }
     if ($Filter.Count) { $arguments['Filter'] = $Filter }
     if ($Match.Count) { $arguments['Match'] = $Match }
-    foreach ($name in @('Last', 'First', 'Column', 'Wait', 'Force')) {
+    foreach ($name in @('Last', 'First', 'Column', 'All', 'Wait', 'Force')) {
         if ($Bound.ContainsKey($name)) { $arguments[$name] = $Bound[$name] }
     }
     Invoke-IseDcQuery @arguments
@@ -724,6 +739,7 @@ function Get-IseDcRadiusAuth {
         [string]$Last,
         [int]$First,
         [string[]]$Column,
+        [switch]$All,
         [switch]$Wait,
         [switch]$Force
     )
@@ -767,6 +783,7 @@ function Get-IseDcRadiusAccounting {
         [string]$Last,
         [int]$First,
         [string[]]$Column,
+        [switch]$All,
         [switch]$Wait,
         [switch]$Force
     )
@@ -802,6 +819,7 @@ function Get-IseDcRadiusError {
         [string]$Last,
         [int]$First,
         [string[]]$Column,
+        [switch]$All,
         [switch]$Wait,
         [switch]$Force
     )
@@ -850,6 +868,7 @@ function Get-IseDcEndpoint {
         [string]$Last,
         [int]$First,
         [string[]]$Column,
+        [switch]$All,
         [switch]$Wait,
         [switch]$Force
     )
@@ -889,6 +908,7 @@ function Get-IseDcTacacsAuth {
         [string]$Last,
         [int]$First,
         [string[]]$Column,
+        [switch]$All,
         [switch]$Wait,
         [switch]$Force
     )
@@ -925,6 +945,7 @@ function Get-IseDcTacacsCommand {
         [string]$Last,
         [int]$First,
         [string[]]$Column,
+        [switch]$All,
         [switch]$Wait,
         [switch]$Force
     )
@@ -955,6 +976,7 @@ function Get-IseDcTacacsAuthorization {
         [string]$Last,
         [int]$First,
         [string[]]$Column,
+        [switch]$All,
         [switch]$Wait,
         [switch]$Force
     )
@@ -988,6 +1010,7 @@ function Get-IseDcPosture {
         [string]$Last,
         [int]$First,
         [string[]]$Column,
+        [switch]$All,
         [switch]$Wait,
         [switch]$Force
     )
@@ -1014,6 +1037,7 @@ function Get-IseDcNodeHealth {
         [string]$Last,
         [int]$First,
         [string[]]$Column,
+        [switch]$All,
         [switch]$Wait,
         [switch]$Force
     )
@@ -1042,6 +1066,7 @@ function Get-IseDcNodePerformance {
         [string]$Last,
         [int]$First,
         [string[]]$Column,
+        [switch]$All,
         [switch]$Wait,
         [switch]$Force
     )

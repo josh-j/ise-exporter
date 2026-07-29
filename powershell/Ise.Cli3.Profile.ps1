@@ -26,6 +26,8 @@ Write-Host '  Get-IseDcRadiusAuth -Failed -Last 2h        who failed, and why'
 Write-Host '  Invoke-IseDcQuery -View <name> -Last 1h     anything else'
 Write-Host '  ...every Dc cmdlet charges the declared duty cycle; -AsSql is free' `
     -ForegroundColor DarkGray
+Write-Host '  ...the default table is curated; -All shows every column returned' `
+    -ForegroundColor DarkGray
 Write-Host ''
 
 try {

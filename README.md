@@ -190,6 +190,21 @@ any check fails, it disables v3 and restores v2's previous enabled/running
 state. Once migrated, later `deploy/install.sh` runs are ordinary in-place v3
 updates.
 
+Migration deliberately leaves v2 intact, so retiring it is a separate, explicit
+step — taken once v3 has proven itself and the rollback target is no longer
+worth its disk or the cleartext appliance passwords in its configuration:
+
+```bash
+sudo ./deploy/uninstall-v2.sh --dry-run    # print the plan, change nothing
+sudo ./deploy/uninstall-v2.sh
+```
+
+It removes v2's unit, `/opt`, `/etc` and state trees, `ise-cli`, the `Ise.Cli`
+module and the service account, and refuses to run at all unless
+`ise-exporter3` is active — because removing the rollback while v3 is down
+leaves the host with no exporter rather than with an older one. `--force`
+overrides that check, `--yes` the confirmation.
+
 The service runs `ise-exporter3 plan` as `ExecStartPre`, so invalid or
 over-budget configuration is rejected before collection begins. It is limited
 to three starts per hour with five minutes between failure restarts, uses
@@ -283,10 +298,16 @@ ise> Get-IseDcEndpoint -Policy 'Cisco-IP-Phone*' -First 500
 
 ise> Invoke-IseDcQuery -View radius_errors_view -Last 4h `
        -Match @{ NETWORK_DEVICE_NAME = 'core-*' } -First 200
+
+ise> Invoke-IseDcQuery -View endpoints_data -First 1 -All   # every column
 ```
 
 Filters, projections, ordering and row limits are applied server-side through
-bind variables against the discovered catalog — the shell never sends SQL.
+bind variables against the discovered catalog — the shell never sends SQL. A
+query returns the whole row; what the default table shows is a curated handful
+of columns per view, so it reads at a glance in a narrow terminal. `-All`
+declines that trimming and shows every column returned — a display choice on
+rows already fetched, so it costs no extra duty cycle.
 `-AsSql` shows the statement a query would run without spending Oracle time,
 `-Wait` sits out a duty-cycle cooldown, and truncated results say so. `-Force`
 is the incident override: it skips the cooldown waits and charges only measured
