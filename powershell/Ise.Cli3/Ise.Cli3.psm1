@@ -22,6 +22,78 @@ $script:IseApiRoot = if ($env:ISE_EXPORTER_API) { $env:ISE_EXPORTER_API }
 # for a catalog that finished discovering after the shell started.
 $script:IseDcViews = $null
 
+# Shipped inside the module rather than under docs/, which is not installed and
+# not even in the repository: a guide that only exists in a working checkout is
+# not there for the operator on the appliance host at 3am, which is the only
+# time anybody reads it.
+$script:IseReadmePath = Join-Path $PSScriptRoot 'Ise.Cli3.Readme.md'
+
+function Get-IseCliReadme {
+    <#
+    .SYNOPSIS
+    The ise-cli3 operator guide, without leaving the shell.
+    .DESCRIPTION
+    Prints the guide that ships with this module: what costs Oracle duty cycle
+    and what is free, how filters and windows travel, what a refusal means, and
+    what to do about it.
+
+    Whole thing by default. -Section prints one part, matched on its heading and
+    accepting wildcards, because the answer wanted mid-incident is one section
+    and not eleven. -List names the sections without printing any of them.
+    .PARAMETER Section
+    Heading to print; wildcards accepted, matched case-insensitively. A pattern
+    matching several headings prints all of them, in document order.
+    .PARAMETER List
+    List the section headings instead of printing anything.
+    .EXAMPLE
+    Get-IseCliReadme
+    .EXAMPLE
+    Get-IseCliReadme -List
+    .EXAMPLE
+    Get-IseCliReadme -Section 'refused'
+    .EXAMPLE
+    Get-IseCliReadme | Out-Host -Paging
+    #>
+    [CmdletBinding(DefaultParameterSetName = 'Whole')]
+    param(
+        [Parameter(ParameterSetName = 'Section', Position = 0)][string]$Section,
+        [Parameter(ParameterSetName = 'List')][switch]$List
+    )
+
+    if (-not (Test-Path -LiteralPath $script:IseReadmePath)) {
+        throw [System.IO.FileNotFoundException]::new(
+            "The ise-cli3 guide is missing from this install: $script:IseReadmePath. " +
+            'Re-run deploy/install.sh to repair the module directory.',
+            $script:IseReadmePath)
+    }
+    $lines = @(Get-Content -LiteralPath $script:IseReadmePath)
+
+    # Sections are the '## ' headings. The title above the first one is the
+    # preamble, which belongs to the whole document and to no section.
+    $headings = @($lines | Where-Object { $_ -match '^##\s+' } |
+        ForEach-Object { $_ -replace '^##\s+', '' })
+
+    if ($List) { return $headings }
+    if (-not $Section) { return ($lines -join [Environment]::NewLine) }
+
+    $pattern = if ($Section -match '[*?]') { $Section } else { "*$Section*" }
+    $wanted = @($headings | Where-Object { $_ -like $pattern })
+    if (-not $wanted.Count) {
+        throw [System.ArgumentException]::new(
+            "No section matches '$Section'. Get-IseCliReadme -List names them.")
+    }
+
+    $out = [System.Collections.Generic.List[string]]::new()
+    $keeping = $false
+    foreach ($line in $lines) {
+        if ($line -match '^##\s+') {
+            $keeping = $wanted -contains ($line -replace '^##\s+', '')
+        }
+        if ($keeping) { $out.Add($line) }
+    }
+    $out -join [Environment]::NewLine
+}
+
 function Get-IseApiRoot {
     <#
     .SYNOPSIS
@@ -1379,6 +1451,7 @@ Register-ArgumentCompleter -CommandName Invoke-IseDcQuery -ParameterName Column 
 Register-ArgumentCompleter -CommandName Invoke-IseDcQuery -ParameterName OrderBy -ScriptBlock $completeColumn
 
 Export-ModuleMember -Function @(
+    'Get-IseCliReadme',
     'Get-IseApiRoot', 'Set-IseApiRoot', 'Invoke-IseApi',
     'Get-IseHealth', 'Get-IseDataset', 'Get-IseProvider',
     'Get-IseTarget', 'Get-IsePlan', 'Get-IseDegraded',

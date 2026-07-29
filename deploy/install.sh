@@ -202,7 +202,8 @@ ln -s "$PWSH_DIR/Ise.Cli3" "$PWSH_MODULE_LINK"
 install -d -o root -g root -m 755 "$(dirname "$CLI_LINK")"
 ln -sfn "$PWSH_DIR/ise-cli3" "$CLI_LINK"
 if [[ ! -r "$PWSH_DIR/Ise.Cli3.Profile.ps1" ]] \
-        || [[ ! -r "$PWSH_DIR/Ise.Cli3/Ise.Cli3.psd1" ]]; then
+        || [[ ! -r "$PWSH_DIR/Ise.Cli3/Ise.Cli3.psd1" ]] \
+        || [[ ! -r "$PWSH_DIR/Ise.Cli3/Ise.Cli3.Readme.md" ]]; then
     echo "error: installed Ise.Cli3 module self-check failed" >&2
     exit 1
 fi

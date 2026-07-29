@@ -331,8 +331,12 @@ rows already fetched, so it costs no extra duty cycle.
 is the incident override: it skips the cooldown waits and charges only measured
 Oracle time, while keeping every ceiling, the statement timeout, the auth guard
 and the one-statement-at-a-time lane — and forced use is counted separately in
-the exporter's own metrics. The operator guide is `docs/ise-cli3.md` in a
-working checkout.
+the exporter's own metrics.
+
+`Get-IseCliReadme` prints the operator guide from inside the shell — the whole
+thing, `-List` for its section headings, or `-Section <name>` for one part. It
+ships inside the module and is installed with it, so it is there on the
+appliance host rather than only in a working checkout.
 
 ## Dashboards
 

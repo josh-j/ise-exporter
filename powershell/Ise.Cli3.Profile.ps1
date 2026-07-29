@@ -11,6 +11,9 @@ Write-Host ''
 # Two groups, because they cost different things. The split is the point: the
 # first answers from state the exporter already computed, the second spends the
 # same Oracle budget a scheduled collection does.
+Write-Host '  Get-IseCliReadme           the operator guide; -List names its sections' `
+    -ForegroundColor DarkGray
+Write-Host ''
 Write-Host '  local state (free)' -ForegroundColor Cyan
 Write-Host '  Get-IseHealth              is it healthy and inside its budget'
 Write-Host '  Get-IseDataset -Unhealthy  what is failing, degraded, or unscheduled'

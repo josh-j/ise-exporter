@@ -304,6 +304,30 @@ try {
           'Get-IseDcNodePerformance' | Where-Object { $exported -notcontains $_ }).Count -eq 0)
     Assert-Equal 'Set-IseApiRoot points the session at the stub' $root (Set-IseApiRoot -Uri $root).ApiRoot
 
+    # The guide ships inside the module because docs/ is neither installed nor
+    # committed; a shipped file is the only one an operator on the appliance
+    # host has. Asserting it is present is asserting the install is complete.
+    $readme = Get-IseCliReadme
+    Assert-That 'the guide ships with the module' ($readme.Length -gt 1000)
+    Assert-Like 'and says what costs Oracle time' '*duty cycle*' $readme
+    $sections = @(Get-IseCliReadme -List)
+    Assert-That 'the guide names its sections' ($sections.Count -ge 5)
+    Assert-That 'and every one is a heading, not a body line' (
+        @($sections | Where-Object { $_ -match '^#' }).Count -eq 0)
+    $one = Get-IseCliReadme -Section 'refused'
+    Assert-Like '-Section prints the section asked for' '*schema_pending*' $one
+    Assert-That '-Section prints only that section' ($one.Length -lt $readme.Length)
+    Assert-That 'a section stops at the next heading' (
+        @($one -split "`n" | Where-Object { $_ -match '^##\s' }).Count -eq 1)
+    $threw = $false
+    try { Get-IseCliReadme -Section 'no-such-section' } catch { $threw = $true }
+    Assert-That 'an unknown section says so instead of printing nothing' $threw
+    # No exporter is involved: the guide is a file, and reading it must not
+    # cost a round trip, let alone an Oracle statement.
+    $before = $listenerState.Requests.Count
+    $null = Get-IseCliReadme
+    Assert-Equal 'reading the guide talks to nothing' $before $listenerState.Requests.Count
+
     Write-Host ''
     Write-Host 'discovery' -ForegroundColor Cyan
 

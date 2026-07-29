@@ -9,6 +9,7 @@
     # the manifest directly should get the same readable tables the REPL does.
     FormatsToProcess  = 'Ise.Cli3.format.ps1xml'
     FunctionsToExport = @(
+        'Get-IseCliReadme',
         'Get-IseApiRoot', 'Set-IseApiRoot', 'Invoke-IseApi',
         'Get-IseHealth', 'Get-IseDataset', 'Get-IseProvider',
         'Get-IseTarget', 'Get-IsePlan', 'Get-IseDegraded',
