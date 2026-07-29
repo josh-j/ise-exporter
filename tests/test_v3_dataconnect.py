@@ -6,7 +6,9 @@ budget and nowhere else, the adaptive cooldown is what enforces it, ceilings
 bound what a result can make this process retain, and the cross-process gate
 survives a process that dies mid-query.
 """
+import base64
 import os
+import struct
 import threading
 import time
 from types import SimpleNamespace
@@ -254,8 +256,11 @@ class _StubVar:
         self.kwargs = kwargs
 
 
-def _fetch_metadata(type_code, internal_size=0):
-    return SimpleNamespace(type_code=type_code, internal_size=internal_size)
+def _fetch_metadata(type_code, internal_size=0, name="HOSTNAME"):
+    # FetchInfo always carries a name, and the handler now reads it to tell a
+    # documented binary column from ordinary text.
+    return SimpleNamespace(
+        type_code=type_code, internal_size=internal_size, name=name)
 
 
 @pytest.mark.parametrize("type_code", [
@@ -281,6 +286,52 @@ def test_a_lenient_character_column_keeps_room_for_the_whole_value():
     var = _lenient_characters(
         cursor, _fetch_metadata(oracledb.DB_TYPE_VARCHAR, 32767))
     assert var.kwargs["size"] == 32767
+
+
+def test_a_documented_binary_column_bypasses_the_decode_entirely():
+    # PROBE_DATA is a byte stream in a VARCHAR2. Replacing its undecodable
+    # bytes would not repair it: it would erase it, one U+FFFD at a time, and
+    # the profiling attributes inside would be gone rather than unreadable.
+    cursor = SimpleNamespace(arraysize=100, var=lambda typ, **kwargs: _StubVar(
+        typ=typ, **kwargs))
+    metadata = SimpleNamespace(
+        type_code=oracledb.DB_TYPE_VARCHAR, internal_size=4000, name="PROBE_DATA")
+    var = _lenient_characters(cursor, metadata)
+    assert var.kwargs["bypass_decode"] is True
+    assert "encoding_errors" not in var.kwargs
+
+
+def test_every_other_character_column_still_decodes_leniently():
+    cursor = SimpleNamespace(arraysize=100, var=lambda typ, **kwargs: _StubVar(
+        typ=typ, **kwargs))
+    metadata = SimpleNamespace(
+        type_code=oracledb.DB_TYPE_VARCHAR, internal_size=4000, name="HOSTNAME")
+    var = _lenient_characters(cursor, metadata)
+    assert var.kwargs["encoding_errors"] == "replace"
+    assert "bypass_decode" not in var.kwargs
+
+
+def test_probe_data_reaches_the_row_as_attributes_not_as_tofu(transport):
+    payload = b"".join(
+        struct.pack(">H", len(token)) + token
+        for token in (b"dhcp-class-identifier", b"MSFT 5.0"))
+    transport._connection = _StubConnection(
+        columns=("MAC_ADDRESS", "PROBE_DATA"),
+        rows=[("AA:BB:CC:11:22:33", payload)])
+    rows = transport._execute("SELECT * FROM x", None, "endpoints_data")
+    assert rows[0]["probe_data"]["attributes"] == {
+        "dhcp-class-identifier": "MSFT 5.0"}
+    # The neighbouring column is ordinary data and must not have been touched.
+    assert rows[0]["mac_address"] == "AA:BB:CC:11:22:33"
+
+
+def test_probe_data_that_cannot_be_framed_keeps_its_bytes(transport):
+    transport._connection = _StubConnection(
+        columns=("PROBE_DATA",), rows=[(b"\xb6\xff\x01\x02",)])
+    rows = transport._execute("SELECT * FROM x", None, "endpoints_data")
+    field = rows[0]["probe_data"]
+    assert field["attributes"] == {}
+    assert field["raw"] == "base64:" + base64.b64encode(b"\xb6\xff\x01\x02").decode()
 
 
 @pytest.mark.parametrize("type_code", [

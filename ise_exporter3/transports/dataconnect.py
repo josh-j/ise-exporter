@@ -38,7 +38,7 @@ import time
 
 import oracledb
 
-from .. import telemetry
+from .. import probe_data, telemetry
 from ..auth_guard import PersistentAuthGuard
 from ..compatibility import valid_hostname
 from . import Transport, TransportError, guard_path
@@ -265,6 +265,12 @@ REPLACEMENT_CHARACTER = "�"
 def _lenient_characters(cursor, metadata):
     """Fetch character columns with undecodable bytes replaced, not fatal.
 
+    Except the ones Cisco documents as binary. PROBE_DATA is a byte stream in a
+    VARCHAR2, so replacing its undecodable bytes would destroy the value rather
+    than repair it: every non-UTF-8 byte becomes U+FFFD and the original is
+    unrecoverable, which is a field of tofu where profiling attributes were.
+    Those bypass the decode entirely and arrive as bytes for probe_data to read.
+
     ISE stores what the network supplied it: a NAD description typed in cp1252,
     a username carried through a pass-through insert, a profiling attribute
     copied verbatim off the wire. Any of those can leave bytes in a VARCHAR2
@@ -281,11 +287,29 @@ def _lenient_characters(cursor, metadata):
         # Every other type -- numbers, dates, LOBs -- keeps the driver's own
         # handling. Only character data has a decode step to relax.
         return None
+    size = max(metadata.internal_size or 0, metadata.type_code.default_size)
+    if str(metadata.name or "").upper() in probe_data.BINARY_COLUMNS:
+        return cursor.var(
+            metadata.type_code, size=size, arraysize=cursor.arraysize,
+            bypass_decode=True)
     return cursor.var(
-        metadata.type_code,
-        size=max(metadata.internal_size or 0, metadata.type_code.default_size),
-        arraysize=cursor.arraysize,
+        metadata.type_code, size=size, arraysize=cursor.arraysize,
         encoding_errors="replace")
+
+
+def _field(name, value, limits):
+    """One column's value, decoded if the column is one that needs decoding.
+
+    Only the documented binary columns take this path, and only they can: they
+    are the ones fetched as bytes. Everything else is ordinary data and goes
+    through _materialize unchanged, so this costs one set membership per field.
+    """
+    if str(name or "").upper() in probe_data.BINARY_COLUMNS:
+        # Decoded rather than materialized: _materialize would base64 the bytes,
+        # which is the right answer for an opaque blob and the wrong one for a
+        # blob whose whole content is attributes somebody wants to read.
+        return probe_data.decode(value, ceiling=limits.field_bytes)
+    return _materialize(value, limits)
 
 
 def _replaced_fields(row):
@@ -786,8 +810,8 @@ class DataConnectTransport(Transport):
                             break
                         for raw in batch:
                             self._check_ceilings(len(rows), retained)
-                            row = dict(zip(columns, (
-                                _materialize(value, self.limits) for value in raw)))
+                            row = {name: _field(name, value, self.limits)
+                                   for name, value in zip(columns, raw)}
                             retained += _size_of(row, self.limits)
                             replaced += _replaced_fields(row)
                             rows.append(row)

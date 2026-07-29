@@ -165,6 +165,33 @@ Get-IseDcEndpoint -Column MAC_ADDRESS,ENDPOINT_POLICY    # fetch less on purpose
 The pipeline does the rest: `Where-Object`, `Group-Object`, `Export-Csv`,
 `ConvertTo-Json`.
 
+### Probe data
+
+`PROBE_DATA` on the endpoint database is a binary stream held in a text column
+-- Cisco documents it as "compressed and non-printable characters" -- so it
+arrives as an object rather than a string:
+
+```powershell
+$endpoint = Get-IseDcEndpoint -Mac 'AA:BB:CC:11:22:33' -First 1
+$endpoint.probe_data.encoding      # what the bytes turned out to be
+$endpoint.probe_data.attributes    # the name/value pairs, when they can be proved
+```
+
+`attributes` is populated only when the framing accounts for every byte. When
+it does not, `attributes` is empty, `encoding` names what the stream looks like
+(`gzip+...`, `java-serialized`, `unframed`), `strings` lists the readable runs,
+and `raw` carries the original bytes base64-encoded so nothing is lost. An
+empty `attributes` with a populated `raw` means "not understood", never
+"nothing there" -- a half-parsed attribute set would look exactly like a real
+one, so it is not offered.
+
+`PROBE_DATA` is large, and the whole row is returned by default. On a big
+endpoint database, `-Column` is how to leave it behind:
+
+```powershell
+Get-IseDcEndpoint -Column MAC_ADDRESS,ENDPOINT_POLICY,ENDPOINT_IP -First 5000
+```
+
 ## Judging cost before spending it
 
 `-AsSql` returns the statement and its binds without touching Oracle. It is
