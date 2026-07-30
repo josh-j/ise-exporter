@@ -398,13 +398,26 @@ try {
     Assert-That 'and no leftover backticks or bold markers' (
         @($plain | Where-Object { $_ -match '``' -or $_ -match '\*\*' }).Count -eq 0)
     # Prose wraps; a command does not, because a wrapped command is a broken
-    # one. Code carries its own colour, so "only code may overflow" is a rule
-    # the output can actually be measured against rather than guessed at.
-    $code = "$([char]27)[38;5;150m"
+    # one. Recognise fenced code from the raw guide rather than from its ANSI
+    # colour: non-interactive hosts legitimately disable virtual-terminal
+    # styling, and width remains part of the contract in those hosts too.
+    $rawCode = [System.Collections.Generic.HashSet[string]]::new(
+        [System.StringComparer]::Ordinal)
+    $inFence = $false
+    foreach ($line in ((Get-IseCliReadme -Raw) -split "`r?`n")) {
+        if ($line -match '^```') {
+            $inFence = -not $inFence
+            continue
+        }
+        if ($inFence) { [void]$rawCode.Add("  $line") }
+    }
     $over = @($rendered -split "`n" | Where-Object {
         (($_ -replace "$([char]27)\[[0-9;]*m", '').Length) -gt 78 })
     Assert-That 'nothing but code exceeds the width' (
-        @($over | Where-Object { -not $_.StartsWith("  $code") }).Count -eq 0)
+        @($over | Where-Object {
+            $visible = $_ -replace "$([char]27)\[[0-9;]*m", ''
+            -not $rawCode.Contains($visible)
+        }).Count -eq 0)
     Assert-That 'and the prose really did wrap' (
         @($plain | Where-Object {
             $_ -match 'duty cycle' -and $_.Length -le 78 }).Count -gt 0)
