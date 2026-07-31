@@ -23,5 +23,17 @@ if [[ $# -eq 0 ]]; then
     exec pwsh -NoLogo -NoProfile -NoExit -File "$PROFILE"
 fi
 
+case "${1:-}" in
+    -h|--help)
+        exec pwsh -NoLogo -NoProfile -Command \
+            "Import-Module '${SCRIPT_DIR}/Ise.Cli3/Ise.Cli3.psd1' -Force
+             Write-Output 'Usage: ise-cli3 [PowerShell expression]'
+             Write-Output 'With no arguments, opens an interactive Ise.Cli3 shell.'
+             Get-Command -Module Ise.Cli3 |
+                 Sort-Object Name |
+                 Format-Table Name, CommandType"
+        ;;
+esac
+
 exec pwsh -NoLogo -NoProfile -Command \
     "Import-Module '${SCRIPT_DIR}/Ise.Cli3/Ise.Cli3.psd1' -Force; $*"
