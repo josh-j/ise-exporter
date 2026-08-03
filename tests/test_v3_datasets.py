@@ -479,3 +479,45 @@ def test_active_sessions_mnt_attributes_on_the_nas_address_alone():
     assert by_nad[(("location", "Ramstein"), ("nad", "campus-corp-wired"))] == 1
     # Unattributable, and published as the address it actually came from.
     assert by_nad[(("location", "Unknown"), ("nad", "10.200.40.99"))] == 1
+
+
+def test_an_empty_active_list_publishes_a_psn_zero_state():
+    from types import SimpleNamespace
+
+    from ise_exporter3.datasets import active_sessions
+
+    published = []
+    ctx = SimpleNamespace(
+        interval=300,
+        transport=SimpleNamespace(get_mnt_xml=lambda path, *, api="": {
+            "total": 0, "sessions": []}),
+        set=lambda family, value, /, **labels: published.append(
+            (family._name, value, labels)))
+
+    active_sessions.fetch_mnt(ctx)
+
+    assert ("ise3_active_sessions_by_psn", 0,
+            {"psn": "No active sessions"}) in published
+
+
+def test_an_empty_active_list_publishes_current_posture_zero_states():
+    from types import SimpleNamespace
+
+    from ise_exporter3.datasets import posture_current
+
+    published = []
+    ctx = SimpleNamespace(
+        interval=300,
+        transport=SimpleNamespace(get_mnt_xml=lambda path, *, api="": {
+            "total": 0, "sessions": []}),
+        set=lambda family, value, /, **labels: published.append(
+            (family._name, value, labels)))
+
+    posture_current.fetch_mnt(ctx)
+
+    assert ("ise3_posture_agent_version_endpoints", 0,
+            {"agent_version": "No active Secure Client sessions"}) in published
+    assert ("ise3_posture_endpoints_by_os", 0,
+            {"os": "No active endpoints"}) in published
+    assert ("ise3_posture_policy_results", 0,
+            {"policy": "No active posture policies", "result": "Failed"}) in published

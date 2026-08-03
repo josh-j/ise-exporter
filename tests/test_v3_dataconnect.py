@@ -630,10 +630,28 @@ def test_the_transport_enforces_the_same_ceilings_the_statements_are_built_for(
     ("DPY-6005: cannot connect to database (CONNECTION_ID=x). "
      "[Errno 111] Connection refused", "connection_failed"),
     ("DPY-4011: the database connection was closed", "timeout"),
+    (BrokenPipeError(32, "Broken pipe"), "connection_failed"),
     ("ORA-00933: SQL command not properly ended", "invalid_response"),
 ])
 def test_oracle_errors_map_onto_bounded_reasons(message, reason):
-    assert classify_oracle_error(Exception(message)) == reason
+    error = message if isinstance(message, BaseException) else Exception(message)
+    assert classify_oracle_error(error) == reason
+
+
+def test_a_bare_broken_pipe_reconnects_once(transport, monkeypatch):
+    broken = _StubConnection(
+        columns=("X",), rows=[(1,)], fetch_error=BrokenPipeError(32, "Broken pipe"))
+    recovered = _StubConnection(columns=("X",), rows=[(2,)])
+    connections = iter((broken, recovered))
+    monkeypatch.setattr(transport, "connect", lambda: next(connections))
+    monkeypatch.setattr(transport, "close", lambda: None)
+
+    rows = transport._execute("SELECT x FROM key_performance_metrics", None,
+                              "key_performance_metrics")
+
+    assert rows == [{"x": 2}]
+    assert broken.statements.count("SELECT x FROM key_performance_metrics") == 1
+    assert recovered.statements.count("SELECT x FROM key_performance_metrics") == 1
 
 
 def test_view_labels_are_bounded_and_never_contain_raw_sql():

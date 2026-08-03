@@ -148,6 +148,14 @@ def fetch_pxgrid(ctx):
         ctx.set(
             endpoints_by_status, len(members),
             status=status, ops_owner=owner)
+    # pxGrid's session object never carries these MnT-only detail fields.  The
+    # dashboard should say that explicitly rather than rendering three panels
+    # as though their metric names or queries were broken.
+    ctx.set(by_agent_version, 0, agent_version="Unavailable from pxGrid")
+    ctx.set(by_os, 0, os="Unavailable from pxGrid")
+    ctx.set(
+        policy_results, 0,
+        policy="Unavailable from pxGrid", result="Failed")
     if identified:
         for field_name, populated in fields.items():
             ctx.set(
@@ -162,6 +170,15 @@ def fetch_mnt(ctx):
     sessions = listing.get("sessions") or []
     macs = active_macs(sessions)
     if not macs:
+        # Empty is a successful current-state answer, not a missing answer.
+        # Publish labelled zero states for the categorical dashboard families;
+        # otherwise all four panels are indistinguishable from a broken MnT
+        # read even though dataset_up and dataset_fresh are both true.
+        ctx.set(by_agent_version, 0, agent_version="No active Secure Client sessions")
+        ctx.set(by_os, 0, os="No active endpoints")
+        ctx.set(
+            policy_results, 0,
+            policy="No active posture policies", result="Failed")
         return
 
     serving_psns = defaultdict(set)
@@ -226,10 +243,18 @@ def fetch_mnt(ctx):
         ctx.set(by_psn, len(members), psn=psn, status=status)
     for (policy, result), members in policies.items():
         ctx.set(policy_results, len(members), policy=policy, result=result)
+    if not policies:
+        ctx.set(
+            policy_results, 0,
+            policy="No reported posture policies", result="Failed")
     for agent, members in agents.items():
         ctx.set(by_agent_version, len(members), agent_version=agent)
+    if not agents:
+        ctx.set(by_agent_version, 0, agent_version="Not reported by active sessions")
     for system, members in systems.items():
         ctx.set(by_os, len(members), os=system)
+    if not systems:
+        ctx.set(by_os, 0, os="Not reported by active sessions")
     if covered:
         for field, populated in fields.items():
             ctx.set(field_coverage, populated / covered, field=field)

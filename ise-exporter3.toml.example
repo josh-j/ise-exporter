@@ -322,7 +322,9 @@ interval = "30m"
 # Posture assessment history, as distinct from the current compliance snapshot
 # that posture_current publishes.
 [datasets.posture_history]
-interval = "6h"
+# A rolling-window percentage sampled every six hours looks stuck for an
+# operator shift. The 12-second declared query cost still fits hourly.
+interval = "1h"
 
 [datasets.radius_accounting]
 # Accounting is event history, not the current-session directory. It supplies
@@ -342,13 +344,14 @@ interval = "6h"
 # are still rejected.
 # is the v2 failure mode in miniature: cadences that read as operational in the
 # config but are throttled to fiction at runtime. Slowing the PSN rollup to 10m
-# and demoting the freshness probe to 6h brings the plan to ~1.7% and makes every
-# stated cadence one the exporter can actually keep.
+# while keeping posture coverage and the indexed freshness probe hourly brings
+# this production-scale example to ~2.94% and makes every stated cadence one the
+# exporter can actually keep inside the explicit 3.0% ceiling.
 [datasets.psn_performance]
 interval = "10m"
 
 [datasets.source_freshness]
-interval = "6h"
+interval = "1h"
 
 # TACACS activity has two large dimensions -- one group per Device Admin account
 # and one per device doing Device Admin -- so it is the one dataset whose device

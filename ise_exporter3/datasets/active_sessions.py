@@ -117,6 +117,12 @@ def fetch_mnt(ctx):
     # a truncated document would understate.
     ctx.set(total, listing.get("total") or len(sessions))
     ctx.set(unique_endpoints, len(endpoints))
+    # A healthy empty ActiveList has no PSN rows from which to form a labelled
+    # series.  Without an explicit zero both PSN panels render the same blank
+    # state as a failed/unavailable collector.  Keep the zero inside the data
+    # family so delta() also has a stable baseline on quiet deployments.
+    if not sessions:
+        ctx.set(by_psn, 0, psn="No active sessions")
     for psn, count in psns.items():
         ctx.set(by_psn, count, psn=psn)
     for (nad, location), count in nads.items():

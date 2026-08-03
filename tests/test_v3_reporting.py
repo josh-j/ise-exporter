@@ -48,6 +48,13 @@ def test_no_data_connect_provider_settles_for_partial_coverage():
     assert not partial, f"reporting datasets should be complete: {partial}"
 
 
+def test_rolling_posture_and_source_freshness_update_within_an_hour():
+    from ise_exporter3.datasets import source_freshness
+
+    assert posture_history.DATASET.default_interval <= 3600
+    assert source_freshness.DATASET.default_interval <= 3600
+
+
 @pytest.mark.parametrize("module", REPORTING_DATASETS,
                          ids=lambda m: m.DATASET.name)
 def test_breakdowns_group_on_marginals_not_a_cross_product(module):
@@ -251,7 +258,7 @@ def test_one_real_value_beside_placeholders_keeps_the_dimension():
     assert set(reporting.live_dimensions(ctx, rows)) == {"identity_group"}
 
 
-def test_endpoint_inventory_withholds_the_empty_identity_group_breakdown():
+def test_endpoint_inventory_names_the_unavailable_identity_group_breakdown():
     from ise_exporter3.datasets import endpoint_inventory
 
     class Transport:
@@ -278,7 +285,9 @@ def test_endpoint_inventory_withholds_the_empty_identity_group_breakdown():
 
     published = {name for name, _value, _labels in ctx.samples}
     assert "ise3_endpoints_by_profile" in published
-    assert "ise3_endpoints_by_identity_group" not in published
+    assert "ise3_endpoints_by_identity_group" in published
+    assert ("ise3_endpoints_by_identity_group", 0,
+            {"identity_group": "Unavailable from Data Connect"}) in ctx.samples
     assert ("ise3_endpoint_inventory_field_coverage", 0.0,
             {"field": "identity_group"}) in ctx.samples
     assert ("ise3_breakdown_dimension_populated", 0,

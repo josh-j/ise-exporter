@@ -91,7 +91,7 @@ class _Context:
         self.shared.append((family._name, sample_value, labels))
 
 
-def test_an_always_null_action_column_leaves_the_source_breakdown_standing():
+def test_an_always_null_action_column_names_the_missing_action():
     # ENDPOINT_ACTION_NAME is NULL in 290 of 290 rows on ISE 3.3 P11, so the
     # pair is a source breakdown with a constant label -- but SOURCE itself
     # carries four real probe names and must keep publishing.
@@ -115,8 +115,8 @@ def test_an_always_null_action_column_leaves_the_source_breakdown_standing():
 
     assert ("ise3_endpoint_profile_events_by_source", 229.0,
             {"source": "RADIUS Probe"}) in ctx.samples
-    assert not [sample for sample in ctx.samples
-                if sample[0] == "ise3_endpoint_profile_events"]
+    assert ("ise3_endpoint_profile_events", 229.0,
+            {"source": "RADIUS Probe", "action": "Unavailable from ISE"}) in ctx.samples
     assert ("ise3_breakdown_dimension_populated", 0,
             {"dataset": "profile_events", "dimension": "action"}) in ctx.shared
 
@@ -146,3 +146,19 @@ def test_a_populated_action_column_still_publishes_the_pair():
             {"source": "RADIUS Probe"}) in ctx.samples
     assert ("ise3_breakdown_dimension_populated", 1,
             {"dataset": "profile_events", "dimension": "action"}) in ctx.shared
+
+
+def test_an_empty_profile_event_window_publishes_a_labelled_zero():
+    class Transport:
+        schema = {"PROFILED_ENDPOINTS_SUMMARY": {
+            "TIMESTAMP", "SOURCE", "ENDPOINT_ACTION_NAME"}}
+
+        def query_many(self, statements):
+            return {"totals": [{"events": 0}], "source_action": []}
+
+    ctx = _Context(Transport())
+    profile_events.fetch(ctx)
+
+    assert ("ise3_endpoint_profile_events", 0,
+            {"source": "No profile events",
+             "action": "No profile events"}) in ctx.samples

@@ -27,6 +27,7 @@ What the guards do, and why each exists:
 from __future__ import annotations
 
 import base64
+import errno
 import fcntl
 import logging
 import math
@@ -259,7 +260,31 @@ def classify_oracle_error(error):
         return "connection_failed"
     if isinstance(error, TimeoutError) or "TIMEOUT" in message or "DPY-4011" in message:
         return "timeout"
+    if _is_broken_connection(error):
+        return "connection_failed"
     return "invalid_response"
+
+
+def _is_broken_connection(error):
+    """Recognise socket teardown even when python-oracledb leaks the OS error.
+
+    Most dropped Oracle sessions arrive wrapped in a DPY/ORA code.  A peer that
+    closes while the thin driver writes the next request can instead escape as
+    a bare ``BrokenPipeError`` (or a neighbouring reset/abort ``OSError``).
+    That is the same expired-session condition and is safe to reconnect once;
+    classifying it as an invalid response both skipped the existing retry and
+    made the dashboard blame the statement/view.
+    """
+    if isinstance(error, (BrokenPipeError, ConnectionResetError, ConnectionAbortedError)):
+        return True
+    return isinstance(error, OSError) and error.errno in {
+        errno.EPIPE, errno.ECONNRESET, errno.ECONNABORTED,
+    }
+
+
+def _retryable_disconnect(error):
+    return _is_broken_connection(error) or any(
+        code in str(error).upper() for code in _RETRYABLE_DISCONNECT)
 
 
 # The four character types the reporting views project. Thin-mode
@@ -919,8 +944,7 @@ class DataConnectTransport(Transport):
                 # ISE expires healthy sessions on a fixed lifetime, so one
                 # reconnect inside the same paced statement avoids losing a whole
                 # cadence to an idle period. Nothing else is ever retried.
-                if attempt == 0 and any(
-                        code in str(error).upper() for code in _RETRYABLE_DISCONNECT):
+                if attempt == 0 and _retryable_disconnect(error):
                     logger.info("Data Connect session expired; reconnecting once")
                     continue
                 raise TransportError(

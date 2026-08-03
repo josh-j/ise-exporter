@@ -204,7 +204,10 @@ def fetch(ctx):
 DATASET = Dataset(
     name="posture_history",
     description="Historical posture assessments, conditions, Secure Client versions",
-    default_interval=21600,
+    # This feeds a rolling-window percentage. At the old six-hour cadence the
+    # value was correct only at collection time but looked frozen for an entire
+    # operator shift. Hourly still costs only 12 Oracle seconds per hour.
+    default_interval=3600,
     windowed=True,
     metrics=_METRICS,
     providers=(

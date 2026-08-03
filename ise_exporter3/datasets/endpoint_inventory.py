@@ -113,7 +113,8 @@ def fetch(ctx):
     # 3.3 P11 appliance; real group names live in ENDPOINT_IDENTITY_GROUPS,
     # which this statement does not join, so the breakdown is withheld rather
     # than published as one 'none' bucket holding the whole fleet.
-    for dimension, entries in reporting.live_dimensions(ctx, rows).items():
+    dimensions = reporting.live_dimensions(ctx, rows)
+    for dimension, entries in dimensions.items():
         target = gauges.get(dimension)
         if target is None:
             continue
@@ -121,6 +122,15 @@ def fetch(ctx):
         for row in entries:
             (value,) = reporting.group(row, "value")
             ctx.set(gauge, finite(row.get("endpoints")), **{label_name: value})
+    # The live 3.3 view exposes IDENTITY_GROUP_ID but leaves it NULL on every
+    # endpoint.  Withholding a fabricated fleet-sized "none" bucket remains
+    # correct, but withholding the metric entirely makes the dashboard look
+    # broken.  A labelled zero preserves both truths: no invented membership,
+    # and an explicit statement that this source cannot answer the breakdown.
+    if results.get("totals") and not any(
+            dimension == "identity_group" and entries
+            for dimension, entries in dimensions.items()):
+        ctx.set(by_identity_group, 0, identity_group="Unavailable from Data Connect")
 
 
 def fetch_pxgrid(ctx):

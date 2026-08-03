@@ -99,6 +99,16 @@ def fetch(ctx):
                     source=label(row.get("source")),
                     action=label(row.get("action")),
                 )
+        else:
+            # SOURCE is still useful when ISE leaves ENDPOINT_ACTION_NAME NULL.
+            # Name that missing dimension instead of making the combined panel
+            # blank; dimension_populated remains 0 so capability is explicit.
+            for source, count in sources.items():
+                ctx.set(events, count, source=source, action="Unavailable from ISE")
+    else:
+        # A valid empty reporting window should render zero, not the same blank
+        # panel as a failed query or an unready dataset.
+        ctx.set(events, 0, source="No profile events", action="No profile events")
 
 
 DATASET = Dataset(

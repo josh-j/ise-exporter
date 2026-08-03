@@ -364,6 +364,15 @@ def test_posture_reports_coverage_rather_than_dropping_the_dimension():
                    provider="mnt", field="step_latency") == 1.0
     assert _sample("ise3_session_detail_field_coverage", provider="mnt",
                    field="total_authentication_latency") == 1.0
+    assert _sample(
+        "ise3_posture_agent_version_endpoints", provider="mnt",
+        agent_version="Not reported by active sessions") == 0
+    assert _sample(
+        "ise3_posture_endpoints_by_os", provider="mnt",
+        os="Not reported by active sessions") == 0
+    assert _sample(
+        "ise3_posture_policy_results", provider="mnt",
+        policy="No reported posture policies", result="Failed") == 0
 
 
 def test_posture_publishes_the_dimensions_once_secure_client_reports_them():

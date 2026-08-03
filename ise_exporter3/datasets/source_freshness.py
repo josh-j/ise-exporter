@@ -138,7 +138,10 @@ def fetch(ctx):
 DATASET = Dataset(
     name="source_freshness",
     description="Per-view row recency across Data Connect reporting views",
-    default_interval=21600,
+    # A six-hour diagnostic cannot explain a blank operational dashboard in
+    # the shift where it happens. These indexed MAX() batches are cheap enough
+    # to keep the view verdicts hourly without becoming background load.
+    default_interval=3600,
     windowed=True,
     metrics=_METRICS,
     providers=(
