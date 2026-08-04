@@ -1,5 +1,5 @@
 {
-  description = "ise-exporter3 dev shell";
+  description = "ise-exporter3: Prometheus exporter for Cisco ISE";
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
   outputs = { self, nixpkgs }:
     let
@@ -49,8 +49,37 @@
         };
       };
     in {
-      packages = forAll (pkgs: {
+      packages = forAll (pkgs: rec {
         grafana-foundation-sdk = foundationSdk pkgs;
+
+        ise-exporter3 = pkgs.callPackage ./nix/package.nix {
+          python3Packages = pkgs.python312Packages;
+        };
+
+        # Deliberately a separate derivation. Grafana and the exporter are
+        # rarely the same machine, and a dashboard edit should not rebuild --
+        # or restart -- a collector.
+        ise-exporter3-dashboards = pkgs.callPackage ./nix/dashboards.nix { };
+
+        default = ise-exporter3;
+      });
+
+      # `services.ise-exporter3` -- the declarative replacement for
+      # deploy/install.sh. Import it and set `enable`; see nix/module.nix for
+      # what it deliberately does not manage, which is every secret.
+      nixosModules.ise-exporter3 = import ./nix/module.nix { inherit self; };
+      nixosModules.default = self.nixosModules.ise-exporter3;
+
+      overlays.default = final: prev: {
+        ise-exporter3 = final.callPackage ./nix/package.nix {
+          python3Packages = final.python312Packages;
+        };
+        ise-exporter3-dashboards = final.callPackage ./nix/dashboards.nix { };
+      };
+
+      checks = forAll (pkgs: {
+        inherit (self.packages.${pkgs.stdenv.hostPlatform.system})
+          ise-exporter3 ise-exporter3-dashboards;
       });
 
       devShells = forAll (pkgs: {
