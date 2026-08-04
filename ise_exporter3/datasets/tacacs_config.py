@@ -55,10 +55,6 @@ _METRICS = (accounts_total, accounts_classified, account_enabled,
             account_hygiene, policy_sets, policy_objects)
 
 
-def _object_id(row):
-    return str(row.get("id") or "").strip() if isinstance(row, dict) else ""
-
-
 def hygiene_risks(detail):
     """Named risks for one account. Absence of a risk is published as 0."""
     risks = {}
@@ -141,22 +137,23 @@ def fetch(ctx):
         ctx.set(policy_sets, len(sets))
         ctx.set(policy_objects, len(sets), object_type="policy_sets")
 
-    # Both endpoints return a bare list of {name, id}, and ISE mirrors command
-    # sets into the shell-profile list under the same id -- counting that list
-    # verbatim reports one shell profile per command set that does not exist.
-    command_sets = ctx.transport.get_openapi(
-        "/policy/device-admin/command-sets", api="pan_command_sets")
-    command_set_ids = set()
-    if isinstance(command_sets, list):
-        command_set_ids = {_object_id(row) for row in command_sets} - {""}
-        ctx.set(policy_objects, len(command_sets), object_type="command_sets")
-
-    profiles = ctx.transport.get_openapi(
-        "/policy/device-admin/shell-profiles", api="pan_shell_profiles")
-    if isinstance(profiles, list):
-        distinct = sum(1 for row in profiles
-                       if _object_id(row) not in command_set_ids)
-        ctx.set(policy_objects, distinct, object_type="shell_profiles")
+    # Command sets and shell profiles come from ERS, which owns both resources
+    # outright and answers each with an exact SearchResult.total for one
+    # size=1 request. This used to read the Device Admin OpenAPI instead, and
+    # that surface cannot be counted honestly on this release: the profile list
+    # moved to /policy/device-admin/profiles in the 3.2 generation, and what
+    # /shell-profiles still answers on 3.3 P11 is the profile list with the
+    # command sets mixed into it under their own ids. Counting it needed a
+    # subtract-the-command-set-ids guess that was right only for as long as ids
+    # stayed unique across two collections that are not supposed to share one.
+    ctx.set(policy_objects,
+            ctx.transport.get_ers_total(
+                "/config/tacacscommandsets", api="ers_command_sets"),
+            object_type="command_sets")
+    ctx.set(policy_objects,
+            ctx.transport.get_ers_total(
+                "/config/tacacsprofile", api="ers_shell_profiles"),
+            object_type="shell_profiles")
 
 
 DATASET = Dataset(

@@ -404,9 +404,63 @@ def test_command_sets_and_shell_profiles_are_bare_lists_that_overlap(session):
     assert isinstance(command_sets, list)
     assert isinstance(profiles, list)
     # ISE mirrors command sets into the shell-profile list, so counting len()
-    # of the profiles over-reports by the size of the overlap.
+    # of the profiles over-reports by the size of the overlap. This is why
+    # tacacs_config counts neither collection from here.
     assert {entry["id"] for entry in command_sets} & {
         entry["id"] for entry in profiles}
+
+
+def test_ers_owns_the_device_admin_result_objects_the_openapi_conflates(session):
+    """ERS is where the two collections are counted, and why.
+
+    ``ciscoisesdk``'s 3.3 generation puts the Device Admin profile list at
+    ``/policy/device-admin/profiles``; ``/shell-profiles`` is the 3.1-era path,
+    reinstated in 3.5. Whichever of the two this release routes, the OpenAPI
+    surface returns a bare list with no total and -- as the test above records
+    -- mixes command sets into the profiles. The ERS collections stay disjoint
+    and carry an exact ``SearchResult.total``, so that is what the dataset
+    reads. This pins the relationship so a release that changes it is caught.
+    """
+    command_sets = _ers(session, "/config/tacacscommandsets?size=100")
+    profiles = _ers(session, "/config/tacacsprofile?size=100")
+    ers_command_sets = command_sets["SearchResult"]
+    ers_profiles = profiles["SearchResult"]
+    assert isinstance(ers_command_sets["total"], int)
+    assert isinstance(ers_profiles["total"], int)
+
+    # The collections ERS reports are disjoint: no id is in both.
+    command_set_ids = {row["id"] for row in ers_command_sets["resources"]}
+    profile_ids = {row["id"] for row in ers_profiles["resources"]}
+    assert not command_set_ids & profile_ids
+
+    # And the OpenAPI shell-profile list is the union, which is exactly what
+    # made counting it require a guess.
+    openapi_profiles = {
+        entry["id"] for entry in
+        _openapi(session, "/policy/device-admin/shell-profiles")}
+    assert openapi_profiles == profile_ids | (openapi_profiles & command_set_ids)
+
+
+def test_which_device_admin_profile_route_this_release_serves(session):
+    """Record whether 3.3 P11 answers ``/profiles``, ``/shell-profiles`` or both.
+
+    Nothing depends on the answer any more -- that is the point of reading ERS
+    instead -- but the SDK disagrees with itself across generations here, so
+    the appliance's actual answer is worth having written down.
+    """
+    served = {}
+    for path in ("/policy/device-admin/profiles",
+                 "/policy/device-admin/shell-profiles"):
+        try:
+            response = session.get(
+                f"https://{HOST}/api/v1{path}",
+                headers={"Accept": "application/json"}, timeout=TIMEOUT)
+        except requests.RequestException as error:
+            pytest.skip(f"the lab appliance is not answering: {type(error).__name__}")
+        served[path] = response.status_code
+    # At least one of them has to answer, or the OpenAPI surface has moved
+    # again and this note is out of date.
+    assert 200 in served.values(), served
 
 
 # --- Data Connect ----------------------------------------------------------

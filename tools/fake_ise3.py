@@ -893,6 +893,19 @@ class FakeIseHttp:
             return self._ers_user_list(request, query)
         if path == "/config/endpoint":
             return self._ers_endpoint_list(request, query)
+        if path == "/config/tacacscommandsets":
+            return self._ers_object_list(
+                request, query, "/config/tacacscommandsets",
+                [{"id": row["id"], "name": row["name"]}
+                 for row in self._command_sets()])
+        if path == "/config/tacacsprofile":
+            # ERS keeps the two collections apart, which is the whole reason
+            # tacacs_config counts them here rather than off the Device Admin
+            # OpenAPI: no command set appears in this list.
+            return self._ers_object_list(
+                request, query, "/config/tacacsprofile",
+                [{"id": f"sp-{index}", "name": name}
+                 for index, name in enumerate(SHELL_PROFILES)])
         self.unhandled.append(f"ers{path}")
         return self._send(request, 404, b'{"error":"no such ERS resource"}',
                           "application/json")
@@ -956,6 +969,11 @@ class FakeIseHttp:
                 for account in self.estate.accounts]
         return self._search_result(request, "/config/internaluser", rows, page,
                                    size, len(rows))
+
+    def _ers_object_list(self, request, query, resource, rows):
+        """A small, fully enumerable ERS collection served as a SearchResult."""
+        page, size = self._page(query)
+        return self._search_result(request, resource, rows, page, size, len(rows))
 
     def _ers_endpoint_list(self, request, query):
         """A paged identity-only view; never materialize the whole fake estate."""
@@ -1100,8 +1118,10 @@ class FakeIseHttp:
             ]})
         # Both lists are BARE JSON, with no response envelope, and ISE mirrors
         # its deny-all command set into the shell-profile list under the same
-        # id -- so the two lists overlap and counting the profile list verbatim
-        # reports a shell profile that does not exist.
+        # id -- so the two lists overlap. No dataset counts them any more
+        # (tacacs_config reads the ERS collections, which stay disjoint); these
+        # stay because the appliance serves them and the overlap is a recorded
+        # fact that anything reading this surface again has to know about.
         if path == "/policy/device-admin/command-sets":
             self.clock.advance(self.latency.openapi(), "pan")
             return self._json(request, self._command_sets())

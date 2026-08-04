@@ -140,16 +140,11 @@ TACACS_CONFIG_RESPONSES = {
         "id": "u3", "name": "retired", "enabled": False,
         "passwordNeverExpires": False}},
     "/policy/device-admin/policy-set": [{"id": "ps1", "name": "Default"}],
-    # Bare lists, and DenyAllCommands appears in both under one id.
-    "/policy/device-admin/command-sets": [
-        {"name": "DenyAllCommands", "id": "cs1"}],
-    "/policy/device-admin/shell-profiles": [
-        {"name": "WLC ALL", "id": "sp1"},
-        {"name": "WLC MONITOR", "id": "sp2"},
-        {"name": "Deny All Shell Profile", "id": "sp3"},
-        {"name": "Default Shell Profile", "id": "sp4"},
-        {"name": "DenyAllCommands", "id": "cs1"},
-    ],
+    # The ERS totals for the same two collections the appliance's Device Admin
+    # OpenAPI conflates: one command set, and the four real shell profiles
+    # without DenyAllCommands mixed in among them.
+    "/config/tacacscommandsets?total": 1,
+    "/config/tacacsprofile?total": 4,
 }
 
 
@@ -184,11 +179,19 @@ def test_password_never_expires_is_read_from_where_ise_sends_it():
                    username="retired", risk="disabled_account_retained") == 1
 
 
-def test_shell_profiles_do_not_count_the_command_sets_ise_mirrors_into_them():
+def test_shell_profiles_are_counted_from_the_ers_collection_that_owns_them():
+    """The Device Admin OpenAPI cannot answer this honestly on 3.3 P11.
+
+    Its profile list moved to /policy/device-admin/profiles in the 3.2
+    generation, and the /shell-profiles route this used to call still answers
+    with the command sets mixed into the profiles under their own ids. Counting
+    that meant subtracting the command-set ids and hoping no id was ever shared
+    on purpose. ERS keeps the two collections apart and reports an exact total
+    for each.
+    """
     assert _run_tacacs_config().ok
     assert _sample("ise3_tacacs_policy_objects", provider="ers",
                    object_type="command_sets") == 1
-    # Five rows come back, but one of them is the command set by id.
     assert _sample("ise3_tacacs_policy_objects", provider="ers",
                    object_type="shell_profiles") == 4
 

@@ -49,6 +49,9 @@ class FakeTransport(Transport):
     def get_ers(self, path, *, params=None, get_all=False, api="ers"):
         return self._answer(path)
 
+    def get_ers_total(self, path, *, params=None, api="ers"):
+        return self._answer(f"{path}?total")
+
 
 def _config():
     return Config.from_document(
@@ -409,13 +412,8 @@ TACACS_CONFIG_OK = {
         {"id": "ps1", "name": "Device Admin"},
         {"id": "ps2", "name": "Break Glass"},
     ],
-    "/policy/device-admin/command-sets": [
-        {"id": "cs1", "name": "Show Commands"},
-    ],
-    "/policy/device-admin/shell-profiles": [
-        {"id": "sp1", "name": "IOS Admin"},
-        {"id": "sp2", "name": "IOS Read Only"},
-    ],
+    "/config/tacacscommandsets?total": 1,
+    "/config/tacacsprofile?total": 2,
 }
 
 
@@ -439,8 +437,12 @@ def test_tacacs_config_publishes_each_device_admin_object_inventory():
         provider="ers",
         object_type="shell_profiles",
     ) == 2
-    assert "/policy/device-admin/command-sets" in transport.calls
-    assert "/policy/device-admin/shell-profiles" in transport.calls
+    # Read off ERS, which keeps command sets and shell profiles in separate
+    # collections, rather than off the Device Admin OpenAPI, whose profile list
+    # on 3.3 P11 has the command sets mixed into it.
+    assert "/config/tacacscommandsets?total" in transport.calls
+    assert "/config/tacacsprofile?total" in transport.calls
+    assert not [call for call in transport.calls if "shell-profiles" in call]
 
 
 def test_active_sessions_mnt_attributes_on_the_nas_address_alone():

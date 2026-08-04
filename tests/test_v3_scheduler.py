@@ -29,8 +29,8 @@ ALL_RESPONSES = {
     "/backup-restore/config/last-backup-status": {},
     "/config/internaluser": [],
     "/policy/device-admin/policy-set": [],
-    "/policy/device-admin/command-sets": [],
-    "/policy/device-admin/shell-profiles": [],
+    "/config/tacacscommandsets?total": 0,
+    "/config/tacacsprofile?total": 0,
     "/config/endpoint": [],
 }
 
@@ -57,6 +57,9 @@ class ScriptedTransport(Transport):
 
     def get_ers(self, path, **kwargs):
         return self._answer(path)
+
+    def get_ers_total(self, path, **kwargs):
+        return self._answer(f"{path}?total")
 
     def close(self):
         pass
