@@ -348,11 +348,22 @@ pip install -e '.[dashboards]'
 python tools/build_dashboards3.py --out dashboards3
 ```
 
-The generated set includes the eight v2 operator workflows—overview, access,
-endpoints and NADs, exporter health, PAN/MnT, PSN, Secure Client/posture, and
-TACACS—plus v3's provider-source and declared-versus-measured-load dashboards.
-Every workflow is deployment-aware and contract-tested against the metric
-registry; see `dashboards3/README.md` for the capability map.
+Ten dashboards on four tiers, organised by audience and time horizon rather
+than by data source, following `DASHBOARD_DESIGN_PRINCIPLES.md`:
+
+| Tier | Dashboards |
+|---|---|
+| Triage | `ise3-triage` — is ISE authenticating users right now? |
+| Diagnostic | `ise3-access`, `ise3-psn`, `ise3-control`, `ise3-endpoints`, `ise3-posture`, `ise3-tacacs` |
+| Exporter | `ise3-pipeline` — is the exporter's view current? `ise3-load` — what does it cost? |
+| Capacity | `ise3-capacity` — 30-day trends for licence, growth, and runway |
+
+Triage is the only one to open first; every panel on it links down into the
+dashboard that explains it. Each is deployment-aware and contract-tested against
+the metric registry — and the design itself is contract-tested too: tier time
+horizons, a visible-panel ceiling, the data-trust pair on every ISE dashboard,
+and the absence of silently truncated panels are all assertions rather than
+conventions. See `dashboards3/README.md` for the capability map.
 
 ## Simulating production scale
 

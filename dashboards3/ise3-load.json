@@ -45,7 +45,7 @@
       }
     ]
   },
-  "description": "Planned load from provider declarations beside measured requests and database time, target ceilings, enforced pacing, and scheduler queues.",
+  "description": "Tier 3. What is this exporter costing the appliance, and does the measured cost match the declared cost? The panel set that catches a cost declaration drifting away from reality.",
   "editable": true,
   "fiscalYearStartMonth": 0,
   "graphTooltip": 1,
@@ -84,10 +84,11 @@
         "type": "prometheus",
         "uid": "${prometheus}"
       },
-      "description": "Planned load as a fraction of each declared target ceiling; above one is over budget.",
+      "description": "Share of the configured request budget the exporter is actually consuming. Above 80% there is no headroom for a backfill or a manual query; at 100% the scheduler is throttling and freshness starts to slip.",
       "fieldConfig": {
         "defaults": {
           "min": 0,
+          "noValue": "no data \u2014 exporter absent?",
           "thresholds": {
             "mode": "absolute",
             "steps": [
@@ -110,18 +111,27 @@
         "overrides": []
       },
       "gridPos": {
-        "h": 5,
-        "w": 24,
+        "h": 4,
+        "w": 4,
         "x": 0,
         "y": 1
       },
-      "options": null,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": []
+        },
+        "textMode": "auto"
+      },
       "repeatDirection": "h",
       "targets": [
         {
-          "expr": "ise3_load_budget_utilisation{instance=~\"$deployment\"}",
+          "expr": "max by (instance) (ise3_load_budget_utilisation{instance=~\"$deployment\"})",
           "instant": true,
-          "legendFormat": "{{target}}",
+          "legendFormat": "",
           "range": false,
           "refId": "A"
         }
@@ -136,13 +146,322 @@
         "type": "prometheus",
         "uid": "${prometheus}"
       },
-      "description": "Declared request cost beside the measured rate actually leaving the exporter.",
+      "description": "What the exporter is really asking ISE for, derived from the request counter rather than from the plan. The number to quote when someone asks what this exporter costs.",
+      "fieldConfig": {
+        "defaults": {
+          "noValue": "no data \u2014 exporter absent?",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": null
+              }
+            ]
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 4,
+        "y": 1
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": []
+        },
+        "textMode": "auto"
+      },
+      "repeatDirection": "h",
+      "targets": [
+        {
+          "expr": "sum by (instance) (rate(ise3_load_measured_requests_total{instance=~\"$deployment\"}[1h]) * 3600)",
+          "instant": true,
+          "legendFormat": "",
+          "range": false,
+          "refId": "A"
+        }
+      ],
+      "title": "Measured requests per hour",
+      "transformations": [],
+      "transparent": false,
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${prometheus}"
+      },
+      "description": "What the configuration says the exporter will cost. Read it against the measured figure beside it: a declaration that does not match reality is the one thing in this design that can quietly lie.",
+      "fieldConfig": {
+        "defaults": {
+          "noValue": "no data \u2014 exporter absent?",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": null
+              }
+            ]
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 8,
+        "y": 1
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": []
+        },
+        "textMode": "auto"
+      },
+      "repeatDirection": "h",
+      "targets": [
+        {
+          "expr": "sum by (instance) (ise3_load_planned_requests_per_hour{instance=~\"$deployment\"})",
+          "instant": true,
+          "legendFormat": "",
+          "range": false,
+          "refId": "A"
+        }
+      ],
+      "title": "Declared requests per hour",
+      "transformations": [],
+      "transparent": false,
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${prometheus}"
+      },
+      "description": "Share of wall-clock time the exporter's Oracle session is actually executing. This is the figure a database administrator will care about, and the one the appliance enforces against.",
+      "fieldConfig": {
+        "defaults": {
+          "min": 0,
+          "noValue": "no data \u2014 exporter absent?",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 80
+              },
+              {
+                "color": "red",
+                "value": 90
+              }
+            ]
+          },
+          "unit": "percent"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 12,
+        "y": 1
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": []
+        },
+        "textMode": "auto"
+      },
+      "repeatDirection": "h",
+      "targets": [
+        {
+          "expr": "ise3_dataconnect_effective_duty_cycle_percent{instance=~\"$deployment\"}",
+          "instant": true,
+          "legendFormat": "",
+          "range": false,
+          "refId": "A"
+        }
+      ],
+      "title": "Data Connect duty cycle",
+      "transformations": [],
+      "transparent": false,
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${prometheus}"
+      },
+      "description": "Cumulative seconds the scheduler has spent waiting for budget rather than querying. Non-zero means the budget is binding: the exporter wanted to collect and was not allowed to.",
+      "fieldConfig": {
+        "defaults": {
+          "noValue": "no data \u2014 exporter absent?",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 1
+              }
+            ]
+          },
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 16,
+        "y": 1
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": []
+        },
+        "textMode": "auto"
+      },
+      "repeatDirection": "h",
+      "targets": [
+        {
+          "expr": "sum by (instance) (rate(ise3_budget_wait_seconds_total{instance=~\"$deployment\"}[$__rate_interval]))",
+          "instant": true,
+          "legendFormat": "",
+          "range": false,
+          "refId": "A"
+        }
+      ],
+      "title": "Throttle wait",
+      "transformations": [],
+      "transparent": false,
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${prometheus}"
+      },
+      "description": "Whether the budget accounting is still filling its first window. While this is true the utilisation figures beside it are provisional rather than wrong.",
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            {
+              "options": {
+                "0": {
+                  "color": "orange",
+                  "index": 1,
+                  "text": "No"
+                },
+                "1": {
+                  "color": "green",
+                  "index": 0,
+                  "text": "Yes"
+                }
+              },
+              "type": "value"
+            }
+          ],
+          "noValue": "no data \u2014 exporter absent?",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": null
+              }
+            ]
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 20,
+        "y": 1
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": []
+        },
+        "textMode": "value"
+      },
+      "repeatDirection": "h",
+      "targets": [
+        {
+          "expr": "max by (instance) (ise3_budget_warming{instance=~\"$deployment\"})",
+          "instant": true,
+          "legendFormat": "",
+          "range": false,
+          "refId": "A"
+        }
+      ],
+      "title": "Budget warming",
+      "transformations": [],
+      "transparent": false,
+      "type": "stat"
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 5
+      },
+      "id": 0,
+      "panels": [],
+      "title": "Declared against measured",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${prometheus}"
+      },
+      "description": "The plan against reality against the ceiling. Measured exceeding declared means a cost declaration is wrong; measured touching enforced means the scheduler is being held back and collection intervals are effectively longer than configured.",
       "fieldConfig": {
         "defaults": {
           "custom": {
-            "fillOpacity": 0
+            "fillOpacity": 0,
+            "lineWidth": 2
           },
-          "unit": "reqps"
+          "unit": "short"
         },
         "overrides": []
       },
@@ -170,21 +489,35 @@
       "repeatDirection": "h",
       "targets": [
         {
-          "expr": "ise3_load_planned_requests_per_hour{instance=~\"$deployment\"}",
+          "expr": "sum by (instance) (ise3_load_planned_requests_per_hour{instance=~\"$deployment\"})",
           "instant": false,
-          "legendFormat": "{{target}} planned",
+          "legendFormat": "declared",
           "range": true,
           "refId": "A"
         },
         {
-          "expr": "rate(ise3_load_measured_requests_total{instance=~\"$deployment\"}[15m]) * 3600",
+          "expr": "sum by (instance) (rate(ise3_load_measured_requests_total{instance=~\"$deployment\"}[1h]) * 3600)",
           "instant": false,
-          "legendFormat": "{{target}} measured",
+          "legendFormat": "measured",
           "range": true,
           "refId": "B"
+        },
+        {
+          "expr": "sum by (instance) (ise3_budget_enforced_requests_per_hour{instance=~\"$deployment\"})",
+          "instant": false,
+          "legendFormat": "enforced ceiling",
+          "range": true,
+          "refId": "C"
+        },
+        {
+          "expr": "sum by (instance) (ise3_load_budget_requests_per_hour{instance=~\"$deployment\"})",
+          "instant": false,
+          "legendFormat": "configured budget",
+          "range": true,
+          "refId": "D"
         }
       ],
-      "title": "Requests per hour: planned against measured",
+      "title": "Requests per hour: declared, measured, and enforced",
       "transformations": [],
       "transparent": false,
       "type": "timeseries"
@@ -194,13 +527,34 @@
         "type": "prometheus",
         "uid": "${prometheus}"
       },
-      "description": "Configured request ceiling beside the rate currently enforced by the token bucket.",
+      "description": "Planned Oracle duty cycle against what the session actually used, against the ceiling the budget allows. The Data Connect equivalent of the request comparison beside it, and the one an appliance will enforce hardest.",
       "fieldConfig": {
         "defaults": {
           "custom": {
-            "fillOpacity": 0
+            "fillOpacity": 0,
+            "lineWidth": 2,
+            "thresholdsStyle": {
+              "mode": "dashed"
+            }
           },
-          "unit": "short"
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 80
+              },
+              {
+                "color": "red",
+                "value": 90
+              }
+            ]
+          },
+          "unit": "percent"
         },
         "overrides": []
       },
@@ -228,21 +582,28 @@
       "repeatDirection": "h",
       "targets": [
         {
-          "expr": "ise3_load_budget_requests_per_hour{instance=~\"$deployment\"}",
+          "expr": "sum by (instance) (ise3_load_planned_duty_cycle_percent{instance=~\"$deployment\"})",
           "instant": false,
-          "legendFormat": "{{target}} ceiling",
+          "legendFormat": "declared",
           "range": true,
           "refId": "A"
         },
         {
-          "expr": "ise3_budget_enforced_requests_per_hour{instance=~\"$deployment\"}",
+          "expr": "ise3_dataconnect_effective_duty_cycle_percent{instance=~\"$deployment\"}",
           "instant": false,
-          "legendFormat": "{{target}} enforced",
+          "legendFormat": "measured",
           "range": true,
           "refId": "B"
+        },
+        {
+          "expr": "sum by (instance) (ise3_load_budget_duty_cycle_percent{instance=~\"$deployment\"})",
+          "instant": false,
+          "legendFormat": "allowed",
+          "range": true,
+          "refId": "C"
         }
       ],
-      "title": "Request ceiling and enforcement",
+      "title": "Duty cycle: declared, measured, and allowed",
       "transformations": [],
       "transparent": false,
       "type": "timeseries"
@@ -257,7 +618,7 @@
       },
       "id": 0,
       "panels": [],
-      "title": "Data Connect duty cycle",
+      "title": "Where the cost goes",
       "type": "row"
     },
     {
@@ -265,13 +626,267 @@
         "type": "prometheus",
         "uid": "${prometheus}"
       },
-      "description": "Planned wall-clock share in Oracle beside measured statement time and the enforced ceiling.",
+      "description": "Duration and row count of the last query against each reporting view, most expensive first. The list of candidates whenever the duty cycle needs to come down: one view usually dominates.",
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Last duration"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "s"
+              },
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "green",
+                      "value": null
+                    },
+                    {
+                      "color": "orange",
+                      "value": 1
+                    },
+                    {
+                      "color": "red",
+                      "value": 3
+                    }
+                  ]
+                }
+              },
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "mode": "basic",
+                  "type": "color-background"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Cooldown"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "s"
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 10,
+        "w": 12,
+        "x": 0,
+        "y": 15
+      },
+      "options": null,
+      "repeatDirection": "h",
+      "targets": [
+        {
+          "expr": "max by (instance,view) (ise3_dataconnect_query_last_duration_seconds{instance=~\"$deployment\"})",
+          "format": "table",
+          "instant": true,
+          "legendFormat": "",
+          "range": false,
+          "refId": "A"
+        },
+        {
+          "expr": "ise3_dataconnect_query_rows{instance=~\"$deployment\"}",
+          "format": "table",
+          "instant": true,
+          "legendFormat": "",
+          "range": false,
+          "refId": "B"
+        },
+        {
+          "expr": "ise3_dataconnect_query_cooldown_seconds{instance=~\"$deployment\"}",
+          "format": "table",
+          "instant": true,
+          "legendFormat": "",
+          "range": false,
+          "refId": "C"
+        }
+      ],
+      "title": "Statement cost by view",
+      "transformations": [
+        {
+          "id": "filterFieldsByName",
+          "options": {
+            "exclude": {
+              "names": [
+                "Time",
+                "__name__",
+                "job"
+              ]
+            }
+          }
+        },
+        {
+          "id": "merge",
+          "options": {}
+        },
+        {
+          "id": "organize",
+          "options": {
+            "renameByName": {
+              "Value #A": "Last duration",
+              "Value #B": "Rows",
+              "Value #C": "Cooldown",
+              "view": "View"
+            }
+          }
+        },
+        {
+          "id": "sortBy",
+          "options": {
+            "sort": [
+              {
+                "desc": true,
+                "field": "Last duration"
+              }
+            ]
+          }
+        }
+      ],
+      "transparent": false,
+      "type": "table"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${prometheus}"
+      },
+      "description": "How long each dataset takes to collect and how often it runs \u2014 duration over interval is the share of the schedule that dataset consumes. The cheapest saving is usually a long dataset on a short interval.",
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Duration"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "s"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Interval"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "s"
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 10,
+        "w": 12,
+        "x": 12,
+        "y": 15
+      },
+      "options": null,
+      "repeatDirection": "h",
+      "targets": [
+        {
+          "expr": "max by (instance,dataset) (ise3_dataset_collection_duration_seconds{instance=~\"$deployment\"})",
+          "format": "table",
+          "instant": true,
+          "legendFormat": "",
+          "range": false,
+          "refId": "A"
+        },
+        {
+          "expr": "ise3_dataset_interval_seconds{instance=~\"$deployment\"}",
+          "format": "table",
+          "instant": true,
+          "legendFormat": "",
+          "range": false,
+          "refId": "B"
+        },
+        {
+          "expr": "ise3_dataset_series{instance=~\"$deployment\"}",
+          "format": "table",
+          "instant": true,
+          "legendFormat": "",
+          "range": false,
+          "refId": "C"
+        }
+      ],
+      "title": "Collection cost by dataset",
+      "transformations": [
+        {
+          "id": "filterFieldsByName",
+          "options": {
+            "exclude": {
+              "names": [
+                "Time",
+                "__name__",
+                "job"
+              ]
+            }
+          }
+        },
+        {
+          "id": "merge",
+          "options": {}
+        },
+        {
+          "id": "organize",
+          "options": {
+            "renameByName": {
+              "Value #A": "Duration",
+              "Value #B": "Interval",
+              "Value #C": "Series published",
+              "dataset": "Dataset"
+            }
+          }
+        },
+        {
+          "id": "sortBy",
+          "options": {
+            "sort": [
+              {
+                "desc": true,
+                "field": "Duration"
+              }
+            ]
+          }
+        }
+      ],
+      "transparent": false,
+      "type": "table"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${prometheus}"
+      },
+      "description": "Oracle seconds per second the exporter is consuming, against the hourly figure the configuration declared. A step in the measured line without a configuration change means a view's data volume grew.",
       "fieldConfig": {
         "defaults": {
           "custom": {
-            "fillOpacity": 0
+            "fillOpacity": 25,
+            "lineWidth": 2
           },
-          "unit": "percent"
+          "unit": "short"
         },
         "overrides": []
       },
@@ -279,7 +894,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 15
+        "y": 25
       },
       "options": {
         "legend": {
@@ -299,302 +914,185 @@
       "repeatDirection": "h",
       "targets": [
         {
-          "expr": "ise3_load_planned_duty_cycle_percent{instance=~\"$deployment\",target=\"oracle\"}",
+          "expr": "sum by (instance,target) (rate(ise3_load_measured_db_seconds_total{instance=~\"$deployment\"}[$__rate_interval]))",
           "instant": false,
-          "legendFormat": "planned",
+          "legendFormat": "measured {{target}}",
           "range": true,
           "refId": "A"
         },
         {
-          "expr": "rate(ise3_load_measured_db_seconds_total{instance=~\"$deployment\",target=\"oracle\"}[15m]) * 100",
+          "expr": "sum by (instance) (ise3_load_planned_db_seconds_per_hour{instance=~\"$deployment\"}) / 3600",
           "instant": false,
-          "legendFormat": "measured",
+          "legendFormat": "declared",
+          "range": true,
+          "refId": "B"
+        }
+      ],
+      "title": "Database time consumed",
+      "transformations": [],
+      "transparent": false,
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${prometheus}"
+      },
+      "description": "The distribution behind the last-duration column beside it. A p95 well above the typical last duration means one statement occasionally runs far longer than it usually does, which is what actually breaches a duty cycle.",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "fillOpacity": 0,
+            "lineWidth": 2
+          },
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 25
+      },
+      "options": {
+        "legend": {
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "right",
+          "showLegend": false
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "asc"
+        }
+      },
+      "repeatDirection": "h",
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum by (instance,view,le) (rate(ise3_dataconnect_query_duration_seconds_bucket{instance=~\"$deployment\"}[$__rate_interval])))",
+          "instant": false,
+          "legendFormat": "{{view}}",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "title": "Statement duration, 95th percentile",
+      "transformations": [],
+      "transparent": false,
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${prometheus}"
+      },
+      "description": "Requests the budget refused, the cooldown the exporter imposed on reporting queries in response, and any explorer queries an operator ran by hand. The last one matters: ad-hoc reads come out of the same budget as scheduled collection.",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "fillOpacity": 0,
+            "lineWidth": 2
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 33
+      },
+      "options": {
+        "legend": {
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": false
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "asc"
+        }
+      },
+      "repeatDirection": "h",
+      "targets": [
+        {
+          "expr": "sum by (instance) (rate(ise3_budget_throttled_total{instance=~\"$deployment\"}[$__rate_interval]))",
+          "instant": false,
+          "legendFormat": "throttled",
+          "range": true,
+          "refId": "A"
+        },
+        {
+          "expr": "max by (instance) (ise3_dataconnect_query_cooldown_seconds{instance=~\"$deployment\"})",
+          "instant": false,
+          "legendFormat": "peak cooldown",
           "range": true,
           "refId": "B"
         },
         {
-          "expr": "ise3_dataconnect_effective_duty_cycle_percent{instance=~\"$deployment\"}",
+          "expr": "sum by (instance,result) (rate(ise3_dataconnect_explorer_queries_total{instance=~\"$deployment\"}[$__rate_interval]))",
           "instant": false,
-          "legendFormat": "ceiling",
+          "legendFormat": "ad-hoc {{result}}",
           "range": true,
           "refId": "C"
         }
       ],
-      "title": "Duty cycle: planned against measured",
+      "title": "Throttling, cooldown, and ad-hoc queries",
       "transformations": [],
       "transparent": false,
       "type": "timeseries"
     },
     {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${prometheus}"
-      },
-      "description": "Global wait after each statement, which is how the configured duty-cycle budget is enforced.",
-      "fieldConfig": {
-        "defaults": {
-          "custom": {
-            "fillOpacity": 0
-          },
-          "unit": "s"
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 12,
-        "y": 15
-      },
-      "options": {
-        "legend": {
-          "calcs": [
-            "lastNotNull",
-            "max"
-          ],
-          "displayMode": "table",
-          "placement": "bottom",
-          "showLegend": false
-        },
-        "tooltip": {
-          "mode": "single",
-          "sort": "asc"
-        }
-      },
-      "repeatDirection": "h",
-      "targets": [
-        {
-          "expr": "ise3_dataconnect_query_cooldown_seconds{instance=~\"$deployment\"}",
-          "instant": false,
-          "legendFormat": "{{view}}",
-          "range": true,
-          "refId": "A"
-        }
-      ],
-      "title": "Cooldown imposed on reporting datasets",
-      "transformations": [],
-      "transparent": false,
-      "type": "timeseries"
-    },
-    {
-      "collapsed": false,
+      "collapsed": true,
       "gridPos": {
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 23
+        "y": 41
       },
       "id": 0,
-      "panels": [],
-      "title": "Statement cost and scheduler",
+      "panels": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${prometheus}"
+          },
+          "description": "Purpose, reading order, and where to go next. Kept with the dashboard so the meaning cannot drift away from the panels.",
+          "fieldConfig": {
+            "defaults": {},
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 6,
+            "w": 24,
+            "x": 0,
+            "y": 42
+          },
+          "options": {
+            "content": "**Purpose** \u2014 hold the exporter's declared cost against its measured cost, so a cost declaration cannot quietly become fiction.\n\n**Read it in this order**\n\n1. Read budget used and the declared-against-measured graph.\n2. If measured exceeds declared, the configuration is under-stating cost \u2014 fix the declaration or the interval.\n3. If measured is pinned to the enforced ceiling, collection intervals are effectively longer than configured.\n\n**When something is red**\n\n- Duty cycle high: find the dominant view in **Statement cost** and lengthen its scan window or its interval.\n- Throttling non-zero: the exporter is already holding itself back; freshness on the pipeline dashboard will show the cost.\n\n**Related dashboards** \u2014 Collection pipeline, Triage, Capacity\n\n*Owner: set this to the team that answers the page. Runbook: link it here \u2014 a red panel with no runbook is a puzzle, not an alert.*",
+            "mode": "markdown"
+          },
+          "repeatDirection": "h",
+          "title": "About this dashboard",
+          "transformations": [],
+          "transparent": false,
+          "type": "text"
+        }
+      ],
+      "title": "Reference",
       "type": "row"
-    },
-    {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${prometheus}"
-      },
-      "description": "Latest successful statement duration for every reporting view.",
-      "fieldConfig": {
-        "defaults": {
-          "custom": {
-            "fillOpacity": 0
-          },
-          "unit": "s"
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 0,
-        "y": 24
-      },
-      "options": {
-        "legend": {
-          "calcs": [
-            "lastNotNull",
-            "max"
-          ],
-          "displayMode": "table",
-          "placement": "bottom",
-          "showLegend": false
-        },
-        "tooltip": {
-          "mode": "single",
-          "sort": "asc"
-        }
-      },
-      "repeatDirection": "h",
-      "targets": [
-        {
-          "expr": "ise3_dataconnect_query_last_duration_seconds{instance=~\"$deployment\",result=\"success\"}",
-          "instant": false,
-          "legendFormat": "{{view}}",
-          "range": true,
-          "refId": "A"
-        }
-      ],
-      "title": "Statement duration by view",
-      "transformations": [],
-      "transparent": false,
-      "type": "timeseries"
-    },
-    {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${prometheus}"
-      },
-      "description": "Rows returned by each reporting statement after database-side aggregation.",
-      "fieldConfig": {
-        "defaults": {
-          "custom": {
-            "fillOpacity": 0
-          },
-          "unit": "short"
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 12,
-        "y": 24
-      },
-      "options": {
-        "legend": {
-          "calcs": [
-            "lastNotNull",
-            "max"
-          ],
-          "displayMode": "table",
-          "placement": "bottom",
-          "showLegend": false
-        },
-        "tooltip": {
-          "mode": "single",
-          "sort": "asc"
-        }
-      },
-      "repeatDirection": "h",
-      "targets": [
-        {
-          "expr": "ise3_dataconnect_query_rows{instance=~\"$deployment\"}",
-          "instant": false,
-          "legendFormat": "{{view}}",
-          "range": true,
-          "refId": "A"
-        }
-      ],
-      "title": "Rows returned by view",
-      "transformations": [],
-      "transparent": false,
-      "type": "timeseries"
-    },
-    {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${prometheus}"
-      },
-      "description": "Datasets waiting on each serialized target lane; sustained depth means cadence is not achievable.",
-      "fieldConfig": {
-        "defaults": {
-          "custom": {
-            "fillOpacity": 0
-          },
-          "unit": "short"
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 0,
-        "y": 32
-      },
-      "options": {
-        "legend": {
-          "calcs": [
-            "lastNotNull",
-            "max"
-          ],
-          "displayMode": "table",
-          "placement": "bottom",
-          "showLegend": false
-        },
-        "tooltip": {
-          "mode": "single",
-          "sort": "asc"
-        }
-      },
-      "repeatDirection": "h",
-      "targets": [
-        {
-          "expr": "ise3_lane_queue_depth{instance=~\"$deployment\"}",
-          "instant": false,
-          "legendFormat": "{{target}}",
-          "range": true,
-          "refId": "A"
-        }
-      ],
-      "title": "Lane queue depth",
-      "transformations": [],
-      "transparent": false,
-      "type": "timeseries"
-    },
-    {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${prometheus}"
-      },
-      "description": "Latest collection duration by dataset and active provider.",
-      "fieldConfig": {
-        "defaults": {
-          "custom": {
-            "fillOpacity": 0
-          },
-          "unit": "s"
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 12,
-        "y": 32
-      },
-      "options": {
-        "legend": {
-          "calcs": [
-            "lastNotNull",
-            "max"
-          ],
-          "displayMode": "table",
-          "placement": "bottom",
-          "showLegend": false
-        },
-        "tooltip": {
-          "mode": "single",
-          "sort": "asc"
-        }
-      },
-      "repeatDirection": "h",
-      "targets": [
-        {
-          "expr": "ise3_dataset_collection_duration_seconds{instance=~\"$deployment\"}",
-          "instant": false,
-          "legendFormat": "{{dataset}} \u00b7 {{provider}}",
-          "range": true,
-          "refId": "A"
-        }
-      ],
-      "title": "Collection duration by dataset",
-      "transformations": [],
-      "transparent": false,
-      "type": "timeseries"
     }
   ],
-  "refresh": "1m",
+  "refresh": "5m",
   "schemaVersion": 36,
   "style": "dark",
   "tags": [
@@ -639,10 +1137,10 @@
     ]
   },
   "time": {
-    "from": "now-6h",
+    "from": "now-24h",
     "to": "now"
   },
   "timezone": "browser",
-  "title": "ISE Exporter 3 \u2014 Load and Budget",
+  "title": "ISE Exporter \u00b7 Load against ISE",
   "uid": "ise3-load"
 }
