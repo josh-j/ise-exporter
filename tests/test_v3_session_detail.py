@@ -172,3 +172,125 @@ def test_attribute_parsing_handles_the_ise_pair_format():
 def test_a_record_that_is_not_a_record_does_not_raise():
     # One malformed MnT response must not fail a 20,000-session collection.
     assert project(None)["nad"] == ""
+
+
+# --- PostureReport, held to a document the appliance actually wrote ----------
+
+# The grammar is verbatim from a report a posture-enabled appliance wrote;
+# the names are invented, because real policy names are site-defined. What is
+# being pinned is the shape: backslash-semicolon is literal in the payload --
+# `\;` is the delimiter ISE writes, not an escape for a literal semicolon --
+# policies are comma-separated, and the parenthesised tail holds requirements
+# whose condition lists carry colons of their own.
+REAL_POSTURE_REPORT = (
+    r"Corp-Inventory-Agent\;Passed\;(Req-Inventory-Registered:Audit:Skipped:"
+    r"Passed_Conditions[]:Failed_Conditions[Cond-Inventory-Version]:"
+    r"Skipped_Conditions[Cond-Inventory-Name:Cond-Inventory-InstallDate]), "
+    r"Corp-Firewall-On\;Passed\;(Req-Firewall-Enabled:Optional:Passed:"
+    r"Passed_Conditions[Cond-Firewall-Private-Enabled:"
+    r"Cond-Firewall-Domain-Enabled]:Failed_Conditions[]:"
+    r"Skipped_Conditions[]), "
+    r"Corp-Disk-Encryption\;Passed\;(Req-Disk-Encrypted:Optional:Passed:"
+    r"Passed_Conditions[Cond-Disk-Volume-Encrypted]:"
+    r"Failed_Conditions[]:Skipped_Conditions[]), "
+    r"Corp-AV-Required\;Passed\;(Req-AV-Installed:Optional:Passed:"
+    r"Passed_Conditions[Cond-AV-Product-Present]:Failed_Conditions[]:"
+    r"Skipped_Conditions[]\;Req-AV-Scan-Recent:Audit:Failed:Passed_Conditions[]:"
+    r"Failed_Conditions[Cond-AV-Scan-Age]:Skipped_Conditions[])"
+)
+
+
+def test_the_policy_breakdown_is_one_series_per_policy_not_per_endpoint():
+    r"""The old parser unescaped `\;` and split on `;`, finding one entry.
+
+    `\;` is the delimiter, so unescaping first destroys the only structure
+    there is: the whole 1.4 KB report became one `policy` label, split at its
+    last colon. Every endpoint's report differs, so `label()` truncated and
+    hashed each into its own series and the family grew with the fleet.
+    """
+    from ise_exporter3.datasets.posture_current import parse_posture_report
+
+    pairs = list(parse_posture_report(REAL_POSTURE_REPORT))
+    assert pairs == [
+        ("Corp-Inventory-Agent", "Passed"),
+        ("Corp-Firewall-On", "Passed"),
+        ("Corp-Disk-Encryption", "Passed"),
+        ("Corp-AV-Required", "Passed"),
+    ]
+    assert all(len(policy) < 40 for policy, _result in pairs)
+
+
+def test_a_failed_audit_requirement_survives_a_policy_that_reads_passed():
+    """Corp-AV-Required rolls up to Passed while Req-AV-Scan-Recent failed.
+
+    An Audit requirement does not change the verdict, so this failure exists
+    only at the requirement level -- and mandate is what separates it from one
+    that would actually deny access.
+    """
+    from ise_exporter3.datasets.posture_current import parse_posture_requirements
+
+    requirements = list(parse_posture_requirements(REAL_POSTURE_REPORT))
+    assert ("Req-AV-Scan-Recent", "Audit", "Failed") in requirements
+    assert ("Req-AV-Installed", "Optional", "Passed") in requirements
+    # The conditions blob carries colons of its own; only the first three fields
+    # are the requirement, so it must not leak into the result label.
+    assert all(":" not in field
+               for entry in requirements for field in entry)
+    assert not [entry for entry in requirements if entry[1] == "Mandatory"]
+
+
+def test_an_empty_or_absent_report_yields_nothing_rather_than_a_bad_label():
+    from ise_exporter3.datasets.posture_current import (
+        parse_posture_report, parse_posture_requirements)
+
+    for value in ("", None, "   ", "not a report"):
+        assert list(parse_posture_report(value)) == []
+        assert list(parse_posture_requirements(value)) == []
+
+
+def test_posture_is_read_from_other_attr_string_where_the_appliance_puts_it():
+    """The bug this projection shipped with, and the reason it went unseen.
+
+    On a deployment that runs posture the report, the agent version and the
+    eligibility flag are CamelCase *attributes* of other_attr_string -- like
+    both latencies -- not elements. Reading only the elements collected nothing
+    there, while the lab's empty top-level `posture_status` element made the
+    absence look like "this estate has no Secure Client".
+    """
+    projected = project({
+        "calling_station_id": "00:11:22:33:44:55",
+        "posture_status": "",
+        "other_attr_string": (
+            ":!:PostureStatus=Compliant"
+            ":!:PostureApplicable=Yes"
+            ":!:PostureAssessmentStatus=NotApplicable"
+            ":!:PostureAgentVersion=Posture Agent for Windows 5.1.17.3394"
+            r":!:PostureReport=Corp-Firewall-On\;Passed\;"
+            r"(Req-Firewall-Enabled:Mandatory:Passed:Passed_Conditions[]:"
+            r"Failed_Conditions[]:Skipped_Conditions[])"
+            ":!:"),
+    })
+    assert projected["posture_status"] == "Compliant"
+    assert projected["posture_applicable"] == "Yes"
+    assert projected["agent_version"] == "Posture Agent for Windows 5.1.17.3394"
+    assert projected["posture_report"].startswith("Corp-Firewall-On")
+
+
+def test_the_element_wins_over_the_attribute_where_both_are_populated():
+    projected = project({
+        "posture_status": "NonCompliant",
+        "other_attr_string": ":!:PostureStatus=Compliant:!:",
+    })
+    assert projected["posture_status"] == "NonCompliant"
+
+
+def test_the_assessment_trigger_state_never_displaces_the_verdict():
+    # PostureAssessmentStatus is the last-assessment trigger state and reads
+    # NotApplicable on sessions whose verdict is Compliant. Taking the first
+    # Posture*Status found would report a verdict ISE never reached.
+    projected = project({
+        "other_attr_string": (
+            ":!:PostureAssessmentStatus=NotApplicable"
+            ":!:PostureStatus=Compliant:!:"),
+    })
+    assert projected["posture_status"] == "Compliant"

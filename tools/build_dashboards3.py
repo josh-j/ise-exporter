@@ -3298,10 +3298,15 @@ def posture_dashboard():
                 "Posture policies with failing results, worst first. A single "
                 "policy dominating usually means the policy is wrong rather "
                 "than the fleet — check what it requires before chasing "
-                "endpoints.",
-                summed(gate(metric("ise3_posture_policy_results",
-                                   'result!~"pass|Passed|passed"'),
-                            "posture_current"), by="instance,policy"),
+                "endpoints. Served from the assessment history, which carries "
+                "the per-policy verdict as its own column; the live MnT "
+                "breakdown is the fallback where that view is unavailable.",
+                (summed(gate(metric("ise3_posture_failing_policies"),
+                             "posture_history"), by="instance,policy")
+                 + " or "
+                 + summed(gate(metric("ise3_posture_policy_results",
+                                      'result!~"pass|Passed|passed"'),
+                               "posture_current"), by="instance,policy")),
                 label="policy",
                 label_header="Posture policy",
                 header="Failures",
@@ -3323,6 +3328,27 @@ def posture_dashboard():
                 header="Endpoints",
                 value_thresholds=NONZERO_WARNING,
                 colour_cells=True,
+            ),
+            PANEL_H,
+            THIRD,
+        ),
+        sized(
+            tbl(
+                "Failing requirements, by mandate",
+                "The requirement level, which a policy hides: a policy rolls "
+                "its requirements up, so an Audit requirement that failed "
+                "leaves the policy reading Passed. Mandate is the column that "
+                "matters — a failed Mandatory requirement is denying access, "
+                "while Audit and Optional only record. A long list with nothing "
+                "Mandatory in it means posture is running in observation mode.",
+                [instant(gate(metric("ise3_posture_requirement_results",
+                                     'result!~"Passed|passed|pass"'),
+                              "posture_current"))],
+                columns=["Endpoints"],
+                sort=("Endpoints", True),
+                labels={"requirement": "Requirement", "mandate": "Mandate",
+                        "result": "Result"},
+                thresholds=NONZERO_WARNING,
             ),
             PANEL_H,
             THIRD,
@@ -3413,7 +3439,7 @@ def posture_dashboard():
                     instant(gate(metric("ise3_posture_eligible_endpoints_total"),
                                  "posture_history"), "eligible"),
                     instant(gate(metric("ise3_endpoints_posture_applicable",
-                                        'applicable="true"'), "endpoint_inventory"),
+                                        'applicable="yes"'), "endpoint_inventory"),
                             "applicable", ref="B"),
                 ],
                 thresholds=NEUTRAL,

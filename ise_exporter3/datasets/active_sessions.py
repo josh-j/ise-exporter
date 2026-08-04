@@ -54,8 +54,12 @@ def fetch_pxgrid(ctx):
 
     for session in sessions:
         nas_ip = first(session, "nasIpAddress", "nas_ip_address")
+        # nasIdentifier first: it is the field the session object actually
+        # carries, and without it every session here fell back to the NAS IP and
+        # counted as unmatched whenever the directory needed the name.
         device = first(
-            session, "nasName", "networkDeviceName", "network_device_name")
+            session, "nasIdentifier", "nas_identifier", "nasName",
+            "networkDeviceName", "network_device_name")
         classification = directory.lookup(nas_ip, device)
         if classification:
             matched += 1

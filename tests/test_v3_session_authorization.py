@@ -381,7 +381,13 @@ def test_posture_publishes_the_dimensions_once_secure_client_reports_them():
     mac = "00:11:22:33:44:01"
     detail = _detail(mac)
     detail["posture_status"] = "Compliant"
-    detail["posture_report"] = "AV_Installed:Passed;Firewall:Failed"
+    detail["posture_report"] = (
+        r"Corp-AV-Required\;Passed\;(Req-AV-Installed:Optional:Passed:"
+        r"Passed_Conditions[Cond-AV-Present]:Failed_Conditions[]:"
+        r"Skipped_Conditions[]), "
+        r"Corp-Firewall-On\;Failed\;(Req-Firewall-Enabled:Mandatory:Failed:"
+        r"Passed_Conditions[]:Failed_Conditions[Cond-Firewall-Domain-Enabled]:"
+        r"Skipped_Conditions[])")
     detail["posture_agent_version"] = "5.1.2.42"
     detail["operating_system"] = "Windows 11"
     transport = MnT([mac], details={mac: detail})
@@ -399,7 +405,12 @@ def test_posture_publishes_the_dimensions_once_secure_client_reports_them():
     assert _sample("ise3_posture_endpoints_by_os",
                    provider="mnt", os="Windows 11") == 1
     assert _sample("ise3_posture_policy_results", provider="mnt",
-                   policy="Firewall", result="Failed") == 1
+                   policy="Corp-Firewall-On", result="Failed") == 1
+    # The requirement level carries the mandate, which is what separates a
+    # failure that denies access from one that only records.
+    assert _sample("ise3_posture_requirement_results", provider="mnt",
+                   requirement="Req-Firewall-Enabled", mandate="Mandatory",
+                   result="Failed") == 1
 
 
 def test_one_unreachable_endpoint_does_not_fail_the_dataset():

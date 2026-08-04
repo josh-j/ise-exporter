@@ -49,6 +49,15 @@ failed_conditions = Gauge(
     "Distinct endpoints failing a posture condition. Endpoints, not condition "
     "hits: an endpoint failing three conditions counts once in each",
     ["provider", "condition"])
+failing_policies = Gauge(
+    "ise3_posture_failing_policies",
+    "Distinct endpoints with at least one failed condition, per posture policy. "
+    "This is the per-policy pass/fail breakdown POSTURE_REPORT carries as "
+    "`policy:result` text, read instead off the condition view's own POLICY "
+    "column. Distinct from ise3_posture_assessments_by_policy, which pairs the "
+    "matched policy with the endpoint's overall verdict rather than with what "
+    "that policy decided",
+    ["provider", "policy"])
 eligible_total = Gauge(
     "ise3_posture_eligible_endpoints_total",
     "Endpoints currently eligible for posture assessment",
@@ -64,7 +73,8 @@ eligible_without_recent = Gauge(
 
 _METRICS = (
     assessments, by_policy, by_agent_version, by_os, by_psn,
-    failed_conditions, eligible_total, eligible_recent, eligible_without_recent,
+    failed_conditions, failing_policies,
+    eligible_total, eligible_recent, eligible_without_recent,
 )
 
 ENDPOINT_VIEW = "posture_assessment_by_endpoint"
@@ -80,8 +90,15 @@ ENDPOINT_DIMENSIONS = (
     ("os", "NVL(endpoint_operating_system, 'unknown')"),
     ("status", "NVL(posture_status, 'Unknown')"),
 )
+# Both are read from the failed-condition scan, so they are marginals of the
+# same population: endpoints with at least one failed condition, counted once
+# per condition and once per policy. `policy` is the per-policy pass/fail that
+# POSTURE_REPORT holds as `policy:result` text -- an ordinary column here, so it
+# groups on the appliance instead of arriving as a CLOB to be parsed, and does
+# not depend on how ISE escapes a separator inside a policy name.
 CONDITION_DIMENSIONS = (
     ("condition", "NVL(condition_name, 'unknown')"),
+    ("policy", "NVL(policy, 'none')"),
 )
 ENDPOINT_MEASURE = "COUNT(DISTINCT endpoint_mac_address) AS endpoints"
 CONDITION_MEASURE = "COUNT(DISTINCT endpoint_id) AS endpoints"
@@ -191,9 +208,18 @@ def fetch(ctx):
 
     conditions = results.get("condition_marginals", [])
     reporting.publish_truncation(ctx, "condition_marginals", conditions)
-    for row in conditions:
-        (value,) = reporting.group(row, "value")
-        ctx.set(failed_conditions, finite(row.get("endpoints")), condition=value)
+    condition_gauges = {
+        "condition": (failed_conditions, "condition"),
+        "policy": (failing_policies, "policy"),
+    }
+    for dimension, entries in reporting.by_dimension(conditions).items():
+        target = condition_gauges.get(dimension)
+        if target is None:
+            continue
+        gauge, label_name = target
+        for row in entries:
+            (value,) = reporting.group(row, "value")
+            ctx.set(gauge, finite(row.get("endpoints")), **{label_name: value})
 
     for row in results.get("eligibility", []):
         ctx.set(eligible_total, finite(row.get("eligible")))
@@ -213,12 +239,17 @@ DATASET = Dataset(
     providers=(
         Provider(
             name="dataconnect",
+            # Unchanged by the policy marginal: it is one more grouping set on
+            # a scan this dataset already makes, not another statement.
             cost=Cost(target="oracle", db_seconds=12.0),
             supplies=frozenset({
                 "status", "policy", "condition", "os", "agent_version", "psn",
                 "eligibility"}),
             requires=(
                 "view:POSTURE_ASSESSMENT_BY_ENDPOINT",
+                # Was already read for the condition marginals but never
+                # declared; policy_outcomes now depends on it too.
+                "view:POSTURE_ASSESSMENT_BY_CONDITION",
                 "view:ENDPOINTS_DATA",
             ),
             fetch=fetch,

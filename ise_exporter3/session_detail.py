@@ -25,11 +25,20 @@ discipline applied to the bigger cache, and it does three things:
 A field is projected where the appliance answers it, and "the appliance did not
 answer it here" is not the same claim as "this API cannot answer it". Neither
 latency is an element on ISE 3.3, under any spelling, on any session -- those
-are read out of ``other_attr_string`` instead. The posture fields are the other
-case: they are absent on a lab with no Secure Client, and populated in a
-deployment that runs posture, so they stay projected. Deleting a lookup because
-one estate never exercises it is how a working production metric gets removed;
-the test is whether ISE can ever emit the field, not whether it did here.
+are read out of ``other_attr_string`` instead.
+
+Posture turned out to be the same case, not a different one. This docstring used
+to say the posture fields were merely unexercised by a lab with no Secure
+Client, and that they would populate as elements wherever posture ran. They do
+not: on a deployment that runs posture they arrive as CamelCase attributes of
+``other_attr_string`` -- ``PostureReport``, ``PostureAgentVersion``,
+``PostureApplicable`` -- exactly like the latencies. Reading only the elements
+collected nothing there, and the empty top-level ``posture_status`` element made
+the absence look already explained. Every posture lookup now tries the elements
+and then the attributes, which is what ``_either`` is for.
+
+The lesson generalises: an estate that does not exercise a field cannot tell you
+where that field lives, so "absent here" is never evidence about the shape.
 
 The projection is deliberately flat and fully resolved: a reader gets a value or
 an empty string, never a choice of field names. Adding a field here is the
@@ -68,6 +77,13 @@ AUTHZ_RULE_ATTRIBUTE = "AuthorizationPolicyMatchedRule"
 # total_authen_latency/TotalAuthenLatency tag under any spelling.
 STEP_LATENCY_ATTRIBUTE = "StepLatency"
 TOTAL_LATENCY_ATTRIBUTE = "TotalAuthenLatency"
+# Posture is the same case as the latencies, and for the same reason it was
+# missed: on a deployment that runs posture the report, the agent version and
+# the eligibility flag arrive as CamelCase *attributes* of other_attr_string,
+# not as elements. The lab has an empty top-level ``posture_status`` element and
+# nothing else, which reads as "this estate does not run posture" -- so the
+# absence looked explained and the attribute side was never tried.
+_POSTURE_APPLICABLE_FIELDS = ("PostureApplicable", "posture_applicable")
 
 
 def first(record, names):
@@ -87,6 +103,16 @@ def parse_attributes(value):
         if separator and key.strip() and item.strip():
             parsed[key.strip()] = item.strip()
     return parsed
+
+
+def _either(record, attributes, names):
+    """The first answer from the elements, else from the parsed attributes.
+
+    ISE puts the same fact in either place depending on the field and the
+    release, and a reader cannot tell which without looking in both. Elements
+    win where both are populated, because that is the document's own column.
+    """
+    return first(record, names) or first(attributes, names)
 
 
 def _truthy(value):
@@ -121,10 +147,12 @@ def project(record):
         "profiles": first(record, _PROFILE_FIELDS),
         "authz_rule": attributes.get(AUTHZ_RULE_ATTRIBUTE, ""),
         "policy_set": attributes.get(POLICY_SET_ATTRIBUTE, ""),
-        "posture_status": first(record, _POSTURE_STATUS_FIELDS),
-        "posture_report": first(record, _POSTURE_REPORT_FIELDS),
-        "agent_version": first(record, _AGENT_FIELDS),
-        "operating_system": first(record, _OS_FIELDS),
+        "posture_status": _either(record, attributes, _POSTURE_STATUS_FIELDS),
+        "posture_report": _either(record, attributes, _POSTURE_REPORT_FIELDS),
+        "posture_applicable": _either(
+            record, attributes, _POSTURE_APPLICABLE_FIELDS),
+        "agent_version": _either(record, attributes, _AGENT_FIELDS),
+        "operating_system": _either(record, attributes, _OS_FIELDS),
         "step_latency": attributes.get(STEP_LATENCY_ATTRIBUTE, ""),
         "total_authentication_latency": (
             attributes.get(TOTAL_LATENCY_ATTRIBUTE, "")

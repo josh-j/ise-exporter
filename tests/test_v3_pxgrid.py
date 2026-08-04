@@ -381,7 +381,9 @@ class _DatasetTransport(Transport):
                 "state": "STARTED",
                 "callingStationId": "00-11-22-33-44-55",
                 "nasIpAddress": "10.0.0.1",
+                "nasIdentifier": "access-switch-1",
                 "postureStatus": "Compliant",
+                "endpointOperatingSystem": "Windows 11",
                 "mdmRegistered": True,
             },
             {
@@ -389,7 +391,9 @@ class _DatasetTransport(Transport):
                 "state": "STARTED",
                 "callingStationId": "00-11-22-33-44-66",
                 "nasIpAddress": "10.0.0.1",
+                "nasIdentifier": "access-switch-1",
                 "postureStatus": "NonCompliant",
+                "endpointOperatingSystem": "Windows 11",
             },
         ]
 
@@ -422,6 +426,46 @@ def test_session_and_posture_datasets_publish_from_one_reconciled_state():
         "ise3_posture_endpoints",
         {"provider": "pxgrid", "status": "Compliant", "ops_owner": "unknown"},
     ) == 1
+
+
+def test_the_endpoint_os_is_reported_from_the_session_rather_than_declared_missing():
+    """endpointOperatingSystem is a session-object field, so pxGrid can answer OS.
+
+    It was published as a single ``Unavailable from pxGrid`` zero alongside the
+    agent version and the policy breakdown, which are genuinely MnT-only. That
+    under-reported a dimension the session object has carried since ISE 2.3.
+    """
+    assert _run(posture_current.DATASET).ok
+    assert REGISTRY.get_sample_value(
+        "ise3_posture_endpoints_by_os",
+        {"provider": "pxgrid", "os": "Windows 11"}) == 2
+    assert REGISTRY.get_sample_value(
+        "ise3_posture_endpoints_by_os",
+        {"provider": "pxgrid", "os": "Unavailable from pxGrid"}) is None
+    # The two that really are absent from the session object still say so.
+    assert REGISTRY.get_sample_value(
+        "ise3_posture_agent_version_endpoints",
+        {"provider": "pxgrid", "agent_version": "Unavailable from pxGrid"}) == 0
+    assert REGISTRY.get_sample_value(
+        "ise3_session_detail_field_coverage",
+        {"provider": "pxgrid", "field": "operating_system"}) == 1.0
+
+
+def test_the_nad_is_read_from_nas_identifier_on_pxgrid_sessions():
+    """nasName is not a field the session object carries; nasIdentifier is.
+
+    Reading only nasName left the NAD name empty on every session, so each one
+    fell back to its NAS IP -- the same empty-column failure project_session was
+    fixed for, which a live session found rather than a test.
+    """
+    assert _run(active_sessions.DATASET).ok
+    assert REGISTRY.get_sample_value(
+        "ise3_active_sessions_by_nad",
+        {"provider": "pxgrid", "nad": "access-switch-1",
+         "location": "Unknown"}) == 2
+    assert REGISTRY.get_sample_value(
+        "ise3_active_sessions_by_nad",
+        {"provider": "pxgrid", "nad": "10.0.0.1", "location": "Unknown"}) is None
 
 
 def test_sequence_gap_forces_a_reconciled_resnapshot():

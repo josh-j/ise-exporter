@@ -101,6 +101,36 @@ def test_a_bounded_pair_is_still_allowed_where_both_sides_are_small():
     assert "GROUPING SETS" not in sql
 
 
+def test_the_per_policy_breakdown_rides_the_scan_that_was_already_paid_for():
+    """POSTURE_REPORT is a CLOB of `policy:result` text; POLICY is a column.
+
+    It is a second marginal on the failed-condition scan rather than a sixth
+    statement: posture_history was already at the five-statement batch ceiling,
+    and a policy marginal answers "which policy is failing" from a pass the
+    dataset makes anyway. Shipping the CLOB per assessment instead would cost a
+    row per endpoint and depend on how ISE escapes a separator in a policy name.
+    """
+    statements = posture_history.statements(6, LIMITS)
+    assert len(statements) <= LIMITS.batch_queries
+    sql = statements["condition_marginals"]
+    assert posture_history.CONDITION_VIEW in sql
+    assert "GROUPING SETS ((NVL(condition_name, 'unknown')), (NVL(policy, 'none')))" in sql
+    assert "COUNT(DISTINCT endpoint_id) AS endpoints" in sql
+    assert "posture_report" not in sql.lower()
+    # The condition view times on LOGGED_AT, not the endpoint view's TIMESTAMP.
+    assert "logged_at" in sql.lower()
+    # Both marginals are of the failed population, which is what makes a policy
+    # row mean "endpoints with a failing condition under this policy".
+    assert "condition_status" in sql.lower()
+
+
+def test_the_condition_view_is_declared_as_a_requirement():
+    # It was read for the condition marginals but never declared, so a
+    # deployment without it would have been planned as collectible.
+    provider = posture_history.DATASET.provider("dataconnect")
+    assert "view:POSTURE_ASSESSMENT_BY_CONDITION" in provider.requires
+
+
 # --- the helper -------------------------------------------------------------
 
 def test_marginals_produce_one_row_set_per_dimension():

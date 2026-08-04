@@ -18,11 +18,18 @@ one that runs posture, so they are read either way and
 briefly deleted here after a lab with no posture module showed them absent on
 every session; that is the difference between a field ISE cannot answer and a
 field this deployment never exercises, and only the first justifies dropping a
-lookup. Data Connect names the same three facts ``POSTURE_REPORT``,
-``POSTURE_AGENT_VERSION`` and ``ENDPOINT_OPERATING_SYSTEM`` in
-``POSTURE_ASSESSMENT_BY_ENDPOINT``, which is the independent confirmation that
-they are ISE fields rather than spellings invented here.
+lookup.
+
+Keeping them was right, but the reason recorded here was not. It argued that
+Data Connect naming the same facts in ``POSTURE_ASSESSMENT_BY_ENDPOINT``
+confirmed the MnT session document emits them as elements. It does not: column
+names on one surface say nothing about tag names on another, and on a
+posture-enabled deployment these arrive as CamelCase *attributes* of
+``other_attr_string``. ``session_detail.project`` reads both sides now. The lab
+was never going to settle it either way -- an estate that does not exercise a
+field cannot tell you where the field lives.
 """
+import re
 from collections import defaultdict
 
 from prometheus_client import Gauge
@@ -43,6 +50,22 @@ policy_results = Gauge(
     "The overall status is often NotApplicable even when posture ran, so this is "
     "the breakdown that carries the real signal",
     ["provider", "policy", "result"])
+requirement_results = Gauge(
+    "ise3_posture_requirement_results",
+    "Distinct endpoints per posture requirement, its mandate and its result, "
+    "parsed from PostureReport. A policy rolls its requirements up, so an Audit "
+    "requirement that failed leaves the policy Passed and is invisible one level "
+    "up; mandate is what separates a failure that denies access from one that "
+    "only records",
+    ["provider", "requirement", "mandate", "result"])
+applicable_endpoints = Gauge(
+    "ise3_posture_applicable_endpoints",
+    "Distinct active endpoints by whether posture applies to them, from the "
+    "session's own PostureApplicable. The denominator a compliance share needs, "
+    "measured on the same population as the numerator -- ise3_posture_eligible_"
+    "endpoints_total answers the same question from the endpoint inventory, "
+    "over every endpoint rather than the connected ones",
+    ["provider", "applicable", "ops_owner"])
 by_agent_version = Gauge(
     "ise3_posture_agent_version_endpoints",
     "Distinct endpoints per Secure Client agent version",
@@ -61,8 +84,8 @@ field_coverage = Gauge(
     ["provider", "field"])
 
 _METRICS = (
-    endpoints_by_status, policy_results, by_agent_version, by_os, by_psn,
-    field_coverage,
+    endpoints_by_status, policy_results, requirement_results,
+    applicable_endpoints, by_agent_version, by_os, by_psn, field_coverage,
 )
 
 # ISE spells the same posture verdict several ways across fields and releases.
@@ -96,31 +119,58 @@ def canonical_status(value):
     return _CANONICAL_STATUS.get(key, str(value).strip())
 
 
-def parse_posture_report(value):
-    """Yield ``(policy, result)`` pairs from ISE's PostureReport field.
+# PostureReport, as a posture-enabled appliance actually writes it:
+#
+#   POLICY\;RESULT\;(REQ:MANDATE:RESULT:Passed_Conditions[..]:Failed_Conditions[..]
+#   :Skipped_Conditions[..]\;REQ:...), POLICY\;RESULT\;(...)
+#
+# Policies are comma-separated. Every separator inside a policy is written as an
+# escaped semicolon -- ``\;`` is the delimiter itself, not an escape for a
+# literal one -- and the parenthesised tail holds that policy's requirements,
+# separated the same way. Unescaping first and then splitting on ``;``, which is
+# what this module used to do, therefore finds exactly one entry: the whole
+# string, whose last colon splits a 1.4 KB policy name off a fragment of the
+# final condition list. ``label()`` then truncates and hashes that into a
+# distinct series per endpoint, so the family grows with the fleet.
+_POLICY = re.compile(r"([^,;()]+);([^;()]+);\(([^)]*)\)")
 
-    The field is a semicolon-separated list of ``policy:result``, and ISE escapes
-    a literal semicolon inside a policy name as ``\\;``. Splitting naively merges
-    two policies into one nonsense label, so unescape before splitting.
-    """
-    text = str(value or "").strip()
-    if not text:
-        return
-    placeholder = "\x00"
-    for entry in text.replace("\\;", placeholder).split(";"):
-        entry = entry.replace(placeholder, ";").strip()
-        if not entry or ":" not in entry:
-            continue
-        policy, _, result = entry.rpartition(":")
-        policy, result = policy.strip(), result.strip()
+
+def _unescaped(value):
+    """The report with ISE's ``\\;`` delimiters normalised to plain ``;``."""
+    return str(value or "").strip().replace("\\;", ";")
+
+
+def parse_posture_report(value):
+    """Yield ``(policy, result)`` pairs from ISE's PostureReport field."""
+    for match in _POLICY.finditer(_unescaped(value)):
+        policy, result = match.group(1).strip(), match.group(2).strip()
         if policy and result:
             yield policy, result
+
+
+def parse_posture_requirements(value):
+    """Yield ``(requirement, mandate, result)`` from ISE's PostureReport field.
+
+    A policy rolls its requirements up, so a policy reading ``Passed`` can still
+    contain a failed requirement -- an Audit requirement that failed does not
+    change the verdict, and is invisible at the policy level. That is the case
+    worth alerting on, and it only exists at this depth.
+    """
+    for match in _POLICY.finditer(_unescaped(value)):
+        for entry in match.group(3).split(";"):
+            fields = entry.strip().split(":", 3)
+            if len(fields) < 3:
+                continue
+            requirement, mandate, result = (field.strip() for field in fields[:3])
+            if requirement and mandate and result:
+                yield requirement, mandate, result
 
 
 def fetch_pxgrid(ctx):
     sessions = ctx.transport.get_sessions(max_age=ctx.interval)
     directory = nad_directory.shared()
     statuses = defaultdict(set)
+    systems = defaultdict(set)
     fields = defaultdict(int)
     identified = set()
 
@@ -133,14 +183,25 @@ def fetch_pxgrid(ctx):
         identified.add(identity)
         owner = label(directory.ops_owner(
             first(session, "nasIpAddress", "nas_ip_address"),
-            first(session, "nasName", "networkDeviceName", "network_device_name")))
+            # nasIdentifier is what the session object actually calls the device
+            # by; the other spellings are not fields it carries. Reading only
+            # those left every session attributable by NAS IP alone -- the same
+            # empty-column failure project_session was fixed for.
+            first(session, "nasIdentifier", "nas_identifier", "nasName",
+                  "networkDeviceName", "network_device_name")))
         status = canonical_status(first(
             session, "postureStatus", "posture_status"))
         statuses[(status, owner)].add(identity)
+        system = first(session, "endpointOperatingSystem",
+                       "endpoint_operating_system")
+        if system:
+            systems[label(system)].add(identity)
         for field_name, keys in (
             ("posture_status", ("postureStatus", "posture_status")),
             ("mdm_registered", ("mdmRegistered", "mdm_registered")),
             ("mdm_compliant", ("mdmCompliant", "mdm_compliant")),
+            ("operating_system", ("endpointOperatingSystem",
+                                  "endpoint_operating_system")),
         ):
             fields[field_name] += int(bool(first(session, *keys)))
 
@@ -148,14 +209,22 @@ def fetch_pxgrid(ctx):
         ctx.set(
             endpoints_by_status, len(members),
             status=status, ops_owner=owner)
-    # pxGrid's session object never carries these MnT-only detail fields.  The
-    # dashboard should say that explicitly rather than rendering three panels
-    # as though their metric names or queries were broken.
+    # The endpoint OS *is* a session-object field, so it is reported rather than
+    # declared missing. The other two are genuinely MnT-only detail, and the
+    # dashboard should say that explicitly rather than rendering two panels as
+    # though their metric names or queries were broken.
+    for system, members in systems.items():
+        ctx.set(by_os, len(members), os=system)
+    if not systems:
+        ctx.set(by_os, 0, os="Not reported by active sessions")
     ctx.set(by_agent_version, 0, agent_version="Unavailable from pxGrid")
-    ctx.set(by_os, 0, os="Unavailable from pxGrid")
     ctx.set(
         policy_results, 0,
         policy="Unavailable from pxGrid", result="Failed")
+    ctx.set(requirement_results, 0, requirement="Unavailable from pxGrid",
+            mandate="Mandatory", result="Failed")
+    ctx.set(applicable_endpoints, 0, applicable="Unavailable from pxGrid",
+            ops_owner="unknown")
     if identified:
         for field_name, populated in fields.items():
             ctx.set(
@@ -179,6 +248,11 @@ def fetch_mnt(ctx):
         ctx.set(
             policy_results, 0,
             policy="No active posture policies", result="Failed")
+        ctx.set(requirement_results, 0,
+                requirement="No active posture requirements",
+                mandate="Mandatory", result="Failed")
+        ctx.set(applicable_endpoints, 0,
+                applicable="No active endpoints", ops_owner="unknown")
         return
 
     serving_psns = defaultdict(set)
@@ -189,8 +263,9 @@ def fetch_mnt(ctx):
 
     directory = nad_directory.shared()
     statuses, psns = defaultdict(set), defaultdict(set)
-    policies, agents, systems = (
-        defaultdict(set), defaultdict(set), defaultdict(set))
+    policies, requirements, agents, systems, applicable = (
+        defaultdict(set), defaultdict(set), defaultdict(set),
+        defaultdict(set), defaultdict(set))
     fields = defaultdict(int)
     covered = 0
 
@@ -207,6 +282,7 @@ def fetch_mnt(ctx):
         for field in (
             "posture_status",
             "posture_report",
+            "posture_applicable",
             "agent_version",
             "operating_system",
             "step_latency",
@@ -216,11 +292,17 @@ def fetch_mnt(ctx):
         owner = label(directory.ops_owner(detail["nas_ip"], detail["nad"]))
         status = canonical_status(detail["posture_status"])
         statuses[(status, owner)].add(mac)
+        if detail["posture_applicable"]:
+            applicable[(label(detail["posture_applicable"]), owner)].add(mac)
         for psn in serving_psns.get(mac, ("unknown",)):
             psns[(psn, status)].add(mac)
 
         for policy, result in parse_posture_report(detail["posture_report"]):
             policies[(label(policy), label(result))].add(mac)
+        for requirement, mandate, result in parse_posture_requirements(
+                detail["posture_report"]):
+            requirements[
+                (label(requirement), label(mandate), label(result))].add(mac)
         if detail["agent_version"]:
             agents[label(detail["agent_version"])].add(mac)
         if detail["operating_system"]:
@@ -247,6 +329,20 @@ def fetch_mnt(ctx):
         ctx.set(
             policy_results, 0,
             policy="No reported posture policies", result="Failed")
+    for (requirement, mandate, result), members in requirements.items():
+        ctx.set(requirement_results, len(members),
+                requirement=requirement, mandate=mandate, result=result)
+    if not requirements:
+        ctx.set(requirement_results, 0,
+                requirement="No reported posture requirements",
+                mandate="Mandatory", result="Failed")
+    for (answer, owner), members in applicable.items():
+        ctx.set(applicable_endpoints, len(members),
+                applicable=answer, ops_owner=owner)
+    if not applicable:
+        ctx.set(applicable_endpoints, 0,
+                applicable="Not reported by active sessions",
+                ops_owner="unknown")
     for agent, members in agents.items():
         ctx.set(by_agent_version, len(members), agent_version=agent)
     if not agents:
@@ -289,10 +385,11 @@ DATASET = Dataset(
             # pooled charge at whichever member's cadence is shorter.
             cost=Cost(target="pxgrid", requests=1, streaming=True,
                       shares="pxgrid_sessions"),
-            supplies=frozenset({"status", "mdm"}),
+            supplies=frozenset({"status", "mdm", "os"}),
             requires=("capability:pxgrid_session_topic",),
             fetch=fetch_pxgrid,
-            notes="session postureStatus only; no per-policy PostureReport breakdown",
+            notes="session postureStatus and endpointOperatingSystem; no "
+                  "per-policy PostureReport breakdown and no agent version",
         ),
     ),
 )

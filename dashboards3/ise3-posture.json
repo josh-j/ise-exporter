@@ -786,7 +786,7 @@
         "type": "prometheus",
         "uid": "${prometheus}"
       },
-      "description": "Posture policies with failing results, worst first. A single policy dominating usually means the policy is wrong rather than the fleet \u2014 check what it requires before chasing endpoints.",
+      "description": "Posture policies with failing results, worst first. A single policy dominating usually means the policy is wrong rather than the fleet \u2014 check what it requires before chasing endpoints. Served from the assessment history, which carries the per-policy verdict as its own column; the live MnT breakdown is the fallback where that view is unavailable.",
       "fieldConfig": {
         "defaults": {},
         "overrides": [
@@ -837,7 +837,7 @@
       "repeatDirection": "h",
       "targets": [
         {
-          "expr": "sum by (instance,policy) ((ise3_posture_policy_results{instance=~\"$deployment\",result!~\"pass|Passed|passed\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"posture_current\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"posture_current\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"posture_current\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"posture_current\"} == 1))) == 1)))",
+          "expr": "sum by (instance,policy) ((ise3_posture_failing_policies{instance=~\"$deployment\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"posture_history\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"posture_history\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"posture_history\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"posture_history\"} == 1))) == 1))) or sum by (instance,policy) ((ise3_posture_policy_results{instance=~\"$deployment\",result!~\"pass|Passed|passed\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"posture_current\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"posture_current\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"posture_current\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"posture_current\"} == 1))) == 1)))",
           "format": "table",
           "instant": true,
           "legendFormat": "",
@@ -986,12 +986,94 @@
       "type": "table"
     },
     {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${prometheus}"
+      },
+      "description": "The requirement level, which a policy hides: a policy rolls its requirements up, so an Audit requirement that failed leaves the policy reading Passed. Mandate is the column that matters \u2014 a failed Mandatory requirement is denying access, while Audit and Optional only record. A long list with nothing Mandatory in it means posture is running in observation mode.",
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 23
+      },
+      "options": null,
+      "repeatDirection": "h",
+      "targets": [
+        {
+          "expr": "(ise3_posture_requirement_results{instance=~\"$deployment\",result!~\"Passed|passed|pass\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"posture_current\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"posture_current\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"posture_current\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"posture_current\"} == 1))) == 1))",
+          "format": "table",
+          "instant": true,
+          "legendFormat": "",
+          "range": false,
+          "refId": "A"
+        }
+      ],
+      "title": "Failing requirements, by mandate",
+      "transformations": [
+        {
+          "id": "filterFieldsByName",
+          "options": {
+            "exclude": {
+              "names": [
+                "Time",
+                "__name__",
+                "job"
+              ]
+            }
+          }
+        },
+        {
+          "id": "organize",
+          "options": {
+            "renameByName": {
+              "Value": "Endpoints",
+              "mandate": "Mandate",
+              "requirement": "Requirement",
+              "result": "Result"
+            }
+          }
+        },
+        {
+          "id": "sortBy",
+          "options": {
+            "sort": [
+              {
+                "desc": true,
+                "field": "Endpoints"
+              }
+            ]
+          }
+        }
+      ],
+      "transparent": false,
+      "type": "table"
+    },
+    {
       "collapsed": false,
       "gridPos": {
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 23
+        "y": 31
       },
       "id": 0,
       "panels": [],
@@ -1025,7 +1107,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 24
+        "y": 32
       },
       "options": null,
       "repeatDirection": "h",
@@ -1104,7 +1186,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 24
+        "y": 32
       },
       "options": null,
       "repeatDirection": "h",
@@ -1162,7 +1244,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 32
+        "y": 40
       },
       "id": 0,
       "panels": [
@@ -1202,7 +1284,7 @@
             "h": 4,
             "w": 8,
             "x": 0,
-            "y": 33
+            "y": 41
           },
           "options": {
             "colorMode": "value",
@@ -1265,7 +1347,7 @@
             "h": 4,
             "w": 8,
             "x": 8,
-            "y": 33
+            "y": 41
           },
           "options": {
             "colorMode": "value",
@@ -1318,7 +1400,7 @@
             "h": 4,
             "w": 8,
             "x": 16,
-            "y": 33
+            "y": 41
           },
           "options": {
             "colorMode": "value",
@@ -1340,7 +1422,7 @@
               "refId": "A"
             },
             {
-              "expr": "(ise3_endpoints_posture_applicable{instance=~\"$deployment\",applicable=\"true\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"endpoint_inventory\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"endpoint_inventory\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"endpoint_inventory\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"endpoint_inventory\"} == 1))) == 1))",
+              "expr": "(ise3_endpoints_posture_applicable{instance=~\"$deployment\",applicable=\"yes\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"endpoint_inventory\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"endpoint_inventory\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"endpoint_inventory\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"endpoint_inventory\"} == 1))) == 1))",
               "instant": true,
               "legendFormat": "applicable",
               "range": false,
@@ -1366,7 +1448,7 @@
             "h": 8,
             "w": 12,
             "x": 0,
-            "y": 37
+            "y": 45
           },
           "options": null,
           "repeatDirection": "h",
@@ -1489,7 +1571,7 @@
             "h": 8,
             "w": 12,
             "x": 12,
-            "y": 37
+            "y": 45
           },
           "options": {
             "legend": {
@@ -1535,7 +1617,7 @@
             "h": 8,
             "w": 12,
             "x": 0,
-            "y": 45
+            "y": 53
           },
           "options": null,
           "repeatDirection": "h",
@@ -1598,7 +1680,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 53
+        "y": 61
       },
       "id": 0,
       "panels": [
@@ -1616,7 +1698,7 @@
             "h": 6,
             "w": 24,
             "x": 0,
-            "y": 54
+            "y": 62
           },
           "options": {
             "content": "**Purpose** \u2014 answer whether the fleet is compliant, and separate 'assessed and failing' from 'never assessed at all'.\n\n**Read it in this order**\n\n1. Read compliant share and assessment coverage together \u2014 one without the other is misleading.\n2. Read **Eligible but unassessed**: invisible endpoints are the real gap.\n3. Use failed conditions to get to something actionable.\n\n**When something is red**\n\n- High compliance, low coverage: the number is not trustworthy; fix the agents before reporting it.\n- One policy dominating failures: inspect the policy, not the endpoints.\n- One PSN producing all failures: continue on the PSN service dashboard.\n\n**Related dashboards** \u2014 Triage, Endpoints and devices, PSN service\n\n*Owner: set this to the team that answers the page. Runbook: link it here \u2014 a red panel with no runbook is a puzzle, not an alert.*",

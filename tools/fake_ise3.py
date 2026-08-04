@@ -544,6 +544,7 @@ class Estate:
             f":!:CiscoAVPair=audit-session-id={index:016X},"
             f"AuthenticationIdentityStore=lab.local,"
             f"FQSubjectName=968cd8c0-7b02-11f1-ad2d-8a4e8c5a954a#{user}@lab.local"
+            + self._posture_attributes(index)
         )
 
     _POSTURE_STATUSES = ("Compliant", "NonCompliant", "Pending")
@@ -551,20 +552,68 @@ class Estate:
     _POSTURE_SYSTEMS = ("Windows 11", "Windows 10", "macOS 14.5")
 
     def _posture_elements(self, index):
-        """The posture elements, empty unless this estate runs Secure Client."""
+        """The only posture *element* the document has, and it is always empty.
+
+        The appliance carries a ``posture_status`` tag with no text and nothing
+        else. Posture itself -- the report, the agent version, the eligibility
+        flag -- rides ``other_attr_string`` as CamelCase attributes on a
+        deployment that runs it, the same way both latencies do. Emitting the
+        facts as elements here, which this used to do, invented a document ISE
+        never sends and let a reader that only looked at elements pass.
+        """
+        return (("posture_status", ""),)
+
+    def _posture_attributes(self, index):
+        """The posture attributes of ``other_attr_string``, where posture runs.
+
+        The report grammar is held to a document captured from a
+        posture-enabled deployment: policies comma-separated, ``\\;`` as the
+        delimiter inside a policy, and the parenthesised tail carrying
+        ``\\;``-separated requirements of ``NAME:MANDATE:RESULT:
+        Passed_Conditions[..]:Failed_Conditions[..]:Skipped_Conditions[..]``.
+        The invented ``policy:result`` list this used to emit was the shape the
+        parser had been written against, so the two agreed with each other and
+        neither agreed with ISE. Names are invented; real ones are site-defined.
+
+        The NonCompliant case fails a Mandatory requirement, and every case
+        carries an Audit requirement that failed under a policy that still reads
+        Passed -- the roll-up the requirement level exists to expose.
+        """
         if index % 100 >= self.posture_share * 100:
-            return (("posture_status", ""),)
+            return ""
         status = self._POSTURE_STATUSES[index % len(self._POSTURE_STATUSES)]
         failed = status == "NonCompliant"
+        report = (
+            r"Corp-Firewall-On\;{firewall}\;(Req-Firewall-Enabled:Mandatory:"
+            r"{firewall}:Passed_Conditions[{passed}]:Failed_Conditions[{failed}]:"
+            r"Skipped_Conditions[]), "
+            r"Corp-AV-Required\;Passed\;(Req-AV-Installed:Optional:Passed:"
+            r"Passed_Conditions[Cond-AV-Product-Present]:"
+            r"Failed_Conditions[]:Skipped_Conditions[]"
+            r"\;Req-AV-Scan-Recent:Audit:Failed:Passed_Conditions[]:"
+            r"Failed_Conditions[Cond-AV-Scan-Age]:Skipped_Conditions[])"
+        ).format(
+            firewall="Failed" if failed else "Passed",
+            passed="" if failed else "Cond-Firewall-Domain-Enabled",
+            failed="Cond-Firewall-Domain-Enabled" if failed else "",
+        )
+        agent = self._POSTURE_AGENTS[index % len(self._POSTURE_AGENTS)]
+        system = self._POSTURE_SYSTEMS[index % len(self._POSTURE_SYSTEMS)]
         return (
-            ("posture_status", status),
-            ("posture_report",
-             "AV_Installed:Passed;Firewall_Enabled:"
-             + ("Failed" if failed else "Passed")),
-            ("posture_agent_version",
-             self._POSTURE_AGENTS[index % len(self._POSTURE_AGENTS)]),
-            ("operating_system",
-             self._POSTURE_SYSTEMS[index % len(self._POSTURE_SYSTEMS)]),
+            f":!:PostureStatus={status}"
+            ":!:PostureApplicable=Yes"
+            # The last-assessment trigger state, not the verdict. It reads
+            # NotApplicable on sessions whose PostureStatus is Compliant, so a
+            # reader that takes the first Posture*Status it finds gets the
+            # wrong answer.
+            ":!:PostureAssessmentStatus=NotApplicable"
+            f":!:PostureAgentVersion=Posture Agent for {system.split()[0]} {agent}"
+            f":!:PostureReport={report}"
+            # No OS attribute: none was observed, and inventing a name is how
+            # the elements-only reader passed here while collecting nothing in
+            # production. The endpoint OS comes from Data Connect's
+            # ENDPOINT_OPERATING_SYSTEM and from pxGrid's
+            # endpointOperatingSystem, both of which are documented.
         )
 
     def detail_fields(self, index):
@@ -1528,9 +1577,12 @@ class Domains:
             return list(AUTHZ_PROFILES)
         if "profile" in name:
             return list(ENDPOINT_PROFILES)
-        if "rule" in name or name == "policy":
+        if "rule" in name:
             return list(AUTHZ_RULES)
-        if "condition" in name or "posture_policy" in name:
+        # A bare `policy` column is only selected by the two posture statements
+        # -- the condition view's POLICY and the endpoint view's
+        # POSTURE_POLICY_MATCHED -- so it is a posture policy, not an authz rule.
+        if "condition" in name or "posture_policy" in name or name == "policy":
             return list(POSTURE_POLICIES)
         if "method" in name or "protocol" in name:
             return list(AUTH_METHODS)

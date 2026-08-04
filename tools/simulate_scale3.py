@@ -70,6 +70,16 @@ def parse_arguments(argv=None):
                         help="one NAD in this many is configured as a /24 "
                              "rather than a host, so its sessions can only be "
                              "attributed by containment (default 4; 0 for none)")
+    parser.add_argument("--posture-share", type=float, default=0.0,
+                        help="share of sessions whose MnT detail carries "
+                             "Secure Client posture (default 0.0, the probed "
+                             "appliance, where nothing runs posture). Raising "
+                             "it is the only way posture_current publishes a "
+                             "verdict other than Unavailable")
+    parser.add_argument("--metrics", metavar="PATH",
+                        help="also write the final Prometheus exposition, so "
+                             "the published series can be read directly or "
+                             "loaded into Prometheus behind the dashboards")
     parser.add_argument("--empty-views", default="",
                         help="comma-separated reporting views to answer with no "
                              "rows, or \"lab\" for the seven the reference "
@@ -344,7 +354,8 @@ def run_simulation(arguments):
                     sessions=arguments.sessions, accounts=arguments.accounts,
                     policy_sets=arguments.policy_sets,
                     churn_per_hour=arguments.churn_per_hour, clock=clock,
-                    subnet_nad_every=arguments.subnet_nad_every)
+                    subnet_nad_every=arguments.subnet_nad_every,
+                    posture_share=arguments.posture_share)
     estate_seconds = time.perf_counter() - build_started
     estate_rss = rss_mib() - baseline_rss
 
@@ -479,6 +490,12 @@ def measure(arguments, config, plan, estate, clock, appliance, oracle, recorder,
     compressed = gzip.compress(payload, compresslevel=server_module.COMPRESS_LEVEL)
     compress_seconds = time.perf_counter() - compress_started
     scrape_wire_bytes = len(compressed)
+
+    # The exposition the run ended on, written verbatim. This is the same bytes
+    # Prometheus would have scraped, so a dashboard query can be checked against
+    # a simulated estate without an appliance to point it at.
+    if arguments.metrics:
+        Path(arguments.metrics).write_bytes(payload)
 
     families = series_by_family()
     total_series = sum(families.values())
