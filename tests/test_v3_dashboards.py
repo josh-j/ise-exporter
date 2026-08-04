@@ -1,17 +1,28 @@
-"""Dashboards are a contract against the metric registry.
+"""Dashboards are a contract, against the metric registry and against a design.
 
-v2 proved the value of this: dashboards are normally the least-verified artifact
-in a monitoring stack, and a panel querying a metric that no longer exists shows
-an empty graph rather than an error. These tests assert every metric and every
-label a panel references is one this exporter actually publishes.
+Two kinds of assertion live here.
 
-The dashboards are generated (tools/build_dashboards3.py), so a second test
+The first kind is the one v2 proved the value of: dashboards are normally the
+least-verified artifact in a monitoring stack, and a panel querying a metric
+that no longer exists shows an empty graph rather than an error. Those tests
+assert every metric and every label a panel references is one this exporter
+actually publishes.
+
+The second kind is newer. DASHBOARD_DESIGN_PRINCIPLES.md states how this set is
+organised -- tiers by audience and time horizon, symptoms above causes, a
+breakdown is a table rather than a capped bar gauge, nothing renders ISE data
+without saying whether that data is current. Every one of those is a property
+that erodes silently under maintenance, so each is asserted here rather than
+left to review.
+
+The dashboards are generated (tools/build_dashboards3.py), so a final test
 checks the committed JSON still matches a fresh build. That one skips where the
 Grafana SDK is not installed, because the SDK is a build-time dependency and
 should not be needed to run the suite.
 """
 import json
 import re
+import sys
 from pathlib import Path
 
 import pytest
@@ -23,10 +34,19 @@ import ise_exporter3.telemetry  # noqa: F401
 
 
 DASHBOARDS = Path(__file__).parents[1] / "dashboards3"
+TOOLS = Path(__file__).parents[1] / "tools"
 METRIC_NAME = re.compile(r"\b(ise3_[a-z0-9_]+)\b")
 LABEL_IN_LEGEND = re.compile(r"\{\{\s*([a-z_][a-z0-9_]*)\s*\}\}")
 LABEL_IN_SELECTOR = re.compile(r"([a-z_][a-z0-9_]*)\s*=\s*['\"]")
+DASHBOARD_LINK = re.compile(r"/d/([a-z0-9-]+)")
 EXTERNAL_LABELS = {"instance", "job"}
+
+
+def _builder():
+    sys.path.insert(0, str(TOOLS))
+    import build_dashboards3
+
+    return build_dashboards3
 
 
 def _dashboards():
@@ -40,9 +60,22 @@ def _dashboard(name):
 
 
 def _panels(dashboard):
+    """Every panel, whether laid out at the top level or nested in a row."""
     for panel in dashboard.get("panels", []):
         yield panel
         yield from panel.get("panels", [])
+
+
+def _visible_panels(dashboard):
+    """Panels an operator sees on load: top level, excluding row headers.
+
+    A collapsed row's panels are nested inside the row object and are not on
+    screen until it is expanded, so they do not count against the ceiling.
+    """
+    return [
+        panel for panel in dashboard.get("panels", [])
+        if panel.get("type") != "row"
+    ]
 
 
 def _targets(dashboard):
@@ -105,6 +138,10 @@ def _declared_labels(name):
     return set()
 
 
+# ---------------------------------------------------------------------------
+# The metric contract
+# ---------------------------------------------------------------------------
+
 @pytest.mark.parametrize("filename,dashboard", _dashboards())
 def test_every_metric_a_panel_queries_is_one_this_exporter_publishes(
         filename, dashboard):
@@ -147,6 +184,88 @@ def test_every_dashboard_is_file_provisionable(filename, dashboard):
 
 
 @pytest.mark.parametrize("filename,dashboard", _dashboards())
+def test_every_dashboard_has_a_stable_identity(filename, dashboard):
+    assert dashboard.get("uid"), f"{filename} has no uid"
+    assert dashboard["uid"] == filename.removesuffix(".json")
+    assert "ise-exporter3" in dashboard.get("tags", [])
+
+
+@pytest.mark.parametrize("filename,dashboard", _dashboards())
+def test_every_dashboard_carries_the_change_annotations(filename, dashboard):
+    # The first question about a step in any line here is whether ISE changed
+    # or the exporter's view of ISE changed. Every dashboard has to be able to
+    # answer it without leaving the page.
+    names = {
+        item.get("name")
+        for item in dashboard.get("annotations", {}).get("list", [])
+    }
+    for required in ("Provider changed", "Node state changed",
+                     "Exporter build changed"):
+        assert required in names, f"{filename} lost the {required!r} annotation"
+
+
+# ---------------------------------------------------------------------------
+# The design contract -- DASHBOARD_DESIGN_PRINCIPLES.md, asserted
+# ---------------------------------------------------------------------------
+
+# Principle 2: separate dashboards by audience and time horizon. The tiers and
+# their defaults live in the builder; this is the assertion that the generated
+# JSON actually carries them.
+TIER_DEFAULTS = {
+    "triage": ("now-3h", "1m"),
+    "diagnostic": ("now-6h", "5m"),
+    "exporter": ("now-6h", "1m"),
+    "capacity": ("now-30d", "30m"),
+}
+
+# ise3-load is tier 3 but reads on a slower horizon than the pipeline: cost is
+# a daily question, not a per-minute one.
+TIER_EXCEPTIONS = {"ise3-load": ("now-24h", "5m")}
+
+
+def test_the_set_is_organised_into_tiers():
+    build = _builder()
+    tiered = {uid for uids in build.TIERS.values() for uid in uids}
+    assert tiered == set(build.DASHBOARDS), (
+        "every dashboard must declare which tier it belongs to")
+    generated = {path.stem for path in DASHBOARDS.glob("*.json")}
+    assert generated == set(build.DASHBOARDS)
+    # A tier with nothing in it is a tier that has quietly been abandoned.
+    for tier, uids in build.TIERS.items():
+        assert uids, f"the {tier} tier is empty"
+    # Triage is the entry point and there must be exactly one of it: two
+    # dashboards claiming to be the first thing you open is the same as none.
+    assert len(build.TIERS["triage"]) == 1
+
+
+@pytest.mark.parametrize("filename,dashboard", _dashboards())
+def test_each_dashboard_uses_its_tier_time_horizon(filename, dashboard):
+    build = _builder()
+    uid = filename.removesuffix(".json")
+    tier = next(name for name, uids in build.TIERS.items() if uid in uids)
+    window, refresh = TIER_EXCEPTIONS.get(uid, TIER_DEFAULTS[tier])
+    assert dashboard["time"]["from"] == window, (
+        f"{filename} is in the {tier} tier but opens on "
+        f"{dashboard['time']['from']}")
+    assert dashboard["refresh"] == refresh, (
+        f"{filename} is in the {tier} tier but refreshes every "
+        f"{dashboard['refresh']}")
+
+
+# Principle 4 and the wall-of-panels anti-pattern. Deep material belongs in a
+# collapsed row, not on the page at load.
+VISIBLE_PANEL_CEILING = 16
+
+
+@pytest.mark.parametrize("filename,dashboard", _dashboards())
+def test_no_dashboard_is_a_wall_of_panels(filename, dashboard):
+    visible = _visible_panels(dashboard)
+    assert len(visible) <= VISIBLE_PANEL_CEILING, (
+        f"{filename} shows {len(visible)} panels on load; move the deep "
+        "material into a collapsed row")
+
+
+@pytest.mark.parametrize("filename,dashboard", _dashboards())
 def test_every_panel_explains_itself(filename, dashboard):
     # A panel an operator cannot interpret at 3am is not monitoring. v2's
     # ISSUES.md is largely a list of panels whose meaning was unclear.
@@ -159,19 +278,300 @@ def test_every_panel_explains_itself(filename, dashboard):
 
 
 @pytest.mark.parametrize("filename,dashboard", _dashboards())
-def test_every_dashboard_has_a_stable_identity(filename, dashboard):
-    assert dashboard.get("uid"), f"{filename} has no uid"
-    assert dashboard["uid"] == filename.removesuffix(".json")
-    assert "ise-exporter3" in dashboard.get("tags", [])
+def test_every_dashboard_states_its_purpose_and_its_owner(filename, dashboard):
+    # Principle 10. An unowned dashboard with no stated purpose rots, and the
+    # place an operator will actually look for the purpose is on the dashboard.
+    assert len((dashboard.get("description") or "").strip()) > 80, (
+        f"{filename} does not say what it is for")
+    notes = [panel for panel in _panels(dashboard)
+             if panel.get("type") == "text"]
+    assert len(notes) == 1, f"{filename} has no About panel"
+    body = notes[0].get("options", {}).get("content", "")
+    for required in ("Purpose", "Read it in this order", "Runbook"):
+        assert required in body, f"{filename}'s About panel lost {required!r}"
 
 
-def test_the_source_dashboard_answers_which_provider_is_live():
+# Principle 5: nothing renders ISE data without saying whether that data is
+# current. The two tier-3 dashboards are exempt because they are themselves the
+# answer to that question.
+TRUST_EXEMPT = {"ise3-pipeline", "ise3-load"}
+
+
+@pytest.mark.parametrize("filename,dashboard", _dashboards())
+def test_every_ise_dashboard_says_whether_its_data_is_current(
+        filename, dashboard):
+    if filename.removesuffix(".json") in TRUST_EXEMPT:
+        return
+    titles = [panel.get("title") for panel in _visible_panels(dashboard)]
+    for required in ("Data trustworthy", "Collection age"):
+        assert required in titles, (
+            f"{filename} shows ISE data without a {required!r} panel")
+    # It has to be in the first row, beside the outcome it qualifies -- a trust
+    # panel below the fold is a caveat nobody reads.
+    assert titles.index("Data trustworthy") < 8, (
+        f"{filename} buries its trust panels below the first row")
+
+
+@pytest.mark.parametrize("filename,dashboard", _dashboards())
+def test_no_panel_silently_truncates_its_data(filename, dashboard):
+    # The old set capped every breakdown to its top 25 bars because a bar gauge
+    # cannot scroll. Breakdowns are tables now, so a topk() in a visual query
+    # means a cap has crept back in.
+    capped = [
+        panel.get("title") for panel, target in _targets(dashboard)
+        if re.search(r"\b(topk|bottomk)\s*\(", target.get("expr", ""))
+    ]
+    assert not capped, (
+        f"{filename} caps these panels without scrolling: {capped}")
+
+
+def test_breakdowns_are_tables_rather_than_bar_gauges():
+    # Principle 7. A bar gauge is right for a bounded, low-cardinality
+    # comparison and wrong for anything unbounded, so the set should be
+    # overwhelmingly tables. This is the guard against the monoculture the old
+    # set had, where 90 of ~230 panels were capped bar gauges.
+    counts = {}
+    for _, dashboard in _dashboards():
+        for panel in _panels(dashboard):
+            kind = panel.get("type")
+            counts[kind] = counts.get(kind, 0) + 1
+    assert counts.get("bargauge", 0) * 4 <= counts.get("table", 0), (
+        f"bar gauges are creeping back: {counts}")
+
+
+@pytest.mark.parametrize("filename,dashboard", _dashboards())
+def test_every_drilldown_points_at_a_dashboard_that_exists(filename, dashboard):
+    generated = {path.stem for path in DASHBOARDS.glob("*.json")}
+    body = json.dumps(dashboard)
+    for uid in set(DASHBOARD_LINK.findall(body)):
+        assert uid in generated, (
+            f"{filename} links to /d/{uid}, which this set does not build")
+
+
+def test_triage_links_down_into_every_diagnostic_it_names():
+    # Tier 1 is only useful if it hands off. A triage panel that identifies a
+    # problem and offers nowhere to go is a dead end.
+    build = _builder()
+    body = json.dumps(_dashboard("ise3-triage.json"))
+    linked = set(DASHBOARD_LINK.findall(body))
+    for uid in ("ise3-access", "ise3-psn", "ise3-control", "ise3-pipeline"):
+        assert uid in linked, f"triage does not link to {uid}"
+    assert build.TIERS["triage"] == ("ise3-triage",)
+
+
+# ---------------------------------------------------------------------------
+# Capability contracts
+#
+# A dashboard may be reorganised freely, but the operator question it answers
+# may not silently disappear. Each entry is the set of metrics without which
+# that dashboard stops answering its question.
+# ---------------------------------------------------------------------------
+
+CAPABILITY_CONTRACTS = {
+    "ise3-triage.json": {
+        "ise3_radius_authentications",
+        "ise3_active_sessions_total",
+        "ise3_deployment_node_state",
+        "ise3_dataset_up",
+        "ise3_dataset_fresh",
+        "ise3_dataset_provider_degraded",
+        "ise3_certificates_expired",
+        "ise3_backup_age_hours",
+        "ise3_license_compliant",
+        "ise3_radius_errors_by_nad",
+        "ise3_radius_errors_by_psn",
+        "ise3_radius_errors_by_message_code",
+        "ise3_session_authentication_latency_seconds",
+    },
+    "ise3-access.json": {
+        "ise3_radius_authentications",
+        "ise3_radius_authentication_latency_seconds",
+        "ise3_radius_distinct_endpoints_total",
+        "ise3_radius_reporting_window_seconds",
+        "ise3_radius_failures_by_nad_method",
+        "ise3_radius_failure_summary",
+        "ise3_radius_errors_total",
+        "ise3_radius_errors_by_method",
+        "ise3_radius_authentications_by_method",
+        "ise3_radius_authentications_by_protocol",
+        "ise3_radius_authentications_by_policy",
+        "ise3_radius_authentications_by_nad",
+        "ise3_radius_accounting_events",
+        "ise3_radius_accounting_session_duration_seconds",
+        "ise3_session_failure_reason_endpoints",
+        "ise3_session_authz_profile_endpoints",
+        "ise3_session_failed_authz_profile_endpoints",
+        "ise3_session_failed_policy_set_endpoints",
+        "ise3_session_policy_set_endpoints_by_nad",
+        "ise3_active_sessions_by_ops_owner",
+    },
+    "ise3-psn.json": {
+        "ise3_psn_load_percent",
+        "ise3_psn_average_latency_seconds",
+        "ise3_psn_radius_requests_per_hour",
+        "ise3_psn_diagnostic_events",
+        "ise3_psn_diagnostic_events_total",
+        "ise3_psn_mnt_logs_per_hour",
+        "ise3_psn_noise_per_hour",
+        "ise3_psn_suppression_per_hour",
+        "ise3_node_cpu_utilization_percent",
+        "ise3_node_memory_utilization_percent",
+        "ise3_node_disk_utilization_percent",
+        "ise3_active_sessions_by_psn",
+        "ise3_radius_errors_by_psn",
+        "ise3_source_latest_row_age_seconds",
+    },
+    "ise3-control.json": {
+        "ise3_deployment_node_state",
+        "ise3_deployment_node_service_enabled",
+        "ise3_deployment_pan_ha_enabled",
+        "ise3_backup_age_hours",
+        "ise3_backup_configured",
+        "ise3_backup_last_status",
+        "ise3_certificate_expiry_days",
+        "ise3_certificates_expired",
+        "ise3_certificates_expiring_soon",
+        "ise3_certificate_nodes_unreachable",
+        "ise3_patch_level",
+        "ise3_version_supported",
+        "ise3_node_cpu_utilization_percent",
+        "ise3_session_authentication_latency_seconds",
+        "ise3_session_authentication_step_latency_seconds",
+        "ise3_detail_cache_coverage",
+        "ise3_dataset_last_failure_detail_info",
+    },
+    "ise3-endpoints.json": {
+        "ise3_endpoints_total",
+        "ise3_endpoints_unprofiled",
+        "ise3_endpoints_by_profile",
+        "ise3_endpoints_by_identity_group",
+        "ise3_endpoint_inventory_field_coverage",
+        "ise3_endpoint_profile_events",
+        "ise3_endpoint_model",
+        "ise3_endpoint_operating_system",
+        "ise3_endpoint_mdm_compliant",
+        "ise3_network_devices_total",
+        "ise3_network_device_assignment",
+        "ise3_network_devices_by_location",
+        "ise3_nad_authentications",
+        "ise3_nad_last_authentication_age_seconds",
+        "ise3_nad_silent_total",
+        "ise3_active_sessions_by_nad",
+    },
+    "ise3-posture.json": {
+        "ise3_posture_endpoints",
+        "ise3_posture_endpoints_by_psn",
+        "ise3_posture_endpoints_by_os",
+        "ise3_posture_policy_results",
+        "ise3_posture_agent_version_endpoints",
+        "ise3_posture_assessments",
+        "ise3_posture_assessments_by_psn",
+        "ise3_posture_assessments_by_policy",
+        "ise3_posture_failed_conditions",
+        "ise3_posture_eligible_endpoints_total",
+        "ise3_posture_eligible_recently_assessed_total",
+        "ise3_posture_eligible_without_recent_assessment_total",
+        "ise3_session_detail_field_coverage",
+    },
+    "ise3-tacacs.json": {
+        "ise3_tacacs_authentications",
+        "ise3_tacacs_authorizations",
+        "ise3_tacacs_authorization_details",
+        "ise3_tacacs_commands",
+        "ise3_tacacs_internal_accounts",
+        "ise3_tacacs_internal_account_enabled",
+        "ise3_tacacs_internal_account_hygiene_risk",
+        "ise3_tacacs_account_last_seen_timestamp",
+        "ise3_tacacs_active_accounts",
+        "ise3_tacacs_policy_objects",
+        "ise3_tacacs_policy_rule_count",
+        "ise3_tacacs_policy_rules_total",
+        "ise3_tacacs_policy_sets",
+    },
+    "ise3-pipeline.json": {
+        "ise3_dataset_up",
+        "ise3_dataset_fresh",
+        "ise3_dataset_provider_active",
+        "ise3_dataset_provider_available",
+        "ise3_dataset_provider_degraded",
+        "ise3_dataset_provider_reason_info",
+        "ise3_dataset_last_failure_detail_info",
+        "ise3_dataset_failures_total",
+        "ise3_dataset_next_run_timestamp",
+        "ise3_dataconnect_schema_view_available",
+        "ise3_dataconnect_schema_column_available",
+        "ise3_source_latest_row_age_seconds",
+        "ise3_api_requests_total",
+        "ise3_api_request_duration_seconds_bucket",
+        "ise3_pxgrid_stream_connected",
+        "ise3_detail_cache_coverage",
+        "ise3_topk_groups_total",
+        "ise3_breakdown_dimension_populated",
+        "ise3_exporter_build_info",
+    },
+    "ise3-load.json": {
+        "ise3_load_planned_requests_per_hour",
+        "ise3_load_measured_requests_total",
+        "ise3_load_measured_db_seconds_total",
+        "ise3_load_planned_db_seconds_per_hour",
+        "ise3_load_budget_utilisation",
+        "ise3_budget_enforced_requests_per_hour",
+        "ise3_budget_throttled_total",
+        "ise3_dataconnect_effective_duty_cycle_percent",
+        "ise3_dataconnect_query_last_duration_seconds",
+        "ise3_dataconnect_explorer_queries_total",
+        "ise3_dataset_collection_duration_seconds",
+    },
+    "ise3-capacity.json": {
+        "ise3_license_consumption",
+        "ise3_license_compliant",
+        "ise3_license_compliance_state",
+        "ise3_endpoints_total",
+        "ise3_network_devices_total",
+        "ise3_active_sessions_total",
+        "ise3_node_cpu_utilization_percent",
+        "ise3_certificate_expiry_days",
+        "ise3_patch_installed",
+        "ise3_load_budget_utilisation",
+    },
+}
+
+
+def test_every_dashboard_has_a_capability_contract():
+    generated = {path.name for path in DASHBOARDS.glob("*.json")}
+    assert set(CAPABILITY_CONTRACTS) == generated, (
+        "a dashboard without a capability contract can lose its whole reason "
+        "to exist without any test noticing")
+
+
+@pytest.mark.parametrize("filename,required", CAPABILITY_CONTRACTS.items())
+def test_each_dashboard_still_answers_its_question(filename, required):
+    dashboard = _dashboard(filename)
+    body = json.dumps(dashboard)
+    missing = sorted(metric for metric in required if metric not in body)
+    assert not missing, f"{filename} lost capability metrics: {missing}"
+
+
+@pytest.mark.parametrize("filename", CAPABILITY_CONTRACTS)
+def test_every_dashboard_is_deployment_aware(filename):
+    dashboard = _dashboard(filename)
+    variables = {item["name"] for item in dashboard["templating"]["list"]}
+    assert "deployment" in variables
+    expressions = " ".join(
+        target.get("expr", "")
+        for panel, target in _targets(dashboard)
+    )
+    assert 'instance=~"$deployment"' in expressions
+
+
+def test_the_pipeline_dashboard_answers_which_provider_is_live():
     # The whole argument of v3 is that a source change is visible. If these
     # queries disappear, that claim stops being true on the operator's screen.
-    body = (DASHBOARDS / "ise3-sources.json").read_text()
+    body = (DASHBOARDS / "ise3-pipeline.json").read_text()
     assert "ise3_dataset_provider_active" in body
     assert "ise3_dataset_provider_degraded" in body
     assert "ise3_dataset_provider_reason_info" in body
+    assert "ise3_dataset_provider_available" in body
 
 
 def test_the_load_dashboard_compares_planned_against_measured():
@@ -184,160 +584,14 @@ def test_the_load_dashboard_compares_planned_against_measured():
     assert "ise3_load_budget_utilisation" in body
 
 
-def test_every_v2_operator_workflow_has_a_generated_v3_dashboard():
-    import sys
-    sys.path.insert(0, str(Path(__file__).parents[1] / "tools"))
-    import build_dashboards3
-
-    expected = {
-        "ise-overview.json",
-        "ise-access-troubleshooting.json",
-        "ise-endpoints-devices.json",
-        "ise-exporter-health.json",
-        "ise-pan-mnt-troubleshooting.json",
-        "ise-psn-troubleshooting.json",
-        "ise-secureclient.json",
-        "ise-tacacs.json",
-    }
-    assert set(build_dashboards3.V2_WORKFLOW_PARITY) == expected
-    generated = {path.stem for path in DASHBOARDS.glob("*.json")}
-    assert set(build_dashboards3.V2_WORKFLOW_PARITY.values()) <= generated
-
-
-WORKFLOW_CONTRACTS = {
-    "ise3-overview.json": {
-        "ise3_deployment_node_state",
-        "ise3_active_sessions_total",
-        "ise3_endpoints_total",
-        "ise3_network_devices_total",
-        "ise3_certificate_expiry_days",
-        "ise3_backup_age_hours",
-        "ise3_patch_level",
-        "ise3_license_consumption",
-    },
-    "ise3-access.json": {
-        "ise3_radius_authentications",
-        "ise3_radius_authentication_latency_seconds",
-        "ise3_radius_accounting_events",
-        "ise3_radius_accounting_session_duration_seconds",
-        "ise3_radius_distinct_endpoints_total",
-        "ise3_radius_failures_by_nad_method",
-        "ise3_radius_failure_summary",
-        "ise3_radius_errors_total",
-        "ise3_active_sessions_total",
-        "ise3_session_failure_reason_endpoints",
-        "ise3_session_authz_profile_endpoints",
-        "ise3_session_authz_rule_endpoints",
-        "ise3_session_failed_authz_profile_endpoints",
-        "ise3_session_failed_authz_rule_endpoints",
-        "ise3_session_failed_policy_set_endpoints",
-        "ise3_session_policy_set_endpoints_by_nad",
-        "ise3_network_device_assignment",
-    },
-    "ise3-endpoints.json": {
-        "ise3_endpoints_by_profile",
-        "ise3_endpoints_by_identity_group",
-        "ise3_endpoint_inventory_field_coverage",
-        "ise3_endpoint_profile_events",
-        "ise3_endpoint_model",
-        "ise3_endpoint_mdm_compliant",
-        "ise3_network_device_assignment",
-        "ise3_detail_cache_coverage",
-        "ise3_nad_authentications",
-        "ise3_nad_last_authentication_age_seconds",
-    },
-    "ise3-health.json": {
-        "ise3_dataset_provider_active",
-        "ise3_dataset_last_failure_detail_info",
-        "ise3_source_latest_row_age_seconds",
-        "ise3_dataconnect_schema_view_available",
-        "ise3_dataconnect_schema_column_available",
-        "ise3_dataconnect_query_last_duration_seconds",
-        "ise3_api_requests_total",
-        "ise3_budget_throttled_total",
-        "ise3_topk_groups_total",
-        "ise3_detail_cache_coverage",
-        "ise3_posture_eligible_without_recent_assessment_total",
-        "ise3_exporter_build_info",
-    },
-    "ise3-pan-mnt.json": {
-        "ise3_deployment_node_state",
-        "ise3_deployment_node_service_enabled",
-        "ise3_backup_age_hours",
-        "ise3_certificate_expiry_days",
-        "ise3_detail_cache_coverage",
-        "ise3_posture_endpoints",
-        "ise3_node_cpu_utilization_percent",
-        "ise3_session_authentication_latency_seconds",
-        "ise3_session_authentication_step_latency_seconds",
-        "ise3_psn_diagnostic_events",
-        "ise3_dataset_last_failure_detail_info",
-    },
-    "ise3-psn.json": {
-        "ise3_active_sessions_by_psn",
-        "ise3_radius_authentications_by_psn",
-        "ise3_radius_accounting_events",
-        "ise3_radius_errors_by_psn",
-        "ise3_psn_radius_requests_per_hour",
-        "ise3_psn_average_latency_seconds",
-        "ise3_psn_diagnostic_events",
-        "ise3_psn_diagnostic_events_total",
-        "ise3_dataconnect_schema_column_available",
-        "ise3_node_disk_utilization_percent",
-        "ise3_source_latest_row_age_seconds",
-    },
-    "ise3-secureclient.json": {
-        "ise3_posture_endpoints",
-        "ise3_posture_endpoints_by_psn",
-        "ise3_posture_policy_results",
-        "ise3_posture_agent_version_endpoints",
-        "ise3_session_detail_field_coverage",
-        "ise3_detail_cache_coverage",
-        "ise3_posture_assessments",
-        "ise3_posture_assessments_by_psn",
-        "ise3_posture_assessments_by_policy",
-        "ise3_posture_failed_conditions",
-        "ise3_posture_eligible_endpoints_total",
-        "ise3_posture_eligible_recently_assessed_total",
-        "ise3_posture_eligible_without_recent_assessment_total",
-    },
-    "ise3-tacacs.json": {
-        "ise3_tacacs_internal_account_enabled",
-        "ise3_tacacs_internal_account_hygiene_risk",
-        "ise3_tacacs_authentications",
-        "ise3_tacacs_authorizations",
-        "ise3_tacacs_authorization_details",
-        "ise3_tacacs_account_last_seen_timestamp",
-        "ise3_tacacs_commands",
-        "ise3_tacacs_policy_objects",
-        "ise3_tacacs_policy_rule_count",
-        "ise3_tacacs_policy_rules_total",
-        "ise3_topk_groups_total",
-        "ise3_nad_directory_entries",
-    },
-}
-
-
-@pytest.mark.parametrize("filename,required", WORKFLOW_CONTRACTS.items())
-def test_operator_workflow_retains_its_capability_domains(filename, required):
-    dashboard = _dashboard(filename)
-    body = json.dumps(dashboard)
-    missing = sorted(metric for metric in required if metric not in body)
-    assert not missing, f"{filename} lost capability metrics: {missing}"
-    panels = [panel for panel in dashboard["panels"] if panel.get("type") != "row"]
-    assert len(panels) >= 12, f"{filename} is no longer a full operator workflow"
-
-
-@pytest.mark.parametrize("filename", WORKFLOW_CONTRACTS)
-def test_operator_workflows_are_deployment_aware(filename):
-    dashboard = _dashboard(filename)
-    variables = {item["name"] for item in dashboard["templating"]["list"]}
-    assert "deployment" in variables
-    expressions = " ".join(
-        target.get("expr", "")
-        for panel, target in _targets(dashboard)
-    )
-    assert 'instance=~"$deployment"' in expressions
+def test_the_pipeline_dashboard_states_what_it_had_to_truncate():
+    # Silent truncation is the failure mode this project refuses everywhere
+    # else. Where the exporter does bound a breakdown, the cost of that bound
+    # has to be on screen.
+    body = (DASHBOARDS / "ise3-pipeline.json").read_text()
+    assert "ise3_topk_groups_total" in body
+    assert "ise3_topk_groups_returned" in body
+    assert "ise3_topk_truncated" in body
 
 
 def test_the_committed_dashboards_match_a_fresh_build(tmp_path):
@@ -346,9 +600,7 @@ def test_the_committed_dashboards_match_a_fresh_build(tmp_path):
         reason="the Grafana SDK is a build-time dependency; "
                "install with pip install grafana-foundation-sdk")
     assert sdk is not None
-    import sys
-    sys.path.insert(0, str(Path(__file__).parents[1] / "tools"))
-    import build_dashboards3
+    build_dashboards3 = _builder()
 
     for path in build_dashboards3.build(tmp_path):
         committed = (DASHBOARDS / path.name).read_text()

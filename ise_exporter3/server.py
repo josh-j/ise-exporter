@@ -98,6 +98,26 @@ def make_handler(registry, routes=None):
         def log_message(self, fmt, *args):
             logger.debug(fmt, *args)
 
+        def handle_one_request(self):
+            # A scraper that hangs up is not an exporter fault, and at the
+            # declared scale it is a routine one: the payload above is seconds
+            # of work, so any client whose timeout is shorter than that closes
+            # while this thread is still writing. Left to the base class, that
+            # arrives as a bare traceback on stderr -- unformatted, outside the
+            # logger, and indistinguishable at a glance from the Data Connect
+            # socket teardown the transport reports for a genuinely expired
+            # Oracle session. One is noise about the reader; the other is a
+            # failed collection, and an operator must not have to read a peer
+            # address to tell them apart.
+            try:
+                super().handle_one_request()
+            except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+                self.close_connection = True
+                logger.debug(
+                    "scrape client %s closed the connection before the response "
+                    "was written", self.client_address[0])
+
+
         def _respond(self, status, body, content_type):
             encoding = ""
             if (len(body) >= MIN_COMPRESS_BYTES
@@ -123,13 +143,27 @@ def make_handler(registry, routes=None):
     return Handler
 
 
+class LoggingHTTPServer(ThreadingHTTPServer):
+    """Report a failed request through the logger, never onto stderr.
+
+    ``socketserver`` prints an unhandled request exception as a bare traceback
+    on stderr. Under systemd that lands in the journal outside the exporter's
+    own log format and level, so it is invisible to a log level raised to quiet
+    the exporter and unmissable in a journal being read for anything else.
+    """
+
+    def handle_error(self, request, client_address):
+        logger.exception("unhandled error serving a request from %s",
+                         client_address[0] if client_address else "an unknown peer")
+
+
 class HttpServer:
     """Start and stop the listener without leaking the socket or the thread."""
 
     def __init__(self, host, port, registry, routes=None):
         self.host = host
         self.port = port
-        self._server = ThreadingHTTPServer(
+        self._server = LoggingHTTPServer(
             (host, port), make_handler(registry, routes))
         self._server.daemon_threads = True
         self._thread = None

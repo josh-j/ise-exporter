@@ -45,7 +45,7 @@
       }
     ]
   },
-  "description": "Tier 2 diagnostic. Who is administering the network devices over TACACS+, are they succeeding, and is the account estate behind it clean? Activity first, then accounts and devices, then hygiene and policy.",
+  "description": "Tier 2 diagnostic. Is the fleet compliant, and is the compliance figure trustworthy? Live posture first, then where non-compliance sits, then the client population and the assessment history.",
   "editable": true,
   "fiscalYearStartMonth": 0,
   "graphTooltip": 1,
@@ -76,7 +76,7 @@
       },
       "id": 0,
       "panels": [],
-      "title": "Device administration activity",
+      "title": "Compliance now",
       "type": "row"
     },
     {
@@ -84,7 +84,7 @@
         "type": "prometheus",
         "uid": "${prometheus}"
       },
-      "description": "Share of TACACS+ device administration logins that succeeded. Unlike RADIUS, a low rate here is usually a small number of people getting it wrong rather than a systemic fault \u2014 read the per-account table before escalating.",
+      "description": "Share of endpoints with a live posture result that ISE considers compliant. The headline compliance number \u2014 but read it beside the assessment coverage stat, because it only counts endpoints that were assessed at all.",
       "fieldConfig": {
         "defaults": {
           "max": 1,
@@ -130,14 +130,14 @@
       "repeatDirection": "h",
       "targets": [
         {
-          "expr": "(sum by (instance) ((ise3_tacacs_authentications{instance=~\"$deployment\",dimension=\"username\",status=\"passed\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"tacacs_activity\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"tacacs_activity\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"tacacs_activity\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"tacacs_activity\"} == 1))) == 1)))) / clamp_min((sum by (instance) ((ise3_tacacs_authentications{instance=~\"$deployment\",dimension=\"username\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"tacacs_activity\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"tacacs_activity\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"tacacs_activity\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"tacacs_activity\"} == 1))) == 1)))), 1)",
+          "expr": "(sum by (instance) ((ise3_posture_endpoints{instance=~\"$deployment\",status=~\"Compliant|compliant\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"posture_current\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"posture_current\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"posture_current\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"posture_current\"} == 1))) == 1)))) / clamp_min((sum by (instance) ((ise3_posture_endpoints{instance=~\"$deployment\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"posture_current\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"posture_current\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"posture_current\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"posture_current\"} == 1))) == 1)))), 1)",
           "instant": true,
           "legendFormat": "",
           "range": false,
           "refId": "A"
         }
       ],
-      "title": "Authentication success rate",
+      "title": "Compliant share",
       "transformations": [],
       "transparent": false,
       "type": "stat"
@@ -147,7 +147,7 @@
         "type": "prometheus",
         "uid": "${prometheus}"
       },
-      "description": "TACACS+ authorization decisions in the window. A step change without a matching change in authentications means shell profiles or command sets changed, not the number of people logging in.",
+      "description": "Endpoints currently connected with a posture status that is not compliant. These are the ones sitting in a quarantine or remediation authorization profile right now.",
       "fieldConfig": {
         "defaults": {
           "noValue": "no data \u2014 stale, see Collection pipeline",
@@ -155,8 +155,12 @@
             "mode": "absolute",
             "steps": [
               {
-                "color": "text",
+                "color": "green",
                 "value": null
+              },
+              {
+                "color": "orange",
+                "value": 1
               }
             ]
           },
@@ -183,14 +187,14 @@
       "repeatDirection": "h",
       "targets": [
         {
-          "expr": "sum by (instance) ((ise3_tacacs_authorizations{instance=~\"$deployment\",dimension=\"username\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"tacacs_activity\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"tacacs_activity\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"tacacs_activity\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"tacacs_activity\"} == 1))) == 1)))",
+          "expr": "sum by (instance) ((ise3_posture_endpoints{instance=~\"$deployment\",status!~\"Compliant|compliant\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"posture_current\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"posture_current\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"posture_current\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"posture_current\"} == 1))) == 1)))",
           "instant": true,
           "legendFormat": "",
           "range": false,
           "refId": "A"
         }
       ],
-      "title": "Authorizations",
+      "title": "Non-compliant endpoints",
       "transformations": [],
       "transparent": false,
       "type": "stat"
@@ -200,7 +204,7 @@
         "type": "prometheus",
         "uid": "${prometheus}"
       },
-      "description": "Commands recorded by TACACS+ accounting. This is the audit trail; a collapse to zero while authentications continue means command accounting has been switched off somewhere.",
+      "description": "Endpoints eligible for posture that have no recent assessment at all. The most under-read number in posture reporting: these are not compliant and not non-compliant, they are invisible, and the compliant share above excludes them.",
       "fieldConfig": {
         "defaults": {
           "noValue": "no data \u2014 stale, see Collection pipeline",
@@ -208,8 +212,12 @@
             "mode": "absolute",
             "steps": [
               {
-                "color": "text",
+                "color": "green",
                 "value": null
+              },
+              {
+                "color": "orange",
+                "value": 1
               }
             ]
           },
@@ -236,14 +244,14 @@
       "repeatDirection": "h",
       "targets": [
         {
-          "expr": "sum by (instance) ((ise3_tacacs_commands{instance=~\"$deployment\",dimension=\"username\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"tacacs_activity\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"tacacs_activity\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"tacacs_activity\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"tacacs_activity\"} == 1))) == 1)))",
+          "expr": "(ise3_posture_eligible_without_recent_assessment_total{instance=~\"$deployment\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"posture_history\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"posture_history\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"posture_history\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"posture_history\"} == 1))) == 1))",
           "instant": true,
           "legendFormat": "",
           "range": false,
           "refId": "A"
         }
       ],
-      "title": "Commands accounted",
+      "title": "Eligible but unassessed",
       "transformations": [],
       "transparent": false,
       "type": "stat"
@@ -253,20 +261,30 @@
         "type": "prometheus",
         "uid": "${prometheus}"
       },
-      "description": "Internal device-administration accounts configured in ISE, and how many showed activity in the window. A large gap between the two is the hygiene problem the review queue below enumerates.",
+      "description": "Share of posture-eligible endpoints that were actually assessed recently. This is the denominator honesty check for the compliant share: low coverage makes a high compliance figure meaningless.",
       "fieldConfig": {
         "defaults": {
+          "max": 1,
+          "min": 0,
           "noValue": "no data \u2014 stale, see Collection pipeline",
           "thresholds": {
             "mode": "absolute",
             "steps": [
               {
-                "color": "text",
+                "color": "red",
                 "value": null
+              },
+              {
+                "color": "orange",
+                "value": 0.8
+              },
+              {
+                "color": "green",
+                "value": 0.95
               }
             ]
           },
-          "unit": "short"
+          "unit": "percentunit"
         },
         "overrides": []
       },
@@ -289,21 +307,14 @@
       "repeatDirection": "h",
       "targets": [
         {
-          "expr": "(ise3_tacacs_internal_accounts{instance=~\"$deployment\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"tacacs_config\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"tacacs_config\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"tacacs_config\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"tacacs_config\"} == 1))) == 1))",
+          "expr": "((ise3_posture_eligible_recently_assessed_total{instance=~\"$deployment\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"posture_history\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"posture_history\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"posture_history\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"posture_history\"} == 1))) == 1))) / clamp_min(((ise3_posture_eligible_endpoints_total{instance=~\"$deployment\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"posture_history\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"posture_history\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"posture_history\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"posture_history\"} == 1))) == 1))), 1)",
           "instant": true,
-          "legendFormat": "configured",
+          "legendFormat": "",
           "range": false,
           "refId": "A"
-        },
-        {
-          "expr": "(ise3_tacacs_active_accounts{instance=~\"$deployment\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"tacacs_activity\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"tacacs_activity\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"tacacs_activity\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"tacacs_activity\"} == 1))) == 1))",
-          "instant": true,
-          "legendFormat": "active",
-          "range": false,
-          "refId": "B"
         }
       ],
-      "title": "Internal accounts",
+      "title": "Assessment coverage",
       "transformations": [],
       "transparent": false,
       "type": "stat"
@@ -313,7 +324,7 @@
         "type": "prometheus",
         "uid": "${prometheus}"
       },
-      "description": "Share of this dashboard's own datasets that both collected successfully and are inside their freshness window (tacacs_activity, tacacs_config). Below 100% means some panel here is blank or stale, and the pipeline dashboard says which.",
+      "description": "Share of this dashboard's own datasets that both collected successfully and are inside their freshness window (posture_current, posture_history). Below 100% means some panel here is blank or stale, and the pipeline dashboard says which.",
       "fieldConfig": {
         "defaults": {
           "links": [
@@ -362,7 +373,7 @@
       "repeatDirection": "h",
       "targets": [
         {
-          "expr": "avg by (instance) (((max by (instance,dataset) (ise3_dataset_up{instance=~\"$deployment\",dataset=~\"tacacs_activity|tacacs_config\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=~\"tacacs_activity|tacacs_config\"} == 1))) == bool 1) * ((max by (instance,dataset) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=~\"tacacs_activity|tacacs_config\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=~\"tacacs_activity|tacacs_config\"} == 1))) == bool 1))",
+          "expr": "avg by (instance) (((max by (instance,dataset) (ise3_dataset_up{instance=~\"$deployment\",dataset=~\"posture_current|posture_history\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=~\"posture_current|posture_history\"} == 1))) == bool 1) * ((max by (instance,dataset) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=~\"posture_current|posture_history\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=~\"posture_current|posture_history\"} == 1))) == bool 1))",
           "instant": true,
           "legendFormat": "",
           "range": false,
@@ -430,7 +441,7 @@
       "repeatDirection": "h",
       "targets": [
         {
-          "expr": "max by (instance) (time() - (max by (instance,dataset) (ise3_dataset_last_success_timestamp{instance=~\"$deployment\",dataset=~\"tacacs_activity|tacacs_config\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=~\"tacacs_activity|tacacs_config\"} == 1))))",
+          "expr": "max by (instance) (time() - (max by (instance,dataset) (ise3_dataset_last_success_timestamp{instance=~\"$deployment\",dataset=~\"posture_current|posture_history\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=~\"posture_current|posture_history\"} == 1))))",
           "instant": true,
           "legendFormat": "",
           "range": false,
@@ -460,7 +471,7 @@
         "type": "prometheus",
         "uid": "${prometheus}"
       },
-      "description": "TACACS+ logins by outcome, stacked. Repeated failures from one account are usually a stale saved credential on a jumpbox; failures across many accounts at once are an identity-store problem.",
+      "description": "Live posture status of connected endpoints, stacked because the statuses together are the whole assessed population. A widening non-compliant band without a matching drop in compliant usually means new endpoints arrived unassessed.",
       "fieldConfig": {
         "defaults": {
           "custom": {
@@ -545,14 +556,14 @@
       "repeatDirection": "h",
       "targets": [
         {
-          "expr": "sum by (instance,status) ((ise3_tacacs_authentications{instance=~\"$deployment\",dimension=\"username\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"tacacs_activity\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"tacacs_activity\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"tacacs_activity\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"tacacs_activity\"} == 1))) == 1)))",
+          "expr": "sum by (instance,status) ((ise3_posture_endpoints{instance=~\"$deployment\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"posture_current\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"posture_current\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"posture_current\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"posture_current\"} == 1))) == 1)))",
           "instant": false,
           "legendFormat": "{{status}}",
           "range": true,
           "refId": "A"
         }
       ],
-      "title": "Authentication outcome over time",
+      "title": "Posture status over time",
       "transformations": [],
       "transparent": false,
       "type": "timeseries"
@@ -562,16 +573,12 @@
         "type": "prometheus",
         "uid": "${prometheus}"
       },
-      "description": "Authorization decisions by outcome. Failures here are people being refused a command or a shell profile \u2014 expected in small numbers, worth investigating as a pattern.",
+      "description": "Posture assessments each PSN performed, split by outcome. Uneven distribution is a load-balancing question; a node producing only failures is a node whose posture configuration or connectivity is broken.",
       "fieldConfig": {
         "defaults": {
           "custom": {
-            "fillOpacity": 25,
-            "lineWidth": 2,
-            "stacking": {
-              "group": "A",
-              "mode": "normal"
-            }
+            "fillOpacity": 0,
+            "lineWidth": 2
           },
           "unit": "short"
         },
@@ -647,14 +654,14 @@
       "repeatDirection": "h",
       "targets": [
         {
-          "expr": "sum by (instance,status) ((ise3_tacacs_authorizations{instance=~\"$deployment\",dimension=\"username\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"tacacs_activity\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"tacacs_activity\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"tacacs_activity\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"tacacs_activity\"} == 1))) == 1)))",
+          "expr": "(ise3_posture_assessments_by_psn{instance=~\"$deployment\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"posture_history\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"posture_history\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"posture_history\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"posture_history\"} == 1))) == 1))",
           "instant": false,
-          "legendFormat": "{{status}}",
+          "legendFormat": "{{psn}} \u00b7 {{status}}",
           "range": true,
           "refId": "A"
         }
       ],
-      "title": "Authorization outcome over time",
+      "title": "Assessment volume per PSN",
       "transformations": [],
       "transparent": false,
       "type": "timeseries"
@@ -669,7 +676,7 @@
       },
       "id": 0,
       "panels": [],
-      "title": "Who and where",
+      "title": "Where non-compliance sits",
       "type": "row"
     },
     {
@@ -677,16 +684,20 @@
         "type": "prometheus",
         "uid": "${prometheus}"
       },
-      "description": "Every account with device-administration activity in the window, passed and failed. Sorted by failures because that is what needs attention; the whole list is present, so this doubles as the audit answer to 'who logged into the network kit'.",
+      "description": "Live posture status grouped by the operations owner attribute of the network device the endpoint is attached to. This is the panel that turns a compliance number into a list of teams to talk to.",
       "fieldConfig": {
         "defaults": {},
         "overrides": [
           {
             "matcher": {
               "id": "byName",
-              "options": "Failed"
+              "options": "Non-compliant"
             },
             "properties": [
+              {
+                "id": "unit",
+                "value": "short"
+              },
               {
                 "id": "thresholds",
                 "value": {
@@ -709,18 +720,14 @@
                   "mode": "basic",
                   "type": "color-background"
                 }
-              },
-              {
-                "id": "custom.width",
-                "value": 110
               }
             ]
           }
         ]
       },
       "gridPos": {
-        "h": 10,
-        "w": 12,
+        "h": 8,
+        "w": 8,
         "x": 0,
         "y": 15
       },
@@ -728,23 +735,15 @@
       "repeatDirection": "h",
       "targets": [
         {
-          "expr": "(ise3_tacacs_authentications{instance=~\"$deployment\",dimension=\"username\",status=\"failed\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"tacacs_activity\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"tacacs_activity\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"tacacs_activity\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"tacacs_activity\"} == 1))) == 1))",
+          "expr": "sum by (instance,ops_owner) ((ise3_posture_endpoints{instance=~\"$deployment\",status!~\"Compliant|compliant\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"posture_current\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"posture_current\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"posture_current\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"posture_current\"} == 1))) == 1)))",
           "format": "table",
           "instant": true,
           "legendFormat": "",
           "range": false,
           "refId": "A"
-        },
-        {
-          "expr": "(ise3_tacacs_authentications{instance=~\"$deployment\",dimension=\"username\",status=\"passed\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"tacacs_activity\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"tacacs_activity\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"tacacs_activity\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"tacacs_activity\"} == 1))) == 1))",
-          "format": "table",
-          "instant": true,
-          "legendFormat": "",
-          "range": false,
-          "refId": "B"
         }
       ],
-      "title": "Activity by account",
+      "title": "Non-compliance by owner",
       "transformations": [
         {
           "id": "filterFieldsByName",
@@ -759,16 +758,11 @@
           }
         },
         {
-          "id": "merge",
-          "options": {}
-        },
-        {
           "id": "organize",
           "options": {
             "renameByName": {
-              "Value #A": "Failed",
-              "Value #B": "Passed",
-              "value": "Account"
+              "Value": "Non-compliant",
+              "ops_owner": "Operations owner"
             }
           }
         },
@@ -778,7 +772,7 @@
             "sort": [
               {
                 "desc": true,
-                "field": "Failed"
+                "field": "Non-compliant"
               }
             ]
           }
@@ -792,16 +786,20 @@
         "type": "prometheus",
         "uid": "${prometheus}"
       },
-      "description": "Device-administration activity per network device. A device with many failures is often one where the shared secret or the AAA configuration drifted from the template.",
+      "description": "Posture policies with failing results, worst first. A single policy dominating usually means the policy is wrong rather than the fleet \u2014 check what it requires before chasing endpoints.",
       "fieldConfig": {
         "defaults": {},
         "overrides": [
           {
             "matcher": {
               "id": "byName",
-              "options": "Failed"
+              "options": "Failures"
             },
             "properties": [
+              {
+                "id": "unit",
+                "value": "short"
+              },
               {
                 "id": "thresholds",
                 "value": {
@@ -824,42 +822,30 @@
                   "mode": "basic",
                   "type": "color-background"
                 }
-              },
-              {
-                "id": "custom.width",
-                "value": 110
               }
             ]
           }
         ]
       },
       "gridPos": {
-        "h": 10,
-        "w": 12,
-        "x": 12,
+        "h": 8,
+        "w": 8,
+        "x": 8,
         "y": 15
       },
       "options": null,
       "repeatDirection": "h",
       "targets": [
         {
-          "expr": "(ise3_tacacs_authentications{instance=~\"$deployment\",dimension=\"device\",status=\"failed\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"tacacs_activity\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"tacacs_activity\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"tacacs_activity\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"tacacs_activity\"} == 1))) == 1))",
+          "expr": "sum by (instance,policy) ((ise3_posture_policy_results{instance=~\"$deployment\",result!~\"pass|Passed|passed\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"posture_current\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"posture_current\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"posture_current\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"posture_current\"} == 1))) == 1)))",
           "format": "table",
           "instant": true,
           "legendFormat": "",
           "range": false,
           "refId": "A"
-        },
-        {
-          "expr": "(ise3_tacacs_authentications{instance=~\"$deployment\",dimension=\"device\",status=\"passed\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"tacacs_activity\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"tacacs_activity\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"tacacs_activity\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"tacacs_activity\"} == 1))) == 1))",
-          "format": "table",
-          "instant": true,
-          "legendFormat": "",
-          "range": false,
-          "refId": "B"
         }
       ],
-      "title": "Activity by device",
+      "title": "Failing posture policies",
       "transformations": [
         {
           "id": "filterFieldsByName",
@@ -874,16 +860,11 @@
           }
         },
         {
-          "id": "merge",
-          "options": {}
-        },
-        {
           "id": "organize",
           "options": {
             "renameByName": {
-              "Value #A": "Failed",
-              "Value #B": "Passed",
-              "value": "Network device"
+              "Value": "Failures",
+              "policy": "Posture policy"
             }
           }
         },
@@ -893,7 +874,109 @@
             "sort": [
               {
                 "desc": true,
-                "field": "Failed"
+                "field": "Failures"
+              }
+            ]
+          }
+        }
+      ],
+      "transparent": false,
+      "type": "table"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${prometheus}"
+      },
+      "description": "The individual posture conditions endpoints failed \u2014 the specific missing patch, absent process, or out-of-date definition file. The most directly actionable panel here.",
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Endpoints"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "short"
+              },
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "green",
+                      "value": null
+                    },
+                    {
+                      "color": "orange",
+                      "value": 1
+                    }
+                  ]
+                }
+              },
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "mode": "basic",
+                  "type": "color-background"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 15
+      },
+      "options": null,
+      "repeatDirection": "h",
+      "targets": [
+        {
+          "expr": "(ise3_posture_failed_conditions{instance=~\"$deployment\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"posture_history\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"posture_history\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"posture_history\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"posture_history\"} == 1))) == 1))",
+          "format": "table",
+          "instant": true,
+          "legendFormat": "",
+          "range": false,
+          "refId": "A"
+        }
+      ],
+      "title": "Failed conditions",
+      "transformations": [
+        {
+          "id": "filterFieldsByName",
+          "options": {
+            "exclude": {
+              "names": [
+                "Time",
+                "__name__",
+                "job"
+              ]
+            }
+          }
+        },
+        {
+          "id": "organize",
+          "options": {
+            "renameByName": {
+              "Value": "Endpoints",
+              "condition": "Condition"
+            }
+          }
+        },
+        {
+          "id": "sortBy",
+          "options": {
+            "sort": [
+              {
+                "desc": true,
+                "field": "Endpoints"
               }
             ]
           }
@@ -908,11 +991,11 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 25
+        "y": 23
       },
       "id": 0,
       "panels": [],
-      "title": "Account hygiene",
+      "title": "Client population",
       "type": "row"
     },
     {
@@ -920,58 +1003,35 @@
         "type": "prometheus",
         "uid": "${prometheus}"
       },
-      "description": "Internal accounts the exporter has flagged as a hygiene risk, with the reason. This is a standing review list rather than an incident panel \u2014 but it is the one thing on this dashboard an auditor will ask for.",
+      "description": "Agent versions across endpoints with a live posture result. Old agents are the usual explanation for a cluster of unassessed or failing endpoints in one part of the estate.",
       "fieldConfig": {
         "defaults": {},
         "overrides": [
           {
             "matcher": {
               "id": "byName",
-              "options": "Flagged"
+              "options": "Endpoints"
             },
             "properties": [
               {
-                "id": "thresholds",
-                "value": {
-                  "mode": "absolute",
-                  "steps": [
-                    {
-                      "color": "green",
-                      "value": null
-                    },
-                    {
-                      "color": "orange",
-                      "value": 1
-                    }
-                  ]
-                }
-              },
-              {
-                "id": "custom.cellOptions",
-                "value": {
-                  "mode": "basic",
-                  "type": "color-background"
-                }
-              },
-              {
-                "id": "custom.width",
-                "value": 100
+                "id": "unit",
+                "value": "short"
               }
             ]
           }
         ]
       },
       "gridPos": {
-        "h": 10,
+        "h": 8,
         "w": 12,
         "x": 0,
-        "y": 26
+        "y": 24
       },
       "options": null,
       "repeatDirection": "h",
       "targets": [
         {
-          "expr": "(ise3_tacacs_internal_account_hygiene_risk{instance=~\"$deployment\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"tacacs_config\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"tacacs_config\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"tacacs_config\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"tacacs_config\"} == 1))) == 1))",
+          "expr": "(ise3_posture_agent_version_endpoints{instance=~\"$deployment\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"posture_current\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"posture_current\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"posture_current\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"posture_current\"} == 1))) == 1))",
           "format": "table",
           "instant": true,
           "legendFormat": "",
@@ -979,7 +1039,7 @@
           "refId": "A"
         }
       ],
-      "title": "Account hygiene review queue",
+      "title": "Secure Client versions",
       "transformations": [
         {
           "id": "filterFieldsByName",
@@ -997,9 +1057,8 @@
           "id": "organize",
           "options": {
             "renameByName": {
-              "Value": "Flagged",
-              "risk": "Risk",
-              "username": "Account"
+              "Value": "Endpoints",
+              "agent_version": "Secure Client version"
             }
           }
         },
@@ -1009,7 +1068,7 @@
             "sort": [
               {
                 "desc": true,
-                "field": "Flagged"
+                "field": "Endpoints"
               }
             ]
           }
@@ -1023,106 +1082,43 @@
         "type": "prometheus",
         "uid": "${prometheus}"
       },
-      "description": "When each account was last seen authenticating or authorizing, oldest first. An enabled account with no recent evidence is the classic dormant-credential finding, and this is where it becomes visible.",
+      "description": "Operating systems among posture-assessed endpoints. Compare against the endpoints dashboard's OS breakdown: an OS present there and absent here is an OS nobody is posturing.",
       "fieldConfig": {
         "defaults": {},
         "overrides": [
           {
             "matcher": {
               "id": "byName",
-              "options": "Last seen"
+              "options": "Endpoints"
             },
             "properties": [
               {
                 "id": "unit",
-                "value": "s"
-              },
-              {
-                "id": "custom.width",
-                "value": 130
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "Enabled"
-            },
-            "properties": [
-              {
-                "id": "thresholds",
-                "value": {
-                  "mode": "absolute",
-                  "steps": [
-                    {
-                      "color": "red",
-                      "value": null
-                    },
-                    {
-                      "color": "green",
-                      "value": 1
-                    }
-                  ]
-                }
-              },
-              {
-                "id": "mappings",
-                "value": [
-                  {
-                    "options": {
-                      "0": {
-                        "color": "red",
-                        "index": 1,
-                        "text": "No"
-                      },
-                      "1": {
-                        "color": "green",
-                        "index": 0,
-                        "text": "Yes"
-                      }
-                    },
-                    "type": "value"
-                  }
-                ]
-              },
-              {
-                "id": "custom.cellOptions",
-                "value": {
-                  "mode": "basic",
-                  "type": "color-background"
-                }
+                "value": "short"
               }
             ]
           }
         ]
       },
       "gridPos": {
-        "h": 10,
+        "h": 8,
         "w": 12,
         "x": 12,
-        "y": 26
+        "y": 24
       },
       "options": null,
       "repeatDirection": "h",
       "targets": [
         {
-          "expr": "time() - ((ise3_tacacs_account_last_seen_timestamp{instance=~\"$deployment\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"tacacs_activity\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"tacacs_activity\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"tacacs_activity\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"tacacs_activity\"} == 1))) == 1)))",
+          "expr": "(ise3_posture_endpoints_by_os{instance=~\"$deployment\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"posture_current\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"posture_current\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"posture_current\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"posture_current\"} == 1))) == 1))",
           "format": "table",
           "instant": true,
           "legendFormat": "",
           "range": false,
           "refId": "A"
-        },
-        {
-          "expr": "(ise3_tacacs_internal_account_enabled{instance=~\"$deployment\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"tacacs_config\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"tacacs_config\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"tacacs_config\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"tacacs_config\"} == 1))) == 1))",
-          "format": "table",
-          "instant": true,
-          "legendFormat": "",
-          "range": false,
-          "refId": "B"
         }
       ],
-      "title": "Last evidence of use, per account",
+      "title": "Operating systems assessed",
       "transformations": [
         {
           "id": "filterFieldsByName",
@@ -1137,17 +1133,11 @@
           }
         },
         {
-          "id": "merge",
-          "options": {}
-        },
-        {
           "id": "organize",
           "options": {
             "renameByName": {
-              "Value #A": "Last seen",
-              "Value #B": "Enabled",
-              "event_type": "Event",
-              "username": "Account"
+              "Value": "Endpoints",
+              "os": "Operating system"
             }
           }
         },
@@ -1157,7 +1147,7 @@
             "sort": [
               {
                 "desc": true,
-                "field": "Last seen"
+                "field": "Endpoints"
               }
             ]
           }
@@ -1172,7 +1162,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 36
+        "y": 32
       },
       "id": 0,
       "panels": [
@@ -1181,127 +1171,133 @@
             "type": "prometheus",
             "uid": "${prometheus}"
           },
-          "description": "Authentication and authorization rule counts per device administration policy set. Sudden growth in a rule count is a policy change nobody announced; a set with no rules is dead configuration.",
+          "description": "Compliance across the assessment history window rather than the live session list. Diverging from the live figure means the population that is connected right now is not representative of the fleet.",
           "fieldConfig": {
-            "defaults": {},
+            "defaults": {
+              "max": 1,
+              "min": 0,
+              "noValue": "no data \u2014 stale, see Collection pipeline",
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "red",
+                    "value": null
+                  },
+                  {
+                    "color": "orange",
+                    "value": 0.85
+                  },
+                  {
+                    "color": "green",
+                    "value": 0.95
+                  }
+                ]
+              },
+              "unit": "percentunit"
+            },
             "overrides": []
           },
           "gridPos": {
-            "h": 8,
-            "w": 12,
+            "h": 4,
+            "w": 8,
             "x": 0,
-            "y": 37
+            "y": 33
           },
-          "options": null,
+          "options": {
+            "colorMode": "value",
+            "graphMode": "none",
+            "justifyMode": "auto",
+            "orientation": "auto",
+            "reduceOptions": {
+              "calcs": []
+            },
+            "textMode": "auto"
+          },
           "repeatDirection": "h",
           "targets": [
             {
-              "expr": "(ise3_tacacs_policy_rule_count{instance=~\"$deployment\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"tacacs_policy_rules\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"tacacs_policy_rules\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"tacacs_policy_rules\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"tacacs_policy_rules\"} == 1))) == 1))",
-              "format": "table",
+              "expr": "(sum by (instance) ((ise3_posture_assessments{instance=~\"$deployment\",status=~\"Compliant|compliant|Pass|passed\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"posture_history\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"posture_history\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"posture_history\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"posture_history\"} == 1))) == 1)))) / clamp_min((sum by (instance) ((ise3_posture_assessments{instance=~\"$deployment\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"posture_history\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"posture_history\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"posture_history\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"posture_history\"} == 1))) == 1)))), 1)",
               "instant": true,
               "legendFormat": "",
               "range": false,
               "refId": "A"
             }
           ],
-          "title": "Policy rule inventory",
-          "transformations": [
-            {
-              "id": "filterFieldsByName",
-              "options": {
-                "exclude": {
-                  "names": [
-                    "Time",
-                    "__name__",
-                    "job"
-                  ]
-                }
-              }
-            },
-            {
-              "id": "organize",
-              "options": {
-                "renameByName": {
-                  "Value": "Rules",
-                  "policy_set": "Policy set",
-                  "rule_type": "Rule type"
-                }
-              }
-            },
-            {
-              "id": "sortBy",
-              "options": {
-                "sort": [
-                  {
-                    "desc": true,
-                    "field": "Rules"
-                  }
-                ]
-              }
-            }
-          ],
+          "title": "Historical compliance share",
+          "transformations": [],
           "transparent": false,
-          "type": "table"
+          "type": "stat"
         },
         {
           "datasource": {
             "type": "prometheus",
             "uid": "${prometheus}"
           },
-          "description": "How many of each Device Admin object type exist \u2014 shell profiles, command sets, policy sets. A bounded handful of categories, which is what a bar gauge suits; the shape is the size of the configuration surface.",
+          "description": "Share of MnT session records carrying the posture fields these panels read. Low coverage means the live posture picture is drawn from a subset of sessions, not all of them.",
           "fieldConfig": {
             "defaults": {
+              "max": 1,
+              "min": 0,
+              "noValue": "no data \u2014 stale, see Collection pipeline",
               "thresholds": {
                 "mode": "absolute",
                 "steps": [
                   {
-                    "color": "text",
+                    "color": "red",
                     "value": null
+                  },
+                  {
+                    "color": "orange",
+                    "value": 0.8
+                  },
+                  {
+                    "color": "green",
+                    "value": 0.95
                   }
                 ]
               },
-              "unit": "short"
+              "unit": "percentunit"
             },
             "overrides": []
           },
           "gridPos": {
-            "h": 8,
-            "w": 12,
-            "x": 12,
-            "y": 37
+            "h": 4,
+            "w": 8,
+            "x": 8,
+            "y": 33
           },
           "options": {
-            "displayMode": "gradient",
-            "minVizHeight": 10,
-            "minVizWidth": 0,
-            "orientation": "horizontal",
+            "colorMode": "value",
+            "graphMode": "none",
+            "justifyMode": "auto",
+            "orientation": "auto",
             "reduceOptions": {
               "calcs": []
             },
-            "showUnfilled": true,
-            "valueMode": "color"
+            "textMode": "auto"
           },
           "repeatDirection": "h",
           "targets": [
             {
-              "expr": "(ise3_tacacs_policy_objects{instance=~\"$deployment\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"tacacs_config\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"tacacs_config\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"tacacs_config\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"tacacs_config\"} == 1))) == 1))",
+              "expr": "avg by (instance) ((ise3_session_detail_field_coverage{instance=~\"$deployment\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"posture_current\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"posture_current\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"posture_current\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"posture_current\"} == 1))) == 1)))",
               "instant": true,
-              "legendFormat": "{{object_type}}",
+              "legendFormat": "",
               "range": false,
               "refId": "A"
             }
           ],
-          "title": "Configured device administration objects",
+          "title": "MnT session field coverage",
           "transformations": [],
           "transparent": false,
-          "type": "bargauge"
+          "type": "stat"
         },
         {
           "datasource": {
             "type": "prometheus",
             "uid": "${prometheus}"
           },
-          "description": "How many device administration policy sets exist and how many rules they contain in total. The size of the configuration surface: a rule total that jumps is a policy change nobody announced, and the per-set table beside it says where.",
+          "description": "How many endpoints are in scope for posture, as the assessment history counts them and as the endpoint inventory counts them. The denominator behind assessment coverage \u2014 the two disagreeing means posture scope and inventory scope are not the same population.",
           "fieldConfig": {
             "defaults": {
               "noValue": "no data \u2014 stale, see Collection pipeline",
@@ -1320,9 +1316,9 @@
           },
           "gridPos": {
             "h": 4,
-            "w": 12,
-            "x": 0,
-            "y": 45
+            "w": 8,
+            "x": 16,
+            "y": 33
           },
           "options": {
             "colorMode": "value",
@@ -1337,21 +1333,21 @@
           "repeatDirection": "h",
           "targets": [
             {
-              "expr": "(ise3_tacacs_policy_sets{instance=~\"$deployment\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"tacacs_config\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"tacacs_config\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"tacacs_config\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"tacacs_config\"} == 1))) == 1))",
+              "expr": "(ise3_posture_eligible_endpoints_total{instance=~\"$deployment\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"posture_history\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"posture_history\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"posture_history\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"posture_history\"} == 1))) == 1))",
               "instant": true,
-              "legendFormat": "policy sets",
+              "legendFormat": "eligible",
               "range": false,
               "refId": "A"
             },
             {
-              "expr": "sum by (instance) ((ise3_tacacs_policy_rules_total{instance=~\"$deployment\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"tacacs_policy_rules\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"tacacs_policy_rules\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"tacacs_policy_rules\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"tacacs_policy_rules\"} == 1))) == 1)))",
+              "expr": "(ise3_endpoints_posture_applicable{instance=~\"$deployment\",applicable=\"true\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"endpoint_inventory\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"endpoint_inventory\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"endpoint_inventory\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"endpoint_inventory\"} == 1))) == 1))",
               "instant": true,
-              "legendFormat": "rules",
+              "legendFormat": "applicable",
               "range": false,
               "refId": "B"
             }
           ],
-          "title": "Policy sets and rules",
+          "title": "Eligible endpoints",
           "transformations": [],
           "transparent": false,
           "type": "stat"
@@ -1361,35 +1357,22 @@
             "type": "prometheus",
             "uid": "${prometheus}"
           },
-          "description": "The first word of each accounted command, ranked. Enough to see the shape of what engineers are doing without ever recording a full command line as a metric label.",
+          "description": "Current posture status of connected endpoints, per serving PSN. A node whose endpoints are disproportionately unknown or non-compliant usually has a posture configuration or connectivity problem of its own.",
           "fieldConfig": {
             "defaults": {},
-            "overrides": [
-              {
-                "matcher": {
-                  "id": "byName",
-                  "options": "Commands"
-                },
-                "properties": [
-                  {
-                    "id": "unit",
-                    "value": "short"
-                  }
-                ]
-              }
-            ]
+            "overrides": []
           },
           "gridPos": {
             "h": 8,
             "w": 12,
-            "x": 12,
-            "y": 45
+            "x": 0,
+            "y": 37
           },
           "options": null,
           "repeatDirection": "h",
           "targets": [
             {
-              "expr": "(ise3_tacacs_commands{instance=~\"$deployment\",dimension=\"command_family\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"tacacs_activity\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"tacacs_activity\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"tacacs_activity\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"tacacs_activity\"} == 1))) == 1))",
+              "expr": "(ise3_posture_endpoints_by_psn{instance=~\"$deployment\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"posture_current\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"posture_current\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"posture_current\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"posture_current\"} == 1))) == 1))",
               "format": "table",
               "instant": true,
               "legendFormat": "",
@@ -1397,7 +1380,7 @@
               "refId": "A"
             }
           ],
-          "title": "Command families",
+          "title": "Live posture by PSN",
           "transformations": [
             {
               "id": "filterFieldsByName",
@@ -1415,8 +1398,9 @@
               "id": "organize",
               "options": {
                 "renameByName": {
-                  "Value": "Commands",
-                  "value": "Command family"
+                  "Value": "Endpoints",
+                  "psn": "PSN",
+                  "status": "Status"
                 }
               }
             },
@@ -1426,7 +1410,7 @@
                 "sort": [
                   {
                     "desc": true,
-                    "field": "Commands"
+                    "field": "Endpoints"
                   }
                 ]
               }
@@ -1440,22 +1424,124 @@
             "type": "prometheus",
             "uid": "${prometheus}"
           },
-          "description": "Individual authorization decisions with the policy, shell profile, command set, account and device involved. The forensic view: use it when one row of the summary tables above needs explaining.",
+          "description": "Assessment results over the history window, stacked by status. The trend view of compliance, as opposed to the live snapshot at the top of the page.",
+          "fieldConfig": {
+            "defaults": {
+              "custom": {
+                "fillOpacity": 25,
+                "lineWidth": 2,
+                "stacking": {
+                  "group": "A",
+                  "mode": "normal"
+                }
+              },
+              "unit": "short"
+            },
+            "overrides": [
+              {
+                "matcher": {
+                  "id": "byRegexp",
+                  "options": ".*(passed|Passed|compliant|Compliant|success).*"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "fixedColor": "green",
+                      "mode": "fixed"
+                    }
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byRegexp",
+                  "options": ".*(failed|Failed|non-compliant|NonCompliant|error).*"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "fixedColor": "red",
+                      "mode": "fixed"
+                    }
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byRegexp",
+                  "options": ".*(unknown|Unknown|pending|Pending).*"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "fixedColor": "text",
+                      "mode": "fixed"
+                    }
+                  }
+                ]
+              }
+            ]
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 12,
+            "y": 37
+          },
+          "options": {
+            "legend": {
+              "calcs": [
+                "lastNotNull",
+                "max"
+              ],
+              "displayMode": "table",
+              "placement": "bottom",
+              "showLegend": false
+            },
+            "tooltip": {
+              "mode": "single",
+              "sort": "asc"
+            }
+          },
+          "repeatDirection": "h",
+          "targets": [
+            {
+              "expr": "sum by (instance,status) ((ise3_posture_assessments{instance=~\"$deployment\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"posture_history\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"posture_history\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"posture_history\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"posture_history\"} == 1))) == 1)))",
+              "instant": false,
+              "legendFormat": "{{status}}",
+              "range": true,
+              "refId": "A"
+            }
+          ],
+          "title": "Historical assessment outcomes",
+          "transformations": [],
+          "transparent": false,
+          "type": "timeseries"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${prometheus}"
+          },
+          "description": "Historical assessment counts per policy and status. Read it when a policy has been changed and you need to see whether the change did what was intended.",
           "fieldConfig": {
             "defaults": {},
             "overrides": []
           },
           "gridPos": {
-            "h": 10,
+            "h": 8,
             "w": 12,
             "x": 0,
-            "y": 53
+            "y": 45
           },
           "options": null,
           "repeatDirection": "h",
           "targets": [
             {
-              "expr": "(ise3_tacacs_authorization_details{instance=~\"$deployment\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"tacacs_activity\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"tacacs_activity\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"tacacs_activity\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"tacacs_activity\"} == 1))) == 1))",
+              "expr": "(ise3_posture_assessments_by_policy{instance=~\"$deployment\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"posture_history\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"posture_history\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"posture_history\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"posture_history\"} == 1))) == 1))",
               "format": "table",
               "instant": true,
               "legendFormat": "",
@@ -1463,7 +1549,7 @@
               "refId": "A"
             }
           ],
-          "title": "Authorization detail",
+          "title": "Assessment results by policy",
           "transformations": [
             {
               "id": "filterFieldsByName",
@@ -1481,13 +1567,9 @@
               "id": "organize",
               "options": {
                 "renameByName": {
-                  "Value": "Decisions",
-                  "command_set": "Command set",
-                  "device": "Network device",
-                  "policy": "Policy",
-                  "shell_profile": "Shell profile",
-                  "status": "Status",
-                  "username": "Account"
+                  "Value": "Assessments",
+                  "policy": "Posture policy",
+                  "status": "Status"
                 }
               }
             },
@@ -1497,7 +1579,7 @@
                 "sort": [
                   {
                     "desc": true,
-                    "field": "Decisions"
+                    "field": "Assessments"
                   }
                 ]
               }
@@ -1507,7 +1589,7 @@
           "type": "table"
         }
       ],
-      "title": "Policy and commands",
+      "title": "Assessment history",
       "type": "row"
     },
     {
@@ -1516,7 +1598,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 63
+        "y": 53
       },
       "id": 0,
       "panels": [
@@ -1534,10 +1616,10 @@
             "h": 6,
             "w": 24,
             "x": 0,
-            "y": 64
+            "y": 54
           },
           "options": {
-            "content": "**Purpose** \u2014 show who is administering the network devices, whether they are succeeding, and whether the account estate behind it is clean.\n\n**Read it in this order**\n\n1. Read the success rate and the account/active gap.\n2. Work the per-account and per-device failure columns.\n3. Review the hygiene queue and the last-seen table on a schedule, not only during an incident.\n\n**When something is red**\n\n- Failures concentrated on one account: a stale saved credential.\n- Failures concentrated on one device: check its AAA configuration against the template.\n- Command accounting at zero while logins continue: accounting is off somewhere, and the audit trail has a hole in it.\n\n**Related dashboards** \u2014 Triage, Endpoints and devices, Collection pipeline\n\n*Owner: set this to the team that answers the page. Runbook: link it here \u2014 a red panel with no runbook is a puzzle, not an alert.*",
+            "content": "**Purpose** \u2014 answer whether the fleet is compliant, and separate 'assessed and failing' from 'never assessed at all'.\n\n**Read it in this order**\n\n1. Read compliant share and assessment coverage together \u2014 one without the other is misleading.\n2. Read **Eligible but unassessed**: invisible endpoints are the real gap.\n3. Use failed conditions to get to something actionable.\n\n**When something is red**\n\n- High compliance, low coverage: the number is not trustworthy; fix the agents before reporting it.\n- One policy dominating failures: inspect the policy, not the endpoints.\n- One PSN producing all failures: continue on the PSN service dashboard.\n\n**Related dashboards** \u2014 Triage, Endpoints and devices, PSN service\n\n*Owner: set this to the team that answers the page. Runbook: link it here \u2014 a red panel with no runbook is a puzzle, not an alert.*",
             "mode": "markdown"
           },
           "repeatDirection": "h",
@@ -1600,6 +1682,6 @@
     "to": "now"
   },
   "timezone": "browser",
-  "title": "ISE \u00b7 Device administration",
-  "uid": "ise3-tacacs"
+  "title": "ISE \u00b7 Posture",
+  "uid": "ise3-posture"
 }

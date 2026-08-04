@@ -45,7 +45,7 @@
       }
     ]
   },
-  "description": "Per-PSN sessions, authentication volume, errors, throughput, latency, resource utilisation, and reporting health.",
+  "description": "Tier 2 diagnostic. Are the policy service nodes coping? Service level first, then utilisation and saturation per node, then the reporting pipeline those nodes feed.",
   "editable": true,
   "fiscalYearStartMonth": 0,
   "graphTooltip": 1,
@@ -76,7 +76,7 @@
       },
       "id": 0,
       "panels": [],
-      "title": "PSN service",
+      "title": "Service level",
       "type": "row"
     },
     {
@@ -84,192 +84,12 @@
         "type": "prometheus",
         "uid": "${prometheus}"
       },
-      "description": "Freshness of deployment, performance, session, reporting, accounting, and error datasets used here. NOT READY means the panels fed by that dataset stay blank.",
+      "description": "Highest RADIUS load percentage reported by any selected PSN \u2014 the saturation signal of USE for this service. Amber at 80%, red at 90%: past that, latency rises before throughput falls, so this leads the symptom.",
       "fieldConfig": {
         "defaults": {
-          "mappings": [
-            {
-              "options": {
-                "0": {
-                  "color": "red",
-                  "index": 1,
-                  "text": "NOT READY"
-                },
-                "1": {
-                  "color": "green",
-                  "index": 0,
-                  "text": "OK"
-                }
-              },
-              "type": "value"
-            }
-          ],
-          "noValue": "no data \u2014 exporter absent?",
-          "unit": "short"
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "h": 5,
-        "w": 24,
-        "x": 0,
-        "y": 1
-      },
-      "options": null,
-      "repeatDirection": "h",
-      "targets": [
-        {
-          "expr": "((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"deployment\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"deployment\"} == 1))) == bool 1) * ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"deployment\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"deployment\"} == 1))) == bool 1)",
-          "instant": true,
-          "legendFormat": "deployment",
-          "range": false,
-          "refId": "A"
-        },
-        {
-          "expr": "((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"psn_performance\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"psn_performance\"} == 1))) == bool 1) * ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"psn_performance\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"psn_performance\"} == 1))) == bool 1)",
-          "instant": true,
-          "legendFormat": "performance",
-          "range": false,
-          "refId": "B"
-        },
-        {
-          "expr": "((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"active_sessions\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"active_sessions\"} == 1))) == bool 1) * ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"active_sessions\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"active_sessions\"} == 1))) == bool 1)",
-          "instant": true,
-          "legendFormat": "sessions",
-          "range": false,
-          "refId": "C"
-        },
-        {
-          "expr": "((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"radius_reporting\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"radius_reporting\"} == 1))) == bool 1) * ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"radius_reporting\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"radius_reporting\"} == 1))) == bool 1)",
-          "instant": true,
-          "legendFormat": "RADIUS",
-          "range": false,
-          "refId": "D"
-        },
-        {
-          "expr": "((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"radius_errors\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"radius_errors\"} == 1))) == bool 1) * ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"radius_errors\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"radius_errors\"} == 1))) == bool 1)",
-          "instant": true,
-          "legendFormat": "errors",
-          "range": false,
-          "refId": "E"
-        },
-        {
-          "expr": "((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"radius_accounting\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"radius_accounting\"} == 1))) == bool 1) * ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"radius_accounting\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"radius_accounting\"} == 1))) == bool 1)",
-          "instant": true,
-          "legendFormat": "accounting",
-          "range": false,
-          "refId": "F"
-        }
-      ],
-      "title": "Dataset readiness",
-      "transformations": [],
-      "transparent": false,
-      "type": "stat"
-    },
-    {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${prometheus}"
-      },
-      "description": "Seconds since the latest successful performance, session, RADIUS, and deployment snapshots used here.",
-      "fieldConfig": {
-        "defaults": {
-          "unit": "s"
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "h": 5,
-        "w": 24,
-        "x": 0,
-        "y": 6
-      },
-      "options": null,
-      "repeatDirection": "h",
-      "targets": [
-        {
-          "expr": "time() - ise3_dataset_last_success_timestamp{instance=~\"$deployment\",dataset=\"psn_performance\"}",
-          "instant": true,
-          "legendFormat": "performance",
-          "range": false,
-          "refId": "A"
-        },
-        {
-          "expr": "time() - ise3_dataset_last_success_timestamp{instance=~\"$deployment\",dataset=\"active_sessions\"}",
-          "instant": true,
-          "legendFormat": "sessions",
-          "range": false,
-          "refId": "B"
-        },
-        {
-          "expr": "time() - ise3_dataset_last_success_timestamp{instance=~\"$deployment\",dataset=\"radius_reporting\"}",
-          "instant": true,
-          "legendFormat": "RADIUS",
-          "range": false,
-          "refId": "C"
-        },
-        {
-          "expr": "time() - ise3_dataset_last_success_timestamp{instance=~\"$deployment\",dataset=\"deployment\"}",
-          "instant": true,
-          "legendFormat": "deployment",
-          "range": false,
-          "refId": "D"
-        }
-      ],
-      "title": "Dataset collection age",
-      "transformations": [],
-      "transparent": false,
-      "type": "stat"
-    },
-    {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${prometheus}"
-      },
-      "description": "PSNs represented in performance reporting beside AAA and system diagnostic events in the bounded reporting window.",
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short"
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "h": 5,
-        "w": 12,
-        "x": 0,
-        "y": 11
-      },
-      "options": null,
-      "repeatDirection": "h",
-      "targets": [
-        {
-          "expr": "count(ise3_psn_radius_requests_per_hour{instance=~\"$deployment\",node=~\"$node\"})",
-          "instant": true,
-          "legendFormat": "reporting nodes",
-          "range": false,
-          "refId": "A"
-        },
-        {
-          "expr": "sum(ise3_psn_diagnostic_events_total{instance=~\"$deployment\"})",
-          "instant": true,
-          "legendFormat": "diagnostic events",
-          "range": false,
-          "refId": "B"
-        }
-      ],
-      "title": "Reporting nodes and diagnostic events",
-      "transformations": [],
-      "transparent": false,
-      "type": "stat"
-    },
-    {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${prometheus}"
-      },
-      "description": "Missing required columns in core PSN reporting views and in the optional AAA/system diagnostic views. Core must be zero; diagnostic gaps explain reduced work-queue coverage without failing performance collection.",
-      "fieldConfig": {
-        "defaults": {
+          "max": 100,
+          "min": 0,
+          "noValue": "no data \u2014 stale, see Collection pipeline",
           "thresholds": {
             "mode": "absolute",
             "steps": [
@@ -278,65 +98,46 @@
                 "value": null
               },
               {
+                "color": "orange",
+                "value": 80
+              },
+              {
                 "color": "red",
-                "value": 1
+                "value": 90
               }
             ]
           },
-          "unit": "short"
+          "unit": "percent"
         },
-        "overrides": [
-          {
-            "matcher": {
-              "id": "byFrameRefID",
-              "options": "B"
-            },
-            "properties": [
-              {
-                "id": "thresholds",
-                "value": {
-                  "mode": "absolute",
-                  "steps": [
-                    {
-                      "color": "green",
-                      "value": null
-                    },
-                    {
-                      "color": "orange",
-                      "value": 1
-                    }
-                  ]
-                }
-              }
-            ]
-          }
-        ]
+        "overrides": []
       },
       "gridPos": {
-        "h": 5,
-        "w": 12,
-        "x": 12,
-        "y": 11
+        "h": 4,
+        "w": 5,
+        "x": 0,
+        "y": 1
       },
-      "options": null,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": []
+        },
+        "textMode": "auto"
+      },
       "repeatDirection": "h",
       "targets": [
         {
-          "expr": "sum(1 - ise3_dataconnect_schema_column_available{instance=~\"$deployment\",view=~\"KEY_PERFORMANCE_METRICS|SYSTEM_SUMMARY\",requirement=\"required\"})",
+          "expr": "max by (instance) ((ise3_psn_load_percent{instance=~\"$deployment\",node=~\"$node\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"psn_performance\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"psn_performance\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"psn_performance\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"psn_performance\"} == 1))) == 1)))",
           "instant": true,
-          "legendFormat": "core gaps",
+          "legendFormat": "",
           "range": false,
           "refId": "A"
-        },
-        {
-          "expr": "sum(1 - ise3_dataconnect_schema_column_available{instance=~\"$deployment\",view=~\"AAA_DIAGNOSTICS_VIEW|SYSTEM_DIAGNOSTICS_VIEW\",requirement=\"required\"})",
-          "instant": true,
-          "legendFormat": "diagnostic gaps",
-          "range": false,
-          "refId": "B"
         }
       ],
-      "title": "PSN schema compatibility",
+      "title": "Busiest node load",
       "transformations": [],
       "transparent": false,
       "type": "stat"
@@ -346,11 +147,326 @@
         "type": "prometheus",
         "uid": "${prometheus}"
       },
-      "description": "Current active-session count by serving policy service node from sources that carry a PSN field.",
+      "description": "Slowest average RADIUS latency across the selected PSNs. A single slow node is that node's resources or identity-store path; all of them slow together is the identity store itself.",
+      "fieldConfig": {
+        "defaults": {
+          "noValue": "no data \u2014 stale, see Collection pipeline",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 1
+              },
+              {
+                "color": "red",
+                "value": 3
+              }
+            ]
+          },
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 5,
+        "x": 5,
+        "y": 1
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": []
+        },
+        "textMode": "auto"
+      },
+      "repeatDirection": "h",
+      "targets": [
+        {
+          "expr": "max by (instance) ((ise3_psn_average_latency_seconds{instance=~\"$deployment\",node=~\"$node\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"psn_performance\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"psn_performance\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"psn_performance\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"psn_performance\"} == 1))) == 1)))",
+          "instant": true,
+          "legendFormat": "",
+          "range": false,
+          "refId": "A"
+        }
+      ],
+      "title": "Worst node latency",
+      "transformations": [],
+      "transparent": false,
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${prometheus}"
+      },
+      "description": "Combined RADIUS request rate across the selected PSNs, as ISE itself reports it. The throughput half of the picture: read it beside load to tell a busy deployment from a struggling one.",
+      "fieldConfig": {
+        "defaults": {
+          "noValue": "no data \u2014 stale, see Collection pipeline",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": null
+              }
+            ]
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 5,
+        "x": 10,
+        "y": 1
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": []
+        },
+        "textMode": "auto"
+      },
+      "repeatDirection": "h",
+      "targets": [
+        {
+          "expr": "sum by (instance) ((ise3_psn_radius_requests_per_hour{instance=~\"$deployment\",node=~\"$node\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"psn_performance\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"psn_performance\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"psn_performance\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"psn_performance\"} == 1))) == 1)))",
+          "instant": true,
+          "legendFormat": "",
+          "range": false,
+          "refId": "A"
+        }
+      ],
+      "title": "RADIUS requests per hour",
+      "transformations": [],
+      "transparent": false,
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${prometheus}"
+      },
+      "description": "Diagnostic events ISE raised on the selected PSNs in the window. Not all are errors, but a step change is worth reading \u2014 the diagnostic work queue below names them.",
+      "fieldConfig": {
+        "defaults": {
+          "noValue": "no data \u2014 stale, see Collection pipeline",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": null
+              }
+            ]
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 3,
+        "x": 15,
+        "y": 1
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": []
+        },
+        "textMode": "auto"
+      },
+      "repeatDirection": "h",
+      "targets": [
+        {
+          "expr": "sum by (instance) ((ise3_psn_diagnostic_events_total{instance=~\"$deployment\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"psn_performance\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"psn_performance\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"psn_performance\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"psn_performance\"} == 1))) == 1)))",
+          "instant": true,
+          "legendFormat": "",
+          "range": false,
+          "refId": "A"
+        }
+      ],
+      "title": "Diagnostic events",
+      "transformations": [],
+      "transparent": false,
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${prometheus}"
+      },
+      "description": "Share of this dashboard's own datasets that both collected successfully and are inside their freshness window (active_sessions, psn_performance). Below 100% means some panel here is blank or stale, and the pipeline dashboard says which.",
+      "fieldConfig": {
+        "defaults": {
+          "links": [
+            {
+              "targetBlank": false,
+              "title": "Why \u2014 collection pipeline",
+              "url": "/d/ise3-pipeline?${__url_time_range}&${deployment:queryparam}"
+            }
+          ],
+          "max": 1,
+          "min": 0,
+          "noValue": "no data \u2014 exporter absent?",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          },
+          "unit": "percentunit"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 3,
+        "x": 18,
+        "y": 1
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": []
+        },
+        "textMode": "auto"
+      },
+      "repeatDirection": "h",
+      "targets": [
+        {
+          "expr": "avg by (instance) (((max by (instance,dataset) (ise3_dataset_up{instance=~\"$deployment\",dataset=~\"psn_performance|active_sessions\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=~\"psn_performance|active_sessions\"} == 1))) == bool 1) * ((max by (instance,dataset) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=~\"psn_performance|active_sessions\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=~\"psn_performance|active_sessions\"} == 1))) == bool 1))",
+          "instant": true,
+          "legendFormat": "",
+          "range": false,
+          "refId": "A"
+        }
+      ],
+      "title": "Data trustworthy",
+      "transformations": [],
+      "transparent": false,
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${prometheus}"
+      },
+      "description": "Time since the least recently collected of this dashboard's datasets last succeeded. Every number on this page is at least this old; a value climbing past its collection interval means ISE is answering slowly or not at all.",
+      "fieldConfig": {
+        "defaults": {
+          "links": [
+            {
+              "targetBlank": false,
+              "title": "Why \u2014 collection pipeline",
+              "url": "/d/ise3-pipeline?${__url_time_range}&${deployment:queryparam}"
+            }
+          ],
+          "noValue": "no data \u2014 exporter absent?",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 900
+              },
+              {
+                "color": "red",
+                "value": 3600
+              }
+            ]
+          },
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 3,
+        "x": 21,
+        "y": 1
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": []
+        },
+        "textMode": "auto"
+      },
+      "repeatDirection": "h",
+      "targets": [
+        {
+          "expr": "max by (instance) (time() - (max by (instance,dataset) (ise3_dataset_last_success_timestamp{instance=~\"$deployment\",dataset=~\"psn_performance|active_sessions\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=~\"psn_performance|active_sessions\"} == 1))))",
+          "instant": true,
+          "legendFormat": "",
+          "range": false,
+          "refId": "A"
+        }
+      ],
+      "title": "Collection age",
+      "transformations": [],
+      "transparent": false,
+      "type": "stat"
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 5
+      },
+      "id": 0,
+      "panels": [],
+      "title": "Throughput",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${prometheus}"
+      },
+      "description": "Live sessions each PSN is holding. Nodes that should be load-balanced equally and are not point at the network devices' RADIUS server ordering rather than at ISE.",
       "fieldConfig": {
         "defaults": {
           "custom": {
-            "fillOpacity": 0
+            "fillOpacity": 0,
+            "lineWidth": 2
           },
           "unit": "short"
         },
@@ -360,7 +476,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 16
+        "y": 6
       },
       "options": {
         "legend": {
@@ -380,7 +496,7 @@
       "repeatDirection": "h",
       "targets": [
         {
-          "expr": "(ise3_active_sessions_by_psn{instance=~\"$deployment\",psn=~\"$node\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"active_sessions\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"active_sessions\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"active_sessions\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"active_sessions\"} == 1))) == 1))",
+          "expr": "(ise3_active_sessions_by_psn{instance=~\"$deployment\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"active_sessions\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"active_sessions\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"active_sessions\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"active_sessions\"} == 1))) == 1))",
           "instant": false,
           "legendFormat": "{{psn}}",
           "range": true,
@@ -397,546 +513,77 @@
         "type": "prometheus",
         "uid": "${prometheus}"
       },
-      "description": "Change in active sessions over five minutes by PSN, highlighting abrupt load movement.",
-      "fieldConfig": {
-        "defaults": {
-          "custom": {
-            "fillOpacity": 0
-          },
-          "unit": "short"
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 12,
-        "y": 16
-      },
-      "options": {
-        "legend": {
-          "calcs": [
-            "lastNotNull",
-            "max"
-          ],
-          "displayMode": "table",
-          "placement": "bottom",
-          "showLegend": false
-        },
-        "tooltip": {
-          "mode": "single",
-          "sort": "asc"
-        }
-      },
-      "repeatDirection": "h",
-      "targets": [
-        {
-          "expr": "delta(ise3_active_sessions_by_psn{instance=~\"$deployment\",psn=~\"$node\"}[5m])",
-          "instant": false,
-          "legendFormat": "{{psn}}",
-          "range": true,
-          "refId": "A"
-        }
-      ],
-      "title": "Session delta per PSN",
-      "transformations": [],
-      "transparent": false,
-      "type": "timeseries"
-    },
-    {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${prometheus}"
-      },
-      "description": "Accounting starts, stops, and other events in the reporting window for each selected PSN.",
-      "fieldConfig": {
-        "defaults": {
-          "custom": {
-            "fillOpacity": 0
-          },
-          "unit": "short"
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 0,
-        "y": 24
-      },
-      "options": {
-        "legend": {
-          "calcs": [
-            "lastNotNull",
-            "max"
-          ],
-          "displayMode": "table",
-          "placement": "bottom",
-          "showLegend": false
-        },
-        "tooltip": {
-          "mode": "single",
-          "sort": "asc"
-        }
-      },
-      "repeatDirection": "h",
-      "targets": [
-        {
-          "expr": "(ise3_radius_accounting_events{instance=~\"$deployment\",dimension=\"psn\",value=~\"$node\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"radius_accounting\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"radius_accounting\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"radius_accounting\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"radius_accounting\"} == 1))) == 1))",
-          "instant": false,
-          "legendFormat": "{{value}} \u00b7 {{event_type}}",
-          "range": true,
-          "refId": "A"
-        }
-      ],
-      "title": "Accounting events per PSN",
-      "transformations": [],
-      "transparent": false,
-      "type": "timeseries"
-    },
-    {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${prometheus}"
-      },
-      "description": "Passed and failed authentication volume per PSN in the reporting scan window.",
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short"
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 12,
-        "y": 24
-      },
-      "options": {
-        "displayMode": "gradient",
-        "minVizHeight": 10,
-        "minVizWidth": 0,
-        "orientation": "horizontal",
-        "reduceOptions": {
-          "calcs": []
-        },
-        "showUnfilled": true,
-        "valueMode": "color"
-      },
-      "repeatDirection": "h",
-      "targets": [
-        {
-          "expr": "sort_desc(sum by (psn,status) ((ise3_radius_authentications_by_psn{instance=~\"$deployment\",psn=~\"$node\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"radius_reporting\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"radius_reporting\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"radius_reporting\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"radius_reporting\"} == 1))) == 1))))",
-          "instant": true,
-          "legendFormat": "{{psn}} \u00b7 {{status}}",
-          "range": false,
-          "refId": "A"
-        }
-      ],
-      "title": "Authentication volume by PSN",
-      "transformations": [],
-      "transparent": false,
-      "type": "bargauge"
-    },
-    {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${prometheus}"
-      },
-      "description": "Error-view volume per selected PSN in the current reporting window.",
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short"
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 0,
-        "y": 32
-      },
-      "options": {
-        "displayMode": "gradient",
-        "minVizHeight": 10,
-        "minVizWidth": 0,
-        "orientation": "horizontal",
-        "reduceOptions": {
-          "calcs": []
-        },
-        "showUnfilled": true,
-        "valueMode": "color"
-      },
-      "repeatDirection": "h",
-      "targets": [
-        {
-          "expr": "sort_desc(sum by (psn) ((ise3_radius_errors_by_psn{instance=~\"$deployment\",psn=~\"$node\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"radius_errors\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"radius_errors\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"radius_errors\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"radius_errors\"} == 1))) == 1))))",
-          "instant": true,
-          "legendFormat": "{{psn}}",
-          "range": false,
-          "refId": "A"
-        }
-      ],
-      "title": "RADIUS errors by PSN",
-      "transformations": [],
-      "transparent": false,
-      "type": "bargauge"
-    },
-    {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${prometheus}"
-      },
-      "description": "When did this PSN start failing: the same per-PSN error volume as the bar beside it, plotted over time. It separates a PSN that has always been noisy from one that broke at a specific moment.",
-      "fieldConfig": {
-        "defaults": {
-          "custom": {
-            "fillOpacity": 0
-          },
-          "unit": "short"
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 12,
-        "y": 32
-      },
-      "options": {
-        "legend": {
-          "calcs": [
-            "lastNotNull",
-            "max"
-          ],
-          "displayMode": "table",
-          "placement": "bottom",
-          "showLegend": false
-        },
-        "tooltip": {
-          "mode": "single",
-          "sort": "asc"
-        }
-      },
-      "repeatDirection": "h",
-      "targets": [
-        {
-          "expr": "sum by (psn) ((ise3_radius_errors_by_psn{instance=~\"$deployment\",psn=~\"$node\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"radius_errors\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"radius_errors\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"radius_errors\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"radius_errors\"} == 1))) == 1)))",
-          "instant": false,
-          "legendFormat": "{{psn}}",
-          "range": true,
-          "refId": "A"
-        }
-      ],
-      "title": "RADIUS errors by PSN over time",
-      "transformations": [],
-      "transparent": false,
-      "type": "timeseries"
-    },
-    {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${prometheus}"
-      },
-      "description": "ISE message-code distribution for the current error window while troubleshooting the selected PSN scope. Well-known codes are annotated with what they mean; a code this exporter cannot name is shown bare.",
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short"
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 0,
-        "y": 40
-      },
-      "options": {
-        "displayMode": "gradient",
-        "minVizHeight": 10,
-        "minVizWidth": 0,
-        "orientation": "horizontal",
-        "reduceOptions": {
-          "calcs": []
-        },
-        "showUnfilled": true,
-        "valueMode": "color"
-      },
-      "repeatDirection": "h",
-      "targets": [
-        {
-          "expr": "sort_desc(label_replace(label_replace(label_replace(label_replace(label_replace(label_replace(label_replace(label_replace(label_replace(label_replace(label_replace(label_replace(label_replace(sum by (message_code) ((ise3_radius_errors_by_message_code{instance=~\"$deployment\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"radius_errors\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"radius_errors\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"radius_errors\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"radius_errors\"} == 1))) == 1))), \"message_code\", \"12300 \u00b7 last step: proposed PEAP to the client\", \"message_code\", \"12300\"), \"message_code\", \"12321 \u00b7 PEAP handshake failed, client rejected the ISE certificate\", \"message_code\", \"12321\"), \"message_code\", \"12500 \u00b7 last step: proposed EAP-TLS to the client\", \"message_code\", \"12500\"), \"message_code\", \"12511 \u00b7 unexpected TLS alert, treated as client rejection\", \"message_code\", \"12511\"), \"message_code\", \"5400 \u00b7 authentication failed\", \"message_code\", \"5400\"), \"message_code\", \"5411 \u00b7 supplicant stopped responding to ISE\", \"message_code\", \"5411\"), \"message_code\", \"5440 \u00b7 endpoint abandoned the EAP session and started a new one\", \"message_code\", \"5440\"), \"message_code\", \"11007 \u00b7 could not locate network device or AAA client\", \"message_code\", \"11007\"), \"message_code\", \"11036 \u00b7 invalid RADIUS Message-Authenticator attribute\", \"message_code\", \"11036\"), \"message_code\", \"15039 \u00b7 rejected by the matched authorization profile\", \"message_code\", \"15039\"), \"message_code\", \"22040 \u00b7 wrong password or invalid shared secret\", \"message_code\", \"22040\"), \"message_code\", \"22056 \u00b7 subject not found in the identity store\", \"message_code\", \"22056\"), \"message_code\", \"24408 \u00b7 Active Directory authentication failed, wrong password\", \"message_code\", \"24408\"))",
-          "instant": true,
-          "legendFormat": "{{message_code}}",
-          "range": false,
-          "refId": "A"
-        }
-      ],
-      "title": "RADIUS error codes",
-      "transformations": [],
-      "transparent": false,
-      "type": "bargauge"
-    },
-    {
-      "collapsed": false,
-      "gridPos": {
-        "h": 1,
-        "w": 24,
-        "x": 0,
-        "y": 48
-      },
-      "id": 0,
-      "panels": [],
-      "title": "Throughput and latency",
-      "type": "row"
-    },
-    {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${prometheus}"
-      },
-      "description": "ISE performance-rollup request rate per selected policy service node.",
-      "fieldConfig": {
-        "defaults": {
-          "unit": "reqps"
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 0,
-        "y": 49
-      },
-      "options": {
-        "displayMode": "gradient",
-        "minVizHeight": 10,
-        "minVizWidth": 0,
-        "orientation": "horizontal",
-        "reduceOptions": {
-          "calcs": []
-        },
-        "showUnfilled": true,
-        "valueMode": "color"
-      },
-      "repeatDirection": "h",
-      "targets": [
-        {
-          "expr": "sort_desc(ise3_psn_radius_requests_per_hour{instance=~\"$deployment\",node=~\"$node\"})",
-          "instant": true,
-          "legendFormat": "{{node}}",
-          "range": false,
-          "refId": "A"
-        }
-      ],
-      "title": "RADIUS requests per hour",
-      "transformations": [],
-      "transparent": false,
-      "type": "bargauge"
-    },
-    {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${prometheus}"
-      },
-      "description": "Average request latency from ISE performance rollups for each selected node.",
-      "fieldConfig": {
-        "defaults": {
-          "unit": "s"
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 12,
-        "y": 49
-      },
-      "options": {
-        "displayMode": "gradient",
-        "minVizHeight": 10,
-        "minVizWidth": 0,
-        "orientation": "horizontal",
-        "reduceOptions": {
-          "calcs": []
-        },
-        "showUnfilled": true,
-        "valueMode": "color"
-      },
-      "repeatDirection": "h",
-      "targets": [
-        {
-          "expr": "sort_desc(ise3_psn_average_latency_seconds{instance=~\"$deployment\",node=~\"$node\"})",
-          "instant": true,
-          "legendFormat": "{{node}}",
-          "range": false,
-          "refId": "A"
-        }
-      ],
-      "title": "Average RADIUS latency",
-      "transformations": [],
-      "transparent": false,
-      "type": "bargauge"
-    },
-    {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${prometheus}"
-      },
-      "description": "Average TPS reported by ISE for each selected policy service node.",
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short"
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 0,
-        "y": 57
-      },
-      "options": {
-        "displayMode": "gradient",
-        "minVizHeight": 10,
-        "minVizWidth": 0,
-        "orientation": "horizontal",
-        "reduceOptions": {
-          "calcs": []
-        },
-        "showUnfilled": true,
-        "valueMode": "color"
-      },
-      "repeatDirection": "h",
-      "targets": [
-        {
-          "expr": "sort_desc(ise3_psn_average_tps{instance=~\"$deployment\",node=~\"$node\"})",
-          "instant": true,
-          "legendFormat": "{{node}}",
-          "range": false,
-          "refId": "A"
-        }
-      ],
-      "title": "Average transactions per second",
-      "transformations": [],
-      "transparent": false,
-      "type": "bargauge"
-    },
-    {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${prometheus}"
-      },
-      "description": "Authentication-side latency beside usable-sample coverage, which catches missing latency fields.",
-      "fieldConfig": {
-        "defaults": {
-          "unit": "s"
-        },
-        "overrides": [
-          {
-            "matcher": {
-              "id": "byFrameRefID",
-              "options": "B"
-            },
-            "properties": [
-              {
-                "id": "unit",
-                "value": "percentunit"
-              },
-              {
-                "id": "thresholds",
-                "value": {
-                  "mode": "absolute",
-                  "steps": [
-                    {
-                      "color": "red",
-                      "value": null
-                    },
-                    {
-                      "color": "orange",
-                      "value": 0.8
-                    },
-                    {
-                      "color": "green",
-                      "value": 0.95
-                    }
-                  ]
-                }
-              },
-              {
-                "id": "min",
-                "value": 0
-              },
-              {
-                "id": "max",
-                "value": 1
-              }
-            ]
-          }
-        ]
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 12,
-        "y": 57
-      },
-      "options": {
-        "displayMode": "gradient",
-        "minVizHeight": 10,
-        "minVizWidth": 0,
-        "orientation": "horizontal",
-        "reduceOptions": {
-          "calcs": []
-        },
-        "showUnfilled": true,
-        "valueMode": "color"
-      },
-      "repeatDirection": "h",
-      "targets": [
-        {
-          "expr": "ise3_radius_authentication_latency_seconds{instance=~\"$deployment\",psn=~\"$node\"}",
-          "instant": true,
-          "legendFormat": "{{psn}} latency",
-          "range": false,
-          "refId": "A"
-        },
-        {
-          "expr": "ise3_radius_authentication_latency_coverage{instance=~\"$deployment\",psn=~\"$node\"}",
-          "instant": true,
-          "legendFormat": "{{psn}} coverage",
-          "range": false,
-          "refId": "B"
-        }
-      ],
-      "title": "Trusted authentication latency",
-      "transformations": [],
-      "transparent": false,
-      "type": "bargauge"
-    },
-    {
-      "collapsed": false,
-      "gridPos": {
-        "h": 1,
-        "w": 24,
-        "x": 0,
-        "y": 65
-      },
-      "id": 0,
-      "panels": [],
-      "title": "Node resources and reporting",
-      "type": "row"
-    },
-    {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${prometheus}"
-      },
-      "description": "Average load reported by ISE for each selected node over the dashboard time range.",
+      "description": "Per-node request rate over time. Compare the shape against active sessions: rate rising while sessions stay flat is re-authentication churn, not growth.",
       "fieldConfig": {
         "defaults": {
           "custom": {
             "fillOpacity": 0,
+            "lineWidth": 2
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 6
+      },
+      "options": {
+        "legend": {
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": false
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "asc"
+        }
+      },
+      "repeatDirection": "h",
+      "targets": [
+        {
+          "expr": "(ise3_psn_radius_requests_per_hour{instance=~\"$deployment\",node=~\"$node\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"psn_performance\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"psn_performance\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"psn_performance\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"psn_performance\"} == 1))) == 1))",
+          "instant": false,
+          "legendFormat": "{{node}}",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "title": "RADIUS requests per hour by PSN",
+      "transformations": [],
+      "transparent": false,
+      "type": "timeseries"
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 14
+      },
+      "id": 0,
+      "panels": [],
+      "title": "Utilisation and saturation",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${prometheus}"
+      },
+      "description": "Per-node CPU as ISE reports it, with the amber and red thresholds drawn. Sustained time above 80% is the point at which authentication latency starts to move.",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "fillOpacity": 0,
+            "lineWidth": 2,
             "thresholdsStyle": {
               "mode": "dashed"
             }
@@ -966,9 +613,9 @@
       },
       "gridPos": {
         "h": 8,
-        "w": 12,
+        "w": 8,
         "x": 0,
-        "y": 66
+        "y": 15
       },
       "options": {
         "legend": {
@@ -988,80 +635,7 @@
       "repeatDirection": "h",
       "targets": [
         {
-          "expr": "ise3_psn_load_percent{instance=~\"$deployment\",node=~\"$node\"}",
-          "instant": false,
-          "legendFormat": "{{node}}",
-          "range": true,
-          "refId": "A"
-        }
-      ],
-      "title": "Node load",
-      "transformations": [],
-      "transparent": false,
-      "type": "timeseries"
-    },
-    {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${prometheus}"
-      },
-      "description": "CPU utilisation reported by ISE for each selected deployment node.",
-      "fieldConfig": {
-        "defaults": {
-          "custom": {
-            "fillOpacity": 0,
-            "thresholdsStyle": {
-              "mode": "dashed"
-            }
-          },
-          "max": 100,
-          "min": 0,
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              },
-              {
-                "color": "orange",
-                "value": 80
-              },
-              {
-                "color": "red",
-                "value": 90
-              }
-            ]
-          },
-          "unit": "percent"
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 12,
-        "y": 66
-      },
-      "options": {
-        "legend": {
-          "calcs": [
-            "lastNotNull",
-            "max"
-          ],
-          "displayMode": "table",
-          "placement": "bottom",
-          "showLegend": false
-        },
-        "tooltip": {
-          "mode": "single",
-          "sort": "asc"
-        }
-      },
-      "repeatDirection": "h",
-      "targets": [
-        {
-          "expr": "ise3_node_cpu_utilization_percent{instance=~\"$deployment\",node=~\"$node\"}",
+          "expr": "(ise3_node_cpu_utilization_percent{instance=~\"$deployment\",node=~\"$node\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"psn_performance\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"psn_performance\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"psn_performance\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"psn_performance\"} == 1))) == 1))",
           "instant": false,
           "legendFormat": "{{node}}",
           "range": true,
@@ -1078,11 +652,12 @@
         "type": "prometheus",
         "uid": "${prometheus}"
       },
-      "description": "Memory utilisation reported by ISE for each selected deployment node.",
+      "description": "Per-node memory as ISE reports it. A node climbing steadily without a matching rise in sessions is usually a leak or a log-processing backlog rather than load.",
       "fieldConfig": {
         "defaults": {
           "custom": {
             "fillOpacity": 0,
+            "lineWidth": 2,
             "thresholdsStyle": {
               "mode": "dashed"
             }
@@ -1112,9 +687,9 @@
       },
       "gridPos": {
         "h": 8,
-        "w": 12,
-        "x": 0,
-        "y": 74
+        "w": 8,
+        "x": 8,
+        "y": 15
       },
       "options": {
         "legend": {
@@ -1134,7 +709,7 @@
       "repeatDirection": "h",
       "targets": [
         {
-          "expr": "ise3_node_memory_utilization_percent{instance=~\"$deployment\",node=~\"$node\"}",
+          "expr": "(ise3_node_memory_utilization_percent{instance=~\"$deployment\",node=~\"$node\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"psn_performance\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"psn_performance\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"psn_performance\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"psn_performance\"} == 1))) == 1))",
           "instant": false,
           "legendFormat": "{{node}}",
           "range": true,
@@ -1151,9 +726,16 @@
         "type": "prometheus",
         "uid": "${prometheus}"
       },
-      "description": "Filesystem utilisation by node and mount point, sorted to surface the highest value first.",
+      "description": "The fullest filesystem on each node. ISE degrades badly when a node runs out of disk \u2014 logging stops first, then services \u2014 so this is a saturation signal worth watching ahead of CPU.",
       "fieldConfig": {
         "defaults": {
+          "custom": {
+            "fillOpacity": 0,
+            "lineWidth": 2,
+            "thresholdsStyle": {
+              "mode": "dashed"
+            }
+          },
           "max": 100,
           "min": 0,
           "thresholds": {
@@ -1179,56 +761,9 @@
       },
       "gridPos": {
         "h": 8,
-        "w": 12,
-        "x": 12,
-        "y": 74
-      },
-      "options": {
-        "displayMode": "gradient",
-        "minVizHeight": 10,
-        "minVizWidth": 0,
-        "orientation": "horizontal",
-        "reduceOptions": {
-          "calcs": []
-        },
-        "showUnfilled": true,
-        "valueMode": "color"
-      },
-      "repeatDirection": "h",
-      "targets": [
-        {
-          "expr": "sort_desc(ise3_node_disk_utilization_percent{instance=~\"$deployment\",node=~\"$node\"})",
-          "instant": true,
-          "legendFormat": "{{node}} \u00b7 {{filesystem}}",
-          "range": false,
-          "refId": "A"
-        }
-      ],
-      "title": "Highest disk utilisation",
-      "transformations": [],
-      "transparent": false,
-      "type": "bargauge"
-    },
-    {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${prometheus}"
-      },
-      "description": "MnT log volume beside noise and suppression rates for each selected node.",
-      "fieldConfig": {
-        "defaults": {
-          "custom": {
-            "fillOpacity": 0
-          },
-          "unit": "short"
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 0,
-        "y": 82
+        "w": 8,
+        "x": 16,
+        "y": 15
       },
       "options": {
         "legend": {
@@ -1248,28 +783,14 @@
       "repeatDirection": "h",
       "targets": [
         {
-          "expr": "ise3_psn_mnt_logs_per_hour{instance=~\"$deployment\",node=~\"$node\"}",
+          "expr": "max by (instance,node) ((ise3_node_disk_utilization_percent{instance=~\"$deployment\",node=~\"$node\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"psn_performance\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"psn_performance\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"psn_performance\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"psn_performance\"} == 1))) == 1)))",
           "instant": false,
-          "legendFormat": "{{node}} logs",
+          "legendFormat": "{{node}}",
           "range": true,
           "refId": "A"
-        },
-        {
-          "expr": "ise3_psn_noise_per_hour{instance=~\"$deployment\",node=~\"$node\"}",
-          "instant": false,
-          "legendFormat": "{{node}} noise",
-          "range": true,
-          "refId": "B"
-        },
-        {
-          "expr": "ise3_psn_suppression_per_hour{instance=~\"$deployment\",node=~\"$node\"}",
-          "instant": false,
-          "legendFormat": "{{node}} suppression",
-          "range": true,
-          "refId": "C"
         }
       ],
-      "title": "Reporting logs, noise, and suppression",
+      "title": "Disk utilisation, worst filesystem per node",
       "transformations": [],
       "transparent": false,
       "type": "timeseries"
@@ -1279,117 +800,130 @@
         "type": "prometheus",
         "uid": "${prometheus}"
       },
-      "description": "Current deployment state, roles, and services for the selected policy service nodes.",
+      "description": "Per-node average RADIUS transaction time. This is the number users experience; the thresholds mark where they notice and where supplicants start retrying.",
       "fieldConfig": {
-        "defaults": {},
+        "defaults": {
+          "custom": {
+            "fillOpacity": 0,
+            "lineWidth": 2,
+            "thresholdsStyle": {
+              "mode": "dashed"
+            }
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 1
+              },
+              {
+                "color": "red",
+                "value": 3
+              }
+            ]
+          },
+          "unit": "s"
+        },
         "overrides": []
       },
       "gridPos": {
         "h": 8,
         "w": 12,
-        "x": 12,
-        "y": 82
+        "x": 0,
+        "y": 23
       },
-      "options": null,
+      "options": {
+        "legend": {
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": false
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "asc"
+        }
+      },
       "repeatDirection": "h",
       "targets": [
         {
-          "expr": "ise3_deployment_node_state{instance=~\"$deployment\",node=~\"$node\",state=~\".*\"} == 1",
-          "format": "table",
-          "instant": true,
-          "legendFormat": "{{node}} \u00b7 {{roles}} \u00b7 {{state}}",
-          "range": false,
+          "expr": "(ise3_psn_average_latency_seconds{instance=~\"$deployment\",node=~\"$node\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"psn_performance\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"psn_performance\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"psn_performance\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"psn_performance\"} == 1))) == 1))",
+          "instant": false,
+          "legendFormat": "{{node}}",
+          "range": true,
           "refId": "A"
         }
       ],
-      "title": "PSN node state",
-      "transformations": [
-        {
-          "id": "filterFieldsByName",
-          "options": {
-            "exclude": {
-              "names": [
-                "Time",
-                "__name__",
-                "job",
-                "Value"
-              ]
-            }
-          }
-        }
-      ],
+      "title": "Average RADIUS latency by PSN",
+      "transformations": [],
       "transparent": false,
-      "type": "table"
+      "type": "timeseries"
     },
     {
       "datasource": {
         "type": "prometheus",
         "uid": "${prometheus}"
       },
-      "description": "Newest-row age and recent-row presence for reporting views that drive PSN troubleshooting.",
+      "description": "Errors attributed to each node over the window. Read against the CPU and latency panels above: errors that follow saturation are a capacity problem, errors without it are a configuration or certificate problem.",
       "fieldConfig": {
-        "defaults": {},
+        "defaults": {
+          "custom": {
+            "fillOpacity": 0,
+            "lineWidth": 2
+          },
+          "unit": "short"
+        },
         "overrides": [
           {
             "matcher": {
-              "id": "byName",
-              "options": "recent"
+              "id": "byRegexp",
+              "options": ".*(passed|Passed|compliant|Compliant|success).*"
             },
             "properties": [
               {
-                "id": "thresholds",
+                "id": "color",
                 "value": {
-                  "mode": "absolute",
-                  "steps": [
-                    {
-                      "color": "red",
-                      "value": null
-                    },
-                    {
-                      "color": "green",
-                      "value": 1
-                    }
-                  ]
-                }
-              },
-              {
-                "id": "mappings",
-                "value": [
-                  {
-                    "options": {
-                      "0": {
-                        "color": "red",
-                        "index": 1,
-                        "text": "No"
-                      },
-                      "1": {
-                        "color": "green",
-                        "index": 0,
-                        "text": "Yes"
-                      }
-                    },
-                    "type": "value"
-                  }
-                ]
-              },
-              {
-                "id": "custom.cellOptions",
-                "value": {
-                  "mode": "basic",
-                  "type": "color-background"
+                  "fixedColor": "green",
+                  "mode": "fixed"
                 }
               }
             ]
           },
           {
             "matcher": {
-              "id": "byName",
-              "options": "age s"
+              "id": "byRegexp",
+              "options": ".*(failed|Failed|non-compliant|NonCompliant|error).*"
             },
             "properties": [
               {
-                "id": "unit",
-                "value": "s"
+                "id": "color",
+                "value": {
+                  "fixedColor": "red",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": ".*(unknown|Unknown|pending|Pending).*"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "text",
+                  "mode": "fixed"
+                }
               }
             ]
           }
@@ -1398,165 +932,489 @@
       "gridPos": {
         "h": 8,
         "w": 12,
-        "x": 0,
-        "y": 90
-      },
-      "options": null,
-      "repeatDirection": "h",
-      "targets": [
-        {
-          "expr": "ise3_source_has_recent_rows{instance=~\"$deployment\",view=~\"radius_.*|key_performance_metrics|system_summary\"}",
-          "format": "table",
-          "instant": true,
-          "legendFormat": "{{view}} recent",
-          "range": false,
-          "refId": "A"
-        },
-        {
-          "expr": "ise3_source_latest_row_age_seconds{instance=~\"$deployment\",view=~\"radius_.*|key_performance_metrics|system_summary\"}",
-          "format": "table",
-          "instant": true,
-          "legendFormat": "{{view}} age",
-          "range": false,
-          "refId": "B"
-        }
-      ],
-      "title": "Reporting source freshness",
-      "transformations": [
-        {
-          "id": "filterFieldsByName",
-          "options": {
-            "exclude": {
-              "names": [
-                "Time",
-                "__name__",
-                "job"
-              ]
-            }
-          }
-        },
-        {
-          "id": "merge",
-          "options": {}
-        },
-        {
-          "id": "organize",
-          "options": {
-            "renameByName": {
-              "Value #A": "recent",
-              "Value #B": "age s"
-            }
-          }
-        },
-        {
-          "id": "sortBy",
-          "options": {
-            "sort": [
-              {
-                "desc": true,
-                "field": "age s"
-              }
-            ]
-          }
-        }
-      ],
-      "transparent": false,
-      "type": "table"
-    },
-    {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${prometheus}"
-      },
-      "description": "Worst-first bounded AAA and system diagnostic evidence by PSN, severity, category, and message code.",
-      "fieldConfig": {
-        "defaults": {},
-        "overrides": []
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 12,
         "x": 12,
-        "y": 90
+        "y": 23
       },
-      "options": null,
+      "options": {
+        "legend": {
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": false
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "asc"
+        }
+      },
       "repeatDirection": "h",
       "targets": [
         {
-          "expr": "sort_desc(ise3_psn_diagnostic_events{instance=~\"$deployment\",node=~\"$node\"})",
-          "format": "table",
-          "instant": true,
-          "legendFormat": "{{node}} \u00b7 {{source}} \u00b7 {{severity}} \u00b7 {{category}} \u00b7 {{message_code}}",
-          "range": false,
+          "expr": "(ise3_radius_errors_by_psn{instance=~\"$deployment\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"radius_errors\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"radius_errors\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"radius_errors\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"radius_errors\"} == 1))) == 1))",
+          "instant": false,
+          "legendFormat": "{{psn}}",
+          "range": true,
           "refId": "A"
         }
       ],
-      "title": "Diagnostic work queue",
-      "transformations": [
-        {
-          "id": "filterFieldsByName",
-          "options": {
-            "exclude": {
-              "names": [
-                "Time",
-                "__name__",
-                "job"
-              ]
-            }
-          }
-        },
-        {
-          "id": "organize",
-          "options": {
-            "renameByName": {
-              "Value": "events"
-            }
-          }
-        }
-      ],
-      "transparent": false,
-      "type": "table"
-    },
-    {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${prometheus}"
-      },
-      "description": "Published versus existing diagnostic groups for each optional reporting view.",
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short"
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "h": 5,
-        "w": 24,
-        "x": 0,
-        "y": 98
-      },
-      "options": null,
-      "repeatDirection": "h",
-      "targets": [
-        {
-          "expr": "ise3_topk_groups_returned{instance=~\"$deployment\",dataset=\"psn_performance\",breakdown=~\".*_diagnostics\"}",
-          "instant": true,
-          "legendFormat": "{{breakdown}} published",
-          "range": false,
-          "refId": "A"
-        },
-        {
-          "expr": "ise3_topk_groups_total{instance=~\"$deployment\",dataset=\"psn_performance\",breakdown=~\".*_diagnostics\"}",
-          "instant": true,
-          "legendFormat": "{{breakdown}} total",
-          "range": false,
-          "refId": "B"
-        }
-      ],
-      "title": "Diagnostic coverage",
+      "title": "RADIUS errors by PSN",
       "transformations": [],
       "transparent": false,
-      "type": "stat"
+      "type": "timeseries"
+    },
+    {
+      "collapsed": true,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 31
+      },
+      "id": 0,
+      "panels": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${prometheus}"
+          },
+          "description": "One lane per node, green while ISE reported it Connected. A node dropping out here explains a simultaneous drop in its sessions and request rate without any of it being a RADIUS problem.",
+          "fieldConfig": {
+            "defaults": {
+              "custom": {
+                "fillOpacity": 80,
+                "lineWidth": 0
+              },
+              "mappings": [
+                {
+                  "options": {
+                    "0": {
+                      "color": "red",
+                      "index": 1,
+                      "text": "Not connected"
+                    },
+                    "1": {
+                      "color": "green",
+                      "index": 0,
+                      "text": "Connected"
+                    }
+                  },
+                  "type": "value"
+                }
+              ],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "red",
+                    "value": null
+                  },
+                  {
+                    "color": "green",
+                    "value": 1
+                  }
+                ]
+              }
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 6,
+            "w": 12,
+            "x": 0,
+            "y": 32
+          },
+          "options": {
+            "alignValue": "left",
+            "legend": {
+              "calcs": [],
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": false
+            },
+            "mergeValues": true,
+            "rowHeight": 0.85,
+            "showValue": "never",
+            "tooltip": {
+              "mode": "single",
+              "sort": "asc"
+            }
+          },
+          "repeatDirection": "h",
+          "targets": [
+            {
+              "expr": "sum by (instance,node) ((ise3_deployment_node_state{instance=~\"$deployment\",state=\"Connected\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"deployment\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"deployment\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"deployment\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"deployment\"} == 1))) == 1)))",
+              "instant": false,
+              "legendFormat": "{{node}}",
+              "range": true,
+              "refId": "A"
+            }
+          ],
+          "title": "PSN connection state",
+          "transformations": [],
+          "transparent": false,
+          "type": "state-timeline"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${prometheus}"
+          },
+          "description": "MnT log volume each node is generating, with the share ISE classified as noise and the share it suppressed. Suppression climbing is ISE protecting itself, and it makes the reporting views this exporter reads less complete.",
+          "fieldConfig": {
+            "defaults": {
+              "custom": {
+                "fillOpacity": 0,
+                "lineWidth": 2
+              },
+              "unit": "short"
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 12,
+            "y": 32
+          },
+          "options": {
+            "legend": {
+              "calcs": [
+                "lastNotNull",
+                "max"
+              ],
+              "displayMode": "table",
+              "placement": "bottom",
+              "showLegend": false
+            },
+            "tooltip": {
+              "mode": "single",
+              "sort": "asc"
+            }
+          },
+          "repeatDirection": "h",
+          "targets": [
+            {
+              "expr": "(ise3_psn_mnt_logs_per_hour{instance=~\"$deployment\",node=~\"$node\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"psn_performance\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"psn_performance\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"psn_performance\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"psn_performance\"} == 1))) == 1))",
+              "instant": false,
+              "legendFormat": "{{node}} logs",
+              "range": true,
+              "refId": "A"
+            },
+            {
+              "expr": "(ise3_psn_noise_per_hour{instance=~\"$deployment\",node=~\"$node\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"psn_performance\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"psn_performance\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"psn_performance\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"psn_performance\"} == 1))) == 1))",
+              "instant": false,
+              "legendFormat": "{{node}} noise",
+              "range": true,
+              "refId": "B"
+            },
+            {
+              "expr": "(ise3_psn_suppression_per_hour{instance=~\"$deployment\",node=~\"$node\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"psn_performance\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"psn_performance\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"psn_performance\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"psn_performance\"} == 1))) == 1))",
+              "instant": false,
+              "legendFormat": "{{node}} suppressed",
+              "range": true,
+              "refId": "C"
+            }
+          ],
+          "title": "Logging, noise, and suppression per hour",
+          "transformations": [],
+          "transparent": false,
+          "type": "timeseries"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${prometheus}"
+          },
+          "description": "Diagnostic events ISE raised, by node, severity, and message code, worst first. Each row is a concrete thing ISE is complaining about on a named node \u2014 the closest thing this exporter has to reading the appliance's own alarm list.",
+          "fieldConfig": {
+            "defaults": {},
+            "overrides": [
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "Events"
+                },
+                "properties": [
+                  {
+                    "id": "thresholds",
+                    "value": {
+                      "mode": "absolute",
+                      "steps": [
+                        {
+                          "color": "green",
+                          "value": null
+                        },
+                        {
+                          "color": "orange",
+                          "value": 1
+                        }
+                      ]
+                    }
+                  },
+                  {
+                    "id": "custom.cellOptions",
+                    "value": {
+                      "mode": "basic",
+                      "type": "color-background"
+                    }
+                  },
+                  {
+                    "id": "custom.width",
+                    "value": 100
+                  }
+                ]
+              }
+            ]
+          },
+          "gridPos": {
+            "h": 10,
+            "w": 12,
+            "x": 0,
+            "y": 40
+          },
+          "options": null,
+          "repeatDirection": "h",
+          "targets": [
+            {
+              "expr": "(ise3_psn_diagnostic_events{instance=~\"$deployment\",node=~\"$node\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"psn_performance\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"psn_performance\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"psn_performance\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"psn_performance\"} == 1))) == 1))",
+              "format": "table",
+              "instant": true,
+              "legendFormat": "",
+              "range": false,
+              "refId": "A"
+            }
+          ],
+          "title": "Diagnostic work queue",
+          "transformations": [
+            {
+              "id": "filterFieldsByName",
+              "options": {
+                "exclude": {
+                  "names": [
+                    "Time",
+                    "__name__",
+                    "job"
+                  ]
+                }
+              }
+            },
+            {
+              "id": "organize",
+              "options": {
+                "renameByName": {
+                  "Value": "Events",
+                  "category": "Category",
+                  "message_code": "Code",
+                  "node": "Node",
+                  "severity": "Severity",
+                  "source": "Source"
+                }
+              }
+            },
+            {
+              "id": "sortBy",
+              "options": {
+                "sort": [
+                  {
+                    "desc": true,
+                    "field": "Events"
+                  }
+                ]
+              }
+            }
+          ],
+          "transparent": false,
+          "type": "table"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${prometheus}"
+          },
+          "description": "Age of the newest row in each Data Connect view this exporter reads from MnT. A view that stops advancing means ISE stopped writing to it, which makes every panel fed from it quietly stale rather than obviously broken.",
+          "fieldConfig": {
+            "defaults": {},
+            "overrides": [
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "Newest row age"
+                },
+                "properties": [
+                  {
+                    "id": "unit",
+                    "value": "s"
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "Recent rows"
+                },
+                "properties": [
+                  {
+                    "id": "thresholds",
+                    "value": {
+                      "mode": "absolute",
+                      "steps": [
+                        {
+                          "color": "red",
+                          "value": null
+                        },
+                        {
+                          "color": "green",
+                          "value": 1
+                        }
+                      ]
+                    }
+                  },
+                  {
+                    "id": "mappings",
+                    "value": [
+                      {
+                        "options": {
+                          "0": {
+                            "color": "red",
+                            "index": 1,
+                            "text": "No"
+                          },
+                          "1": {
+                            "color": "green",
+                            "index": 0,
+                            "text": "Yes"
+                          }
+                        },
+                        "type": "value"
+                      }
+                    ]
+                  },
+                  {
+                    "id": "custom.cellOptions",
+                    "value": {
+                      "mode": "basic",
+                      "type": "color-background"
+                    }
+                  }
+                ]
+              }
+            ]
+          },
+          "gridPos": {
+            "h": 10,
+            "w": 12,
+            "x": 12,
+            "y": 40
+          },
+          "options": null,
+          "repeatDirection": "h",
+          "targets": [
+            {
+              "expr": "ise3_source_latest_row_age_seconds{instance=~\"$deployment\"}",
+              "format": "table",
+              "instant": true,
+              "legendFormat": "",
+              "range": false,
+              "refId": "A"
+            },
+            {
+              "expr": "ise3_source_has_recent_rows{instance=~\"$deployment\"}",
+              "format": "table",
+              "instant": true,
+              "legendFormat": "",
+              "range": false,
+              "refId": "B"
+            }
+          ],
+          "title": "Reporting source freshness",
+          "transformations": [
+            {
+              "id": "filterFieldsByName",
+              "options": {
+                "exclude": {
+                  "names": [
+                    "Time",
+                    "__name__",
+                    "job"
+                  ]
+                }
+              }
+            },
+            {
+              "id": "merge",
+              "options": {}
+            },
+            {
+              "id": "organize",
+              "options": {
+                "renameByName": {
+                  "Value #A": "Newest row age",
+                  "Value #B": "Recent rows",
+                  "view": "View"
+                }
+              }
+            },
+            {
+              "id": "sortBy",
+              "options": {
+                "sort": [
+                  {
+                    "desc": true,
+                    "field": "Newest row age"
+                  }
+                ]
+              }
+            }
+          ],
+          "transparent": false,
+          "type": "table"
+        }
+      ],
+      "title": "Node reporting",
+      "type": "row"
+    },
+    {
+      "collapsed": true,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 50
+      },
+      "id": 0,
+      "panels": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${prometheus}"
+          },
+          "description": "Purpose, reading order, and where to go next. Kept with the dashboard so the meaning cannot drift away from the panels.",
+          "fieldConfig": {
+            "defaults": {},
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 6,
+            "w": 24,
+            "x": 0,
+            "y": 51
+          },
+          "options": {
+            "content": "**Purpose** \u2014 decide whether the policy service nodes are coping, and which one is not.\n\n**Read it in this order**\n\n1. Read busiest load and worst latency. Both green means the PSNs are not the problem \u2014 go back to RADIUS access.\n2. Find the outlier node in the utilisation panels.\n3. Confirm it in the diagnostic work queue and the connection-state timeline.\n\n**When something is red**\n\n- Saturation with errors: a capacity problem \u2014 rebalance or add a node.\n- Errors without saturation: certificates, the identity store, or policy \u2014 continue on RADIUS access.\n- Suppression climbing: ISE is dropping logs, so treat the reporting panels on every dashboard as incomplete until it recovers.\n\n**Related dashboards** \u2014 Triage, RADIUS access, Control plane, Collection pipeline\n\n*Owner: set this to the team that answers the page. Runbook: link it here \u2014 a red panel with no runbook is a puzzle, not an alert.*",
+            "mode": "markdown"
+          },
+          "repeatDirection": "h",
+          "title": "About this dashboard",
+          "transformations": [],
+          "transparent": false,
+          "type": "text"
+        }
+      ],
+      "title": "Reference",
+      "type": "row"
     }
   ],
   "refresh": "5m",
@@ -1627,6 +1485,6 @@
     "to": "now"
   },
   "timezone": "browser",
-  "title": "ISE 3 \u2014 PSN Troubleshooting",
+  "title": "ISE \u00b7 PSN service",
   "uid": "ise3-psn"
 }

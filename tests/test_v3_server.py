@@ -1,5 +1,6 @@
 """End to end: a real listener, a real scrape, real dataset series."""
 import gzip
+import struct
 import urllib.error
 import urllib.request
 
@@ -8,7 +9,9 @@ import pytest
 from ise_exporter3.config import Config
 from ise_exporter3.plan import build_plan
 from ise_exporter3.scheduler import Scheduler
-from ise_exporter3.server import HttpServer, accepts_gzip
+from http.server import ThreadingHTTPServer
+
+from ise_exporter3.server import HttpServer, accepts_gzip, make_handler
 from ise_exporter3.snapshots import LockedCollectorRegistry
 from tests.test_v3_scheduler import ScriptedTransport
 
@@ -232,3 +235,62 @@ def test_compression_happens_outside_the_snapshot_lock(served):
     # And the compression itself is in _respond, not beside generate_latest.
     assert "gzip.compress" not in source[generate_at:respond_at]
     assert "gzip.compress" in source
+
+
+def test_a_scraper_that_hangs_up_is_not_reported_as_an_exporter_error(caplog):
+    """EPIPE from the reader is noise about the reader, not a failure here.
+
+    At the declared scale a scrape is seconds of work, so any client whose
+    timeout is shorter closes while this thread is still writing. Left to the
+    base class that surfaces as a bare stderr traceback carrying the same
+    "[Errno 32] Broken pipe" text the Data Connect transport reports for a
+    genuinely expired Oracle session -- and an operator hunting a failed
+    collection must not have to check a peer address to tell them apart.
+    """
+    import logging
+
+    handler_class = make_handler(LockedCollectorRegistry())
+
+    class HungUp:
+        def readline(self, *_args):
+            raise BrokenPipeError(32, "Broken pipe")
+
+    stub = handler_class.__new__(handler_class)
+    stub.rfile = HungUp()
+    stub.client_address = ("172.16.4.9", 51234)
+    stub.close_connection = False
+
+    with caplog.at_level(logging.DEBUG, logger="ise_exporter3.server"):
+        stub.handle_one_request()
+
+    # Swallowed, the connection retired, and reported below the operator's
+    # normal level rather than as an error.
+    assert stub.close_connection is True
+    assert any(record.levelno == logging.DEBUG
+               and "closed the connection" in record.getMessage()
+               for record in caplog.records)
+    assert not [record for record in caplog.records
+                if record.levelno >= logging.WARNING]
+
+
+def test_the_listener_routes_a_request_failure_through_the_logger():
+    """Anything that is not a hang-up still must not reach stderr raw."""
+    from ise_exporter3.server import LoggingHTTPServer
+
+    assert LoggingHTTPServer.handle_error is not ThreadingHTTPServer.handle_error
+
+
+def test_the_listener_survives_a_client_that_disconnects_early(served):
+    """And the end-to-end shape: an aborted scrape does not stop the next one."""
+    import socket
+
+    server, base = served
+    raw = socket.create_connection(("127.0.0.1", server.address[1]), timeout=5)
+    raw.sendall(b"GET /metrics HTTP/1.1\r\nHost: localhost\r\n\r\n")
+    raw.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER,
+                   struct.pack("ii", 1, 0))     # RST rather than a clean FIN
+    raw.close()
+
+    status, body = _get(f"{base}/metrics")
+    assert status == 200
+    assert "ise3_" in body

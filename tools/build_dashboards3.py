@@ -1,8 +1,34 @@
-"""Generate the complete ise-exporter3 Grafana dashboard set.
+"""Generate the ise-exporter3 Grafana dashboard set.
 
-The eight operator workflows from ise-exporter v2 are preserved here, translated
-onto v3's metric contract, and joined by the two v3-specific dashboards for
-provider selection and declared-versus-measured load.
+The set is organised by *audience and time horizon*, not by data source, which
+is the first principle in DASHBOARD_DESIGN_PRINCIPLES.md:
+
+  Tier 1  triage      ise3-triage      is ISE serving authentications, now?
+  Tier 2  diagnostic  ise3-access      why are RADIUS authentications failing?
+                      ise3-psn         are the policy service nodes coping?
+                      ise3-control     is the PAN/MnT control plane healthy?
+                      ise3-endpoints   what is on the network, and what is not?
+                      ise3-posture     is the fleet compliant?
+                      ise3-tacacs      who is administering the devices?
+  Tier 3  exporter    ise3-pipeline    is the exporter's view of ISE current?
+                      ise3-load        what is the exporter costing ISE?
+  Tier 4  capacity    ise3-capacity    where does this run out?
+
+Tier 1 is the only dashboard that should ever be opened first. Every panel on
+it links down into the tier that explains it, and every tier-2 dashboard links
+back up. Tier 3 is about the *exporter*, not about ISE: an operator reading it
+is asking whether to believe the other nine.
+
+Two design rules are enforced by construction rather than by review:
+
+  * A breakdown is a table, not a bar gauge. A bar gauge cannot scroll, so the
+    old set capped every breakdown to its top 25 bars and told the operator so
+    in the description. A table shows all of it, sorts worst-first, and needs
+    no cap. Bar gauges survive only for bounded, low-cardinality comparisons
+    where the bar length is the point.
+  * Nothing renders ISE data without saying whether that data is current.
+    gate() drops stale series, and every ISE dashboard carries a two-panel
+    trust pair in its first row.
 
 Run:  python tools/build_dashboards3.py --out dashboards3
 Needs the SDK:  pip install 'grafana-foundation-sdk'
@@ -19,13 +45,19 @@ from grafana_foundation_sdk.builders import (
     dashboard as db,
     prometheus,
     stat,
+    statetimeline,
     table,
+    text,
     timeseries,
 )
 from grafana_foundation_sdk.cog.encoder import JSONEncoder
 from grafana_foundation_sdk.models.common import (
     BarGaugeDisplayMode,
+    BigValueColorMode,
+    BigValueGraphMode,
+    BigValueTextMode,
     GraphTresholdsStyleMode,
+    StackingMode,
     TableCellBackgroundDisplayMode,
     TableColoredBackgroundCellOptions,
     VizOrientation,
@@ -37,30 +69,46 @@ from grafana_foundation_sdk.models.dashboard import (
     DataSourceRef,
     DataTransformerConfig,
     DynamicConfigValue,
+    FieldColor,
+    FieldColorModeId,
     Threshold,
     ThresholdsMode,
     ValueMap,
     ValueMappingResult,
 )
 from grafana_foundation_sdk.models.prometheus import PromQueryFormat
+from grafana_foundation_sdk.models.text import TextMode
 
 
 DATASOURCE = DataSourceRef(type_val="prometheus", uid="${prometheus}")
 TAGS = ["ise", "ise-exporter3"]
 
-# The authoritative workflow mapping used by the parity contract test. A v2
-# workflow may be reorganised, but it may not silently disappear.
-V2_WORKFLOW_PARITY = {
-    "ise-overview.json": "ise3-overview",
-    "ise-access-troubleshooting.json": "ise3-access",
-    "ise-endpoints-devices.json": "ise3-endpoints",
-    "ise-exporter-health.json": "ise3-health",
-    "ise-pan-mnt-troubleshooting.json": "ise3-pan-mnt",
-    "ise-psn-troubleshooting.json": "ise3-psn",
-    "ise-secureclient.json": "ise3-secureclient",
-    "ise-tacacs.json": "ise3-tacacs",
-}
 
+# ---------------------------------------------------------------------------
+# Tiers
+#
+# A dashboard's default window and refresh are properties of the question it
+# answers, not of the data behind it. Triage is read during an incident and has
+# to be current; a capacity trend read at 30 days is noise at one minute.
+# ---------------------------------------------------------------------------
+
+TRIAGE = {"window": "now-3h", "refresh": "1m"}
+DIAGNOSTIC = {"window": "now-6h", "refresh": "5m"}
+EXPORTER = {"window": "now-6h", "refresh": "1m"}
+COST = {"window": "now-24h", "refresh": "5m"}
+CAPACITY = {"window": "now-30d", "refresh": "30m"}
+
+# Grid vocabulary. Grafana's row is 24 units wide; a handful of standard widths
+# keeps panels aligned, and alignment is what lets an operator correlate a spike
+# vertically down the page.
+FULL, HALF, THIRD, QUARTER, SIXTH = 24, 12, 8, 6, 4
+FIFTH, EIGHTH = 5, 3
+STAT_H, PANEL_H, TALL_H, STRIP_H = 4, 8, 10, 6
+
+
+# ---------------------------------------------------------------------------
+# Queries
+# ---------------------------------------------------------------------------
 
 def query(expr, legend="", instant=False, ref="A"):
     built = (
@@ -84,20 +132,27 @@ def metric(name, selectors=""):
     return f"{name}{{{labels}}}"
 
 
-def active_health(name, dataset):
-    """Health for the provider currently selected for one dataset."""
-    health = metric(name, f'dataset="{dataset}"')
-    active = metric(
-        "ise3_dataset_provider_active",
-        f'dataset="{dataset}"',
-    )
+def _healthy(name, selectors, by):
+    """One dataset-health metric, restricted to the provider actually serving.
+
+    A dataset publishes health per candidate provider. Only the active one is
+    the truth about whether the data on screen is good, so every readiness
+    expression joins against ise3_dataset_provider_active first.
+    """
+    health = metric(name, selectors)
+    active = metric("ise3_dataset_provider_active", selectors)
     return (
-        f"max by (instance) ({health} and on(instance,dataset,provider) "
+        f"max by ({by}) ({health} and on(instance,dataset,provider) "
         f"({active} == 1))"
     )
 
 
+def active_health(name, dataset):
+    return _healthy(name, f'dataset="{dataset}"', "instance")
+
+
 def ready(dataset):
+    """Readiness as a filter: no series at all when the dataset is not ready."""
     return (
         f"(({active_health('ise3_dataset_up', dataset)}) == 1) and "
         f"(({active_health('ise3_dataset_fresh', dataset)}) == 1)"
@@ -116,6 +171,40 @@ def ready_bool(dataset):
         f"(({active_health('ise3_dataset_up', dataset)}) == bool 1) * "
         f"(({active_health('ise3_dataset_fresh', dataset)}) == bool 1)"
     )
+
+
+def readiness_per_dataset(selectors=""):
+    """Every selected dataset's readiness as a 0/1 series keyed by dataset.
+
+    This is what makes readiness legible over time rather than as a number:
+    fed to a state timeline it draws exactly when each dataset stopped being
+    trustworthy, which is the first thing anyone asks about a graph with a step
+    in it.
+    """
+    up = _healthy("ise3_dataset_up", selectors, "instance,dataset")
+    fresh = _healthy("ise3_dataset_fresh", selectors, "instance,dataset")
+    return f"(({up}) == bool 1) * (({fresh}) == bool 1)"
+
+
+def _dataset_selector(datasets):
+    return f'dataset=~"{"|".join(datasets)}"'
+
+
+def ready_share(datasets):
+    """The fraction of one dashboard's own datasets that are trustworthy."""
+    return (
+        f"avg by (instance) ({readiness_per_dataset(_dataset_selector(datasets))})"
+    )
+
+
+def oldest_collection(datasets):
+    """Seconds since the least recently collected of these datasets succeeded."""
+    stamps = _healthy(
+        "ise3_dataset_last_success_timestamp",
+        _dataset_selector(datasets),
+        "instance,dataset",
+    )
+    return f"max by (instance) (time() - ({stamps}))"
 
 
 def gate(expr, dataset):
@@ -140,36 +229,13 @@ def covered(expr, dataset, cache):
     )
 
 
-# A bar gauge draws one bar per series and cannot scroll, so a complete per-NAD
-# breakdown is unreadable in a deployment with hundreds of them. Capping is only
-# acceptable because the cap is named in the panel description and the complete
-# data stays reachable -- see capped() below.
-TOP_SERIES = 25
+def share(numerator, denominator):
+    """A ratio that stays defined when nothing happened in the window."""
+    return f"({numerator}) / clamp_min(({denominator}), 1)"
 
 
-def top(expr, limit=TOP_SERIES, *, lowest=False):
-    """Cap a bar gauge's visual query to its most interesting series.
-
-    Which end that is depends on the metric: volume is read from the top, but a
-    coverage fraction is read from the bottom, and topk() there would hide
-    exactly the devices worth looking at.
-    """
-    return f"{'bottomk' if lowest else 'topk'}({limit}, {expr})"
-
-
-def capped(purpose, complete, *, lowest=False):
-    """Description for a top-K capped visual: what it shows, and what it hides.
-
-    Silent truncation is the failure mode this project refuses everywhere else,
-    so the cap and the route back to the complete data are both on screen.
-    """
-    end = "lowest" if lowest else "highest"
-    return (
-        f"{purpose} Capped to the {TOP_SERIES} {end}-valued bars so the gauge "
-        f"stays readable in a deployment with hundreds of network devices. "
-        f"{complete} The Network device variable also brings any device outside "
-        "the cap into this panel."
-    )
+def summed(expr, by="instance"):
+    return f"sum by ({by}) ({expr})"
 
 
 # ISE message codes seen in the RADIUS error view, worded from Cisco's
@@ -223,7 +289,7 @@ NAMED_CODES_NOTE = (
 
 
 def attention(issue, expr):
-    """One row of a triage table: a count, labelled with what it means.
+    """One row of the triage table: a count, labelled with what it means.
 
     Unioning unlike metrics into one table needs a label they all share, and
     the aggregation that makes each row a comparable count drops every label
@@ -232,8 +298,14 @@ def attention(issue, expr):
     return f'label_replace({expr}, "issue", "{issue}", "", "")'
 
 
-# Threshold vocabularies, as absolute (value, colour) steps. The first step is
-# the base and must carry None, which serialises to the -Infinity bound.
+# ---------------------------------------------------------------------------
+# Colour
+#
+# Red, amber and green mean state and nothing else. Series colour is pinned by
+# name so "failed" is the same red on every dashboard and does not shuffle when
+# a neighbouring series drops out.
+# ---------------------------------------------------------------------------
+
 NONZERO_CRITICAL = ((None, "green"), (1, "red"))
 NONZERO_WARNING = ((None, "green"), (1, "orange"))
 REQUIRED_BOOLEAN = ((None, "red"), (1, "green"))
@@ -242,10 +314,16 @@ UTILISATION = ((None, "green"), (80, "orange"), (90, "red"))
 RATIO_HIGH_IS_GOOD = ((None, "red"), (0.85, "orange"), (0.95, "green"))
 COVERAGE = ((None, "red"), (0.8, "orange"), (0.95, "green"))
 BUDGET_USED = ((None, "green"), (0.8, "orange"), (1.0, "red"))
+# Collection age, in seconds. A five-minute dataset that has not landed for a
+# quarter of an hour is late; an hour is a stall.
+COLLECTION_AGE = ((None, "green"), (900, "orange"), (3600, "red"))
+LATENCY_SECONDS = ((None, "green"), (1, "orange"), (3, "red"))
 # A daily backup that has not run is the first sign of a stalled PAN, so the
 # triage table and the age panel must agree on when "yesterday" has passed.
 BACKUP_STALE_HOURS = 26
 BACKUP_AGE_HOURS = ((None, "green"), (BACKUP_STALE_HOURS, "orange"), (50, "red"))
+# Certificate runway, in days. Amber at a quarter's notice, red inside a month.
+CERT_RUNWAY_DAYS = ((None, "red"), (30, "orange"), (90, "green"))
 
 # Value mappings for the booleans ISE reports as 1 and 0.
 YES_NO = ((1, "Yes", "green"), (0, "No", "orange"))
@@ -253,12 +331,33 @@ CONFIGURED = ((1, "Configured", "green"), (0, "Not configured", "red"))
 SUPPORTED = ((1, "Supported", "green"), (0, "Unsupported", "red"))
 ENABLED = ((1, "Yes", "green"), (0, "No", "red"))
 TRUNCATED = ((1, "Truncated", "orange"), (0, "Complete", "green"))
-READINESS = ((1, "OK", "green"), (0, "NOT READY", "red"))
+READINESS = ((1, "Trustworthy", "green"), (0, "NOT CURRENT", "red"))
+CONNECTED = ((1, "Connected", "green"), (0, "Not connected", "red"))
 RISK = ((1, "At risk", "red"), (0, "Clear", "green"))
 
 # Blank panels are ambiguous on call: these say which kind of blank it is.
 NO_DATA_EXPORTER = "no data — exporter absent?"
-NO_DATA_STALE = "no data — stale, see readiness"
+NO_DATA_STALE = "no data — stale, see Collection pipeline"
+NO_DATA_CLEAN = "none — nothing to see"
+
+
+def colour(name, value):
+    return DynamicConfigValue(
+        name, FieldColor(mode=FieldColorModeId.FIXED, fixed_color=value)
+    )
+
+
+def _pinned(pattern, value):
+    return pattern, [colour("color", value)]
+
+
+# Outcome is the one vocabulary shared by RADIUS, TACACS and posture panels, so
+# it is pinned once and applied wherever those words appear in a legend.
+OUTCOME_COLOURS = (
+    _pinned(".*(passed|Passed|compliant|Compliant|success).*", "green"),
+    _pinned(".*(failed|Failed|non-compliant|NonCompliant|error).*", "red"),
+    _pinned(".*(unknown|Unknown|pending|Pending).*", "text"),
+)
 
 
 def _thresholds(steps):
@@ -274,13 +373,17 @@ def _mappings(entries):
         ValueMap(
             options={
                 str(value): ValueMappingResult(
-                    text=text, color=color, index=index
+                    text=text_value, color=color, index=index
                 )
-                for index, (value, text, color) in enumerate(entries)
+                for index, (value, text_value, color) in enumerate(entries)
             }
         )
     ]
 
+
+# ---------------------------------------------------------------------------
+# Navigation
+# ---------------------------------------------------------------------------
 
 class _DataLink:
     """One field-level link out of a panel.
@@ -314,9 +417,9 @@ def drilldown(title, uid, **variables):
     return _DataLink(title, f"/d/{uid}?" + "&".join(parameters))
 
 
-# The two ways a clicked value names an entity. A bar gauge clicks a series, so
-# the label is read off the field; a table clicks a row, so it is read off the
-# named column of that row.
+# The two ways a clicked value names an entity. A time series or bar gauge
+# clicks a series, so the label is read off the field; a table clicks a row, so
+# it is read off the named column of that row.
 def by_series(label):
     return "${__field.labels." + label + "}"
 
@@ -326,7 +429,7 @@ def by_row(column):
 
 
 def by_ref(ref, *, unit=None, thresholds=None, mappings=None,
-           minimum=None, maximum=None):
+           minimum=None, maximum=None, links=()):
     """Field config for one query refId.
 
     Stat and bar-gauge panels share one field config across every target, so a
@@ -346,11 +449,13 @@ def by_ref(ref, *, unit=None, thresholds=None, mappings=None,
         properties.append(DynamicConfigValue("min", minimum))
     if maximum is not None:
         properties.append(DynamicConfigValue("max", maximum))
+    if links:
+        properties.append(DynamicConfigValue("links", list(links)))
     return ref, properties
 
 
 def by_column(name, *, unit=None, thresholds=None, mappings=None,
-              colour_cells=False, links=()):
+              colour_cells=False, links=(), width=None):
     """Field config for one named table column.
 
     A table's columns are matched by the name they carry after transformation,
@@ -375,6 +480,8 @@ def by_column(name, *, unit=None, thresholds=None, mappings=None,
                 ),
             )
         )
+    if width is not None:
+        properties.append(DynamicConfigValue("custom.width", width))
     if links:
         # Scoped to one column so only the identifying cell is clickable; a
         # panel-wide data link turns every cell of every row into the same link.
@@ -382,8 +489,7 @@ def by_column(name, *, unit=None, thresholds=None, mappings=None,
     return name, properties
 
 
-# The two column shapes that repeat across the table set: a 1/0 flag, which is
-# unreadable as a bare number in a grid of them, and an age in seconds.
+# The column shapes that repeat across the table set.
 BOOLEAN_CELL = {
     "mappings": ENABLED,
     "thresholds": REQUIRED_BOOLEAN,
@@ -393,7 +499,7 @@ SECONDS_CELL = {"unit": "s"}
 
 
 def _visual_state(panel, thresholds, mappings, minimum, maximum, overrides,
-                  data_links=()):
+                  data_links=(), regexp_overrides=()):
     if data_links:
         panel = panel.data_links(list(data_links))
     if thresholds is not None:
@@ -406,8 +512,14 @@ def _visual_state(panel, thresholds, mappings, minimum, maximum, overrides,
         panel = panel.max(maximum)
     for ref, properties in overrides:
         panel = panel.override_by_query(ref, properties)
+    for pattern, properties in regexp_overrides:
+        panel = panel.override_by_regexp(pattern, properties)
     return panel
 
+
+# ---------------------------------------------------------------------------
+# Variables
+# ---------------------------------------------------------------------------
 
 def datasource_variable():
     """File-provisioned dashboards cannot hardcode a datasource uid."""
@@ -419,7 +531,7 @@ def datasource_variable():
 
 
 def deployment_variable():
-    """Scrape instance is the deployment boundary shared with v2 dashboards."""
+    """Scrape instance is the deployment boundary every dashboard is scoped by."""
     return (
         db.QueryVariable("deployment")
         .label("Deployment")
@@ -443,6 +555,10 @@ def label_variable(name, label, source_metric, source_label, selectors=""):
     )
 
 
+# ---------------------------------------------------------------------------
+# Annotations
+# ---------------------------------------------------------------------------
+
 class _PrometheusAnnotationQuery(AnnotationQuery):
     """An annotation query carrying the Prometheus-only formatting fields.
 
@@ -463,17 +579,17 @@ class _PrometheusAnnotationQuery(AnnotationQuery):
         return self
 
 
-def annotation(name, expr, *, title, text, colour, step="1m"):
+def annotation(name, expr, *, title, body, colour_name, step="1m"):
     """One class of change event, painted across every panel of a dashboard."""
     return _PrometheusAnnotationQuery(
-        {"titleFormat": title, "textFormat": text, "step": step},
+        {"titleFormat": title, "textFormat": body, "step": step},
         name=name,
         datasource=DATASOURCE,
         enable=True,
         # hide=False keeps each annotation's own toggle in the dashboard bar,
         # so one class of event can be switched off without editing anything.
         hide=False,
-        icon_color=colour,
+        icon_color=colour_name,
         expr=expr,
     )
 
@@ -489,8 +605,8 @@ def change_annotations():
             "Provider changed",
             f"changes({metric('ise3_dataset_provider_active')}[5m]) > 0",
             title="Provider changed: {{dataset}}",
-            text="{{dataset}} is now served by {{provider}}",
-            colour="purple",
+            body="{{dataset}} is now served by {{provider}}",
+            colour_name="purple",
         ),
         annotation(
             # Aggregated to the node: node_state is one series per state, so an
@@ -500,8 +616,8 @@ def change_annotations():
             "max by (instance,node) (changes("
             f"{metric('ise3_deployment_node_state')}[10m])) > 0",
             title="Node state changed: {{node}}",
-            text="{{node}} changed deployment state",
-            colour="orange",
+            body="{{node}} changed deployment state",
+            colour_name="orange",
         ),
         annotation(
             # changes() can never see a build change: the version is a label,
@@ -513,58 +629,42 @@ def change_annotations():
             f"{metric('ise3_exporter_build_info')} unless "
             f"({metric('ise3_exporter_build_info')} offset 5m)",
             title="Exporter build changed",
-            text="exporter {{version}} targeting ISE {{target_ise_release}}",
-            colour="blue",
+            body="exporter {{version}} targeting ISE {{target_ise_release}}",
+            colour_name="blue",
         ),
     )
 
 
-def base(title, uid, description, *, refresh="5m", variables=()):
-    navigation = (
-        db.DashboardLink("ISE Exporter 3 dashboards")
-        .type(DashboardLinkType.DASHBOARDS)
-        .tags(["ise-exporter3"])
-        .as_dropdown(True)
-        .include_vars(True)
-        .keep_time(True)
-    )
-    dashboard = (
-        db.Dashboard(title)
-        .uid(uid)
-        .description(description)
-        .tags(TAGS)
-        .tooltip(DashboardCursorSync.CROSSHAIR)
-        .refresh(refresh)
-        .time("now-6h", "now")
-        .editable()
-        .link(navigation)
-        .with_variable(datasource_variable())
-        .with_variable(deployment_variable())
-    )
-    for change in change_annotations():
-        dashboard = dashboard.annotation(change)
-    for variable in variables:
-        dashboard = dashboard.with_variable(variable)
-    return dashboard
+# ---------------------------------------------------------------------------
+# Panels
+# ---------------------------------------------------------------------------
 
-
-def ts(title, description, targets, *, unit="short", stacking=False,
-       thresholds=None, mappings=None, minimum=None, maximum=None,
-       overrides=()):
+def ts(title, description, targets, *, unit="short", stacked=False,
+       filled=False, thresholds=None, mappings=None, minimum=None,
+       maximum=None, overrides=(), series_colours=(), legend_calcs=None,
+       legend_placement="bottom"):
     panel = (
         timeseries.Panel()
         .title(title)
         .description(description)
         .datasource(DATASOURCE)
         .unit(unit)
-        .fill_opacity(10 if stacking else 0)
+        .line_width(2)
+        .fill_opacity(25 if (stacked or filled) else 0)
         .legend(
             common.VizLegendOptions()
             .display_mode("table")
-            .placement("bottom")
-            .calcs(["lastNotNull", "max"])
+            .placement(legend_placement)
+            .calcs(list(legend_calcs if legend_calcs is not None
+                        else ["lastNotNull", "max"]))
         )
     )
+    if stacked:
+        # Stacking is only honest for parts of a whole. Every caller passing it
+        # here is drawing an outcome split (passed/failed) or a status split.
+        panel = panel.stacking(
+            common.StackingConfig().mode(StackingMode.NORMAL).group("A")
+        )
     if thresholds is not None:
         # A time series only draws its thresholds when a style asks it to.
         panel = panel.thresholds_style(
@@ -575,7 +675,8 @@ def ts(title, description, targets, *, unit="short", stacking=False,
     for target in targets:
         panel = panel.with_target(target)
     return _visual_state(
-        panel, thresholds, mappings, minimum, maximum, overrides
+        panel, thresholds, mappings, minimum, maximum, overrides,
+        regexp_overrides=series_colours,
     )
 
 
@@ -599,7 +700,7 @@ def _value_column(index, total):
     return "Value" if total == 1 else f"Value #{REF_IDS[index]}"
 
 
-def _table_transformations(count, columns, sort):
+def _table_transformations(count, columns, sort, labels):
     """Turn one frame per query into a single joined, labelled table.
 
     Without this a multi-target table renders as a frame picker showing one
@@ -608,7 +709,7 @@ def _table_transformations(count, columns, sort):
     Time column, and a shared column is part of the join key.
     """
     hidden = list(NOISE_COLUMNS)
-    renamed = {}
+    renamed = dict(labels or {})
     for index, name in enumerate(columns):
         column = _value_column(index, count)
         if name is None:
@@ -641,12 +742,13 @@ def _table_transformations(count, columns, sort):
 
 
 def tbl(title, description, targets, *, columns, sort=None, thresholds=None,
-        mappings=None, overrides=(), column_overrides=()):
+        mappings=None, overrides=(), column_overrides=(), labels=None):
     """A joined table.
 
     `columns` names one value column per target, in refId order, or None to
-    drop that target's value and keep only the labels it joins in. `sort`
-    reorders rows worst-first where the query itself does not already.
+    drop that target's value and keep only the labels it joins in. `labels`
+    renames a raw Prometheus label column into something an operator reads.
+    `sort` reorders rows worst-first where the query itself does not already.
     """
     assert len(columns) == len(targets), title
     panel = (
@@ -654,7 +756,7 @@ def tbl(title, description, targets, *, columns, sort=None, thresholds=None,
         .title(title)
         .description(description)
         .datasource(DATASOURCE)
-        .transformations(_table_transformations(len(targets), columns, sort))
+        .transformations(_table_transformations(len(targets), columns, sort, labels))
     )
     for target in targets:
         # Label columns only exist in table format; time_series format gives
@@ -666,16 +768,49 @@ def tbl(title, description, targets, *, columns, sort=None, thresholds=None,
     return panel
 
 
+def ranked(title, description, expr, *, label, header, unit="short",
+           descending=True, value_thresholds=None, colour_cells=False,
+           links=(), mappings=None, label_header=None):
+    """A complete breakdown of one labelled metric, worst first.
+
+    This replaces the capped bar gauge the old set used for every breakdown. A
+    table scrolls, so there is no cap, no truncation note, and no risk that the
+    device worth looking at fell off the bottom of the visual.
+    """
+    column_overrides = [
+        by_column(header, unit=unit, thresholds=value_thresholds,
+                  mappings=mappings, colour_cells=colour_cells)
+    ]
+    if links:
+        column_overrides.append(by_column(label, links=list(links)))
+    return tbl(
+        title,
+        description,
+        [instant(expr)],
+        columns=[header],
+        sort=(header, descending),
+        labels={label: label_header} if label_header else None,
+        column_overrides=column_overrides,
+    )
+
+
 def stat_panel(title, description, targets, *, unit="short", thresholds=None,
                mappings=None, minimum=None, maximum=None, overrides=(),
-               no_value=None, data_links=()):
+               no_value=None, data_links=(), sparkline=False, text_mode=None,
+               colour_mode=BigValueColorMode.VALUE):
     panel = (
         stat.Panel()
         .title(title)
         .description(description)
         .datasource(DATASOURCE)
         .unit(unit)
+        .color_mode(colour_mode)
+        .graph_mode(
+            BigValueGraphMode.AREA if sparkline else BigValueGraphMode.NONE
+        )
     )
+    if text_mode is not None:
+        panel = panel.text_mode(text_mode)
     if no_value is not None:
         panel = panel.no_value(no_value)
     for target in targets:
@@ -688,6 +823,12 @@ def stat_panel(title, description, targets, *, unit="short", thresholds=None,
 def bar(title, description, targets, *, unit="short", thresholds=None,
         mappings=None, minimum=None, maximum=None, overrides=(),
         data_links=()):
+    """A bar gauge.
+
+    Reserved for bounded, low-cardinality comparisons -- coverage fractions,
+    role counts, a handful of named categories -- where the length of the bar
+    against a common maximum is the message. Anything unbounded is a table.
+    """
     panel = (
         bargauge.Panel()
         .title(title)
@@ -705,19 +846,118 @@ def bar(title, description, targets, *, unit="short", thresholds=None,
     )
 
 
-def sized(panel, height=8, span=12):
+def states(title, description, targets, *, mappings=READINESS,
+           thresholds=REQUIRED_BOOLEAN):
+    """A state timeline.
+
+    The right shape for a boolean that persists: it answers "was this good, and
+    if not, from when until when" in one read, which neither a stat nor a table
+    of current values can do.
+    """
+    panel = (
+        statetimeline.Panel()
+        .title(title)
+        .description(description)
+        .datasource(DATASOURCE)
+        .merge_values(True)
+        .show_value("never")
+        .row_height(0.85)
+        .fill_opacity(80)
+        .legend(
+            common.VizLegendOptions()
+            .display_mode("list")
+            .placement("bottom")
+            .calcs([])
+        )
+    )
+    for target in targets:
+        panel = panel.with_target(target)
+    return _visual_state(panel, thresholds, mappings, None, None, ())
+
+
+def note(title, description, body):
+    """A markdown panel.
+
+    Every dashboard ends with one. An unowned dashboard with no stated purpose
+    rots, and the panel is where the purpose, the reading order, and the
+    runbook pointer live where an operator will actually find them.
+    """
+    return (
+        text.Panel()
+        .title(title)
+        .description(description)
+        .datasource(DATASOURCE)
+        .mode(TextMode.MARKDOWN)
+        .content(body)
+    )
+
+
+def about(purpose, first, then, siblings):
+    """The standard closing panel: what this is, how to read it, where next."""
+    body = [f"**Purpose** — {purpose}", "", "**Read it in this order**", ""]
+    body += [f"{index}. {step}" for index, step in enumerate(first, start=1)]
+    body += ["", "**When something is red**", ""]
+    body += [f"- {step}" for step in then]
+    body += [
+        "",
+        "**Related dashboards** — " + ", ".join(siblings),
+        "",
+        "*Owner: set this to the team that answers the page. "
+        "Runbook: link it here — a red panel with no runbook is a puzzle, "
+        "not an alert.*",
+    ]
+    return note(
+        "About this dashboard",
+        "Purpose, reading order, and where to go next. Kept with the "
+        "dashboard so the meaning cannot drift away from the panels.",
+        "\n".join(body),
+    )
+
+
+def sized(panel, height=PANEL_H, span=HALF):
     return panel.height(height).span(span)
 
+
+# ---------------------------------------------------------------------------
+# Assembly
+# ---------------------------------------------------------------------------
 
 # A third element on a section marks the row as folded away on load, for
 # material that is needed during an investigation but not to start one.
 COLLAPSED = "collapsed"
 
 
-def assemble(title, uid, description, sections, *, variables=(), refresh="5m"):
-    dashboard = base(
-        title, uid, description, refresh=refresh, variables=variables
+def base(title, uid, description, *, tier, variables=()):
+    navigation = (
+        db.DashboardLink("ISE Exporter 3 dashboards")
+        .type(DashboardLinkType.DASHBOARDS)
+        .tags(["ise-exporter3"])
+        .as_dropdown(True)
+        .include_vars(True)
+        .keep_time(True)
     )
+    dashboard = (
+        db.Dashboard(title)
+        .uid(uid)
+        .description(description)
+        .tags(TAGS)
+        .tooltip(DashboardCursorSync.CROSSHAIR)
+        .refresh(tier["refresh"])
+        .time(tier["window"], "now")
+        .editable()
+        .link(navigation)
+        .with_variable(datasource_variable())
+        .with_variable(deployment_variable())
+    )
+    for change in change_annotations():
+        dashboard = dashboard.annotation(change)
+    for variable in variables:
+        dashboard = dashboard.with_variable(variable)
+    return dashboard
+
+
+def assemble(title, uid, description, sections, *, tier, variables=()):
+    dashboard = base(title, uid, description, tier=tier, variables=variables)
     for section in sections:
         row_title, panels = section[:2]
         row = db.Row(row_title)
@@ -735,5484 +975,4075 @@ def assemble(title, uid, description, sections, *, variables=(), refresh="5m"):
     return dashboard
 
 
-def overview_dashboard():
+def trust_pair(datasets, *, span=EIGHTH):
+    """The two panels that say whether anything else on the page is current.
+
+    They sit at the end of the first row, after the outcome the operator came
+    for: outcome first, then the caveat on it. Both link into the pipeline
+    dashboard, which is where an untrustworthy answer gets explained.
+    """
+    to_pipeline = (drilldown("Why — collection pipeline", "ise3-pipeline"),)
+    names = ", ".join(sorted(datasets))
+    return [
+        sized(
+            stat_panel(
+                "Data trustworthy",
+                "Share of this dashboard's own datasets that both collected "
+                f"successfully and are inside their freshness window ({names}). "
+                "Below 100% means some panel here is blank or stale, and the "
+                "pipeline dashboard says which.",
+                [instant(ready_share(datasets))],
+                unit="percentunit",
+                thresholds=((None, "red"), (1, "green")),
+                minimum=0,
+                maximum=1,
+                no_value=NO_DATA_EXPORTER,
+                data_links=to_pipeline,
+            ),
+            STAT_H,
+            span,
+        ),
+        sized(
+            stat_panel(
+                "Collection age",
+                "Time since the least recently collected of this dashboard's "
+                "datasets last succeeded. Every number on this page is at "
+                "least this old; a value climbing past its collection interval "
+                "means ISE is answering slowly or not at all.",
+                [instant(oldest_collection(datasets))],
+                unit="s",
+                thresholds=COLLECTION_AGE,
+                no_value=NO_DATA_EXPORTER,
+                data_links=to_pipeline,
+            ),
+            STAT_H,
+            span,
+        ),
+    ]
+
+
+# ---------------------------------------------------------------------------
+# Shared expressions
+# ---------------------------------------------------------------------------
+
+AUTH_PASSED = summed(
+    gate(metric("ise3_radius_authentications", 'status="passed"'),
+         "radius_reporting"))
+AUTH_FAILED = summed(
+    gate(metric("ise3_radius_authentications", 'status="failed"'),
+         "radius_reporting"))
+AUTH_TOTAL = summed(
+    gate(metric("ise3_radius_authentications"), "radius_reporting"))
+AUTH_SUCCESS_RATE = share(AUTH_PASSED, AUTH_TOTAL)
+
+ACTIVE_SESSIONS = summed(
+    gate(metric("ise3_active_sessions_total"), "active_sessions"))
+
+NODES_DISCONNECTED = (
+    "count by (instance) ((" +
+    gate(metric("ise3_deployment_node_state", 'state!="Connected"'),
+         "deployment") +
+    ") == 1)"
+)
+
+NODE_CONNECTED = summed(
+    gate(metric("ise3_deployment_node_state", 'state="Connected"'), "deployment"),
+    by="instance,node",
+)
+
+
+# ---------------------------------------------------------------------------
+# Tier 1 — triage
+# ---------------------------------------------------------------------------
+
+def triage_dashboard():
     # The union that answers "is anything wrong?" before anything is read. Each
     # row counts one class of problem and says what it is, so an empty table is
     # the healthy state and needs no interpretation. ISE-sourced rows are gated
     # so a stale collection cannot raise an alarm that has already been fixed.
-    attention_needed = " or ".join(
-        (
-            attention(
-                "Datasets on a fallback provider",
-                "count by (instance) "
-                f"({metric('ise3_dataset_provider_degraded')} > 0)",
-            ),
-            attention(
-                "Certificates already expired",
-                "sum by (instance) "
-                f"(({gate(metric('ise3_certificates_expired'), 'certificates')}) > 0)",
-            ),
-            attention(
-                f"Deployments whose backup is older than {BACKUP_STALE_HOURS} hours",
-                "count by (instance) "
-                f"(({gate(metric('ise3_backup_age_hours'), 'backup')}) "
-                f"> {BACKUP_STALE_HOURS})",
-            ),
-            attention(
-                "Deployments running an unsupported ISE version",
-                "count by (instance) "
-                f"(({gate(metric('ise3_version_supported'), 'patches')}) == 0)",
-            ),
-            attention(
-                "Enabled licence tiers out of compliance",
-                "count by (instance) "
-                f"((({gate(metric('ise3_license_compliant'), 'licensing')}) == 0) "
-                "and on(instance,provider,tier) "
-                f"(({metric('ise3_license_enabled')}) == 1))",
-            ),
-            attention(
-                "Datasets whose latest collection attempt failed",
-                "count by (instance) "
-                f"({metric('ise3_dataset_last_failure_detail_info')} == 1)",
-            ),
-        )
-    )
-    return assemble(
-        "ISE 3 — Overview",
-        "ise3-overview",
-        "Deployment, session, inventory, certificate, backup, licensing, and "
-        "software posture at a glance. Every value is gated on fresh data.",
-        (
-            (
-                "Platform status",
-                (
-                    sized(
-                        tbl(
-                            "Attention needed",
-                            "Every condition on this dashboard that warrants "
-                            "action, counted and named. An empty table is the "
-                            "healthy state; each row says which panel below "
-                            "explains it.",
-                            [instant(attention_needed, "attention")],
-                            columns=("count",),
-                            sort=("count", True),
-                            column_overrides=(
-                                by_column("count", thresholds=NONZERO_CRITICAL,
-                                          colour_cells=True),
-                            ),
-                        ),
-                        6,
-                        24,
-                    ),
-                    sized(
-                        stat_panel(
-                            "Ready datasets",
-                            "Enabled datasets whose currently selected provider "
-                            "completed successfully and remains fresh.",
-                            [
-                                instant(
-                                    f"sum(({metric('ise3_dataset_up')} == 1) and "
-                                    "on(instance,dataset,provider) "
-                                    f"({metric('ise3_dataset_provider_active')} == 1))",
-                                    "ready",
-                                )
-                            ],
-                        ),
-                        5,
-                        8,
-                    ),
-                    sized(
-                        stat_panel(
-                            "Degraded datasets",
-                            "Datasets running on a lower-preference provider. "
-                            "The Sources dashboard explains every fallback.",
-                            [
-                                instant(
-                                    f"sum({metric('ise3_dataset_provider_degraded')} > 0)",
-                                    "degraded",
-                                )
-                            ],
-                            thresholds=NONZERO_CRITICAL,
-                            data_links=(
-                                drilldown(
-                                    "Which source, and why", "ise3-sources"
-                                ),
-                            ),
-                        ),
-                        5,
-                        8,
-                    ),
-                    sized(
-                        stat_panel(
-                            "Active sessions",
-                            "Current RADIUS sessions from the active provider; "
-                            "the provider label preserves source semantics.",
-                            [
-                                instant(
-                                    f"sum({gate(metric('ise3_active_sessions_total'), 'active_sessions')})",
-                                    "sessions",
-                                )
-                            ],
-                            no_value=NO_DATA_STALE,
-                        ),
-                        5,
-                        8,
-                    ),
-                    sized(
-                        bar(
-                            "Deployment nodes by role",
-                            "Connected deployment capacity by assigned ISE role, "
-                            "including distributed and standalone deployments.",
-                            [
-                                instant(
-                                    "sort_desc(sum by (role) "
-                                    f"({gate(metric('ise3_deployment_nodes'), 'deployment')}))",
-                                    "{{role}}",
-                                )
-                            ],
-                        )
-                    ),
-                    sized(
-                        tbl(
-                            "Deployment node status",
-                            "Current state, role, and service assignment for "
-                            "every ISE node in the selected deployments.",
-                            [
-                                instant(
-                                    gate(
-                                        metric(
-                                            "ise3_deployment_node_state",
-                                            'state=~".*"',
-                                        ),
-                                        "deployment",
-                                    )
-                                    + " == 1",
-                                    "{{node}} · {{roles}} · {{state}}",
-                                )
-                            ],
-                            columns=(None,),
-                        )
-                    ),
-                    sized(
-                        stat_panel(
-                            "PAN HA enabled",
-                            "Whether administrative high availability is enabled "
-                            "for each selected ISE deployment.",
-                            [
-                                instant(
-                                    metric("ise3_deployment_pan_ha_enabled"),
-                                    "{{instance}}",
-                                )
-                            ],
-                            mappings=YES_NO,
-                        ),
-                        5,
-                        12,
-                    ),
-                    sized(
-                        stat_panel(
-                            "Endpoint and NAD inventory",
-                            "Authoritative endpoint and configured network-device "
-                            "totals from their currently selected providers.",
-                            [
-                                instant(
-                                    f"sum({gate(metric('ise3_endpoints_total'), 'endpoint_inventory')})",
-                                    "endpoints",
-                                ),
-                                instant(
-                                    f"sum({gate(metric('ise3_network_devices_total'), 'network_devices')})",
-                                    "network devices",
-                                    "B",
-                                ),
-                            ],
-                            no_value=NO_DATA_STALE,
-                        ),
-                        5,
-                        12,
-                    ),
-                ),
-            ),
-            (
-                "Certificates, backup, and software",
-                (
-                    sized(
-                        stat_panel(
-                            "Certificate findings",
-                            "Expired and soon-to-expire certificate counts across "
-                            "all scanned deployment nodes.",
-                            [
-                                instant(
-                                    f"sum({gate(metric('ise3_certificates_expired'), 'certificates')})",
-                                    "expired",
-                                ),
-                                instant(
-                                    f"sum({gate(metric('ise3_certificates_expiring_soon'), 'certificates')})",
-                                    "expiring soon",
-                                    "B",
-                                ),
-                            ],
-                            thresholds=NONZERO_CRITICAL,
-                            overrides=(by_ref("B", thresholds=NONZERO_WARNING),),
-                            no_value=NO_DATA_STALE,
-                        ),
-                        5,
-                        8,
-                    ),
-                    sized(
-                        stat_panel(
-                            "Backup state",
-                            "Whether backup is configured and the reported age "
-                            "of the latest successful backup.",
-                            [
-                                instant(
-                                    metric("ise3_backup_configured"), "configured"
-                                ),
-                                instant(
-                                    metric("ise3_backup_age_hours"),
-                                    "age",
-                                    "B",
-                                ),
-                            ],
-                            unit="h",
-                            thresholds=BACKUP_AGE_HOURS,
-                            # The configured flag is a boolean, not an age.
-                            overrides=(
-                                by_ref(
-                                    "A",
-                                    unit="short",
-                                    mappings=CONFIGURED,
-                                    thresholds=REQUIRED_BOOLEAN,
-                                ),
-                            ),
-                        ),
-                        5,
-                        8,
-                    ),
-                    sized(
-                        stat_panel(
-                            "Patch and version support",
-                            "Installed patch level and whether the appliance "
-                            "version is supported by this exporter build.",
-                            [
-                                instant(metric("ise3_patch_level"), "patch"),
-                                instant(
-                                    metric("ise3_version_supported"),
-                                    "{{version}} supported",
-                                    "B",
-                                ),
-                            ],
-                            overrides=(
-                                by_ref(
-                                    "B",
-                                    mappings=SUPPORTED,
-                                    thresholds=REQUIRED_BOOLEAN,
-                                ),
-                            ),
-                        ),
-                        5,
-                        8,
-                    ),
-                    sized(
-                        tbl(
-                            "Certificate expiry",
-                            "Soonest certificate expiry by node, store, usage, "
-                            "and certificate identity for renewal planning.",
-                            [
-                                instant(
-                                    "sort("
-                                    f"{gate(metric('ise3_certificate_expiry_days'), 'certificates')}"
-                                    ")",
-                                    "{{node}} · {{store}} · {{certificate}}",
-                                )
-                            ],
-                            columns=("days to expiry",),
-                        )
-                    ),
-                    sized(
-                        tbl(
-                            "Installed patches",
-                            "The installed-state record for each known patch "
-                            "number on the selected deployments.",
-                            [
-                                instant(
-                                    metric("ise3_patch_installed"),
-                                    "patch {{patch_number}}",
-                                )
-                            ],
-                            columns=("installed",),
-                            column_overrides=(by_column("installed", **BOOLEAN_CELL),),
-                        )
-                    ),
-                ),
-            ),
-            (
-                "Licensing",
-                (
-                    sized(
-                        bar(
-                            "License consumption",
-                            "Current consumption by license tier, preserving "
-                            "each deployment as a separate series.",
-                            [
-                                instant(
-                                    "sort_desc(sum by (tier) "
-                                    f"({gate(metric('ise3_license_consumption'), 'licensing')}))",
-                                    "{{tier}}",
-                                )
-                            ],
-                        )
-                    ),
-                    sized(
-                        tbl(
-                            "License enabled and compliant",
-                            "Enabled and compliance state for every reported "
-                            "license tier in the selected deployments.",
-                            [
-                                instant(
-                                    metric("ise3_license_enabled"),
-                                    "{{tier}} enabled",
-                                ),
-                                instant(
-                                    metric("ise3_license_compliant"),
-                                    "{{tier}} compliant",
-                                    "B",
-                                ),
-                            ],
-                            columns=("enabled", "compliant"),
-                            column_overrides=(
-                                by_column("enabled", colour_cells=True),
-                                by_column("compliant", colour_cells=True),
-                            ),
-                            mappings=ENABLED,
-                        )
-                    ),
-                ),
-            ),
+    attention_needed = " or ".join((
+        attention(
+            "Datasets not collecting",
+            f"count by (instance) (({readiness_per_dataset()}) == 0)",
         ),
+        attention(
+            "Datasets on a fallback provider",
+            "count by (instance) "
+            f"({metric('ise3_dataset_provider_degraded')} > 0)",
+        ),
+        attention(
+            "Deployment nodes not connected",
+            NODES_DISCONNECTED,
+        ),
+        attention(
+            "Certificates already expired",
+            "sum by (instance) "
+            f"(({gate(metric('ise3_certificates_expired'), 'certificates')}) > 0)",
+        ),
+        attention(
+            "ISE nodes unreachable for the certificate scan",
+            "sum by (instance) ((" +
+            gate(metric("ise3_certificate_nodes_unreachable"), "certificates") +
+            ") > 0)",
+        ),
+        attention(
+            f"Deployments whose backup is older than {BACKUP_STALE_HOURS} hours",
+            "count by (instance) "
+            f"(({gate(metric('ise3_backup_age_hours'), 'backup')}) "
+            f"> {BACKUP_STALE_HOURS})",
+        ),
+        attention(
+            "Licence tiers out of compliance",
+            "count by (instance) "
+            f"(({gate(metric('ise3_license_compliant'), 'licensing')}) == 0)",
+        ),
+        attention(
+            "PSNs above 90% CPU",
+            "count by (instance) "
+            f"(({gate(metric('ise3_node_cpu_utilization_percent'), 'psn_performance')})"
+            " > 90)",
+        ),
+        attention(
+            "Network devices with failing authentications",
+            "count by (instance) "
+            f"(({gate(metric('ise3_radius_errors_by_nad'), 'radius_errors')}) > 0)",
+        ),
+        attention(
+            "Endpoints failing posture",
+            "sum by (instance) ((" +
+            gate(metric("ise3_posture_endpoints", 'status!~"Compliant|compliant"'),
+                 "posture_current") +
+            ") > 0)",
+        ),
+        attention(
+            "TACACS accounts flagged for hygiene review",
+            "count by (instance) "
+            f"(({gate(metric('ise3_tacacs_internal_account_hygiene_risk'), 'tacacs_config')})"
+            " > 0)",
+        ),
+    ))
+
+    now = [
+        sized(
+            stat_panel(
+                "Authentication success rate",
+                "Share of RADIUS authentications in the reporting window that "
+                "passed. This is the symptom a user would notice, so it is the "
+                "first thing on the page. Amber below 95%, red below 85% — "
+                "tune both to what this deployment normally does.",
+                [instant(AUTH_SUCCESS_RATE)],
+                unit="percentunit",
+                thresholds=RATIO_HIGH_IS_GOOD,
+                minimum=0,
+                maximum=1,
+                sparkline=True,
+                no_value=NO_DATA_STALE,
+                data_links=(drilldown("Why — RADIUS access", "ise3-access"),),
+            ),
+            STAT_H,
+            QUARTER,
+        ),
+        sized(
+            stat_panel(
+                "Failed authentications",
+                "Count of failed RADIUS authentications in the reporting "
+                "window. Deliberately uncoloured: every real deployment fails "
+                "some authentications, so the rate above is the judgement and "
+                "this is the magnitude behind it.",
+                [instant(AUTH_FAILED)],
+                thresholds=NEUTRAL,
+                sparkline=True,
+                no_value=NO_DATA_STALE,
+                data_links=(drilldown("Why — RADIUS access", "ise3-access"),),
+            ),
+            STAT_H,
+            SIXTH,
+        ),
+        sized(
+            stat_panel(
+                "Active sessions",
+                "Sessions ISE currently considers live, and the distinct "
+                "endpoints behind them. A cliff in sessions with a healthy "
+                "success rate usually means a network event rather than an ISE "
+                "one; many more sessions than endpoints means sessions are not "
+                "being torn down.",
+                [
+                    instant(ACTIVE_SESSIONS, "sessions"),
+                    instant(summed(gate(metric("ise3_active_session_endpoints"),
+                                        "active_sessions")),
+                            "endpoints", ref="B"),
+                ],
+                thresholds=NEUTRAL,
+                sparkline=True,
+                no_value=NO_DATA_STALE,
+                data_links=(drilldown("Where — by PSN", "ise3-psn"),),
+            ),
+            STAT_H,
+            SIXTH,
+        ),
+        sized(
+            stat_panel(
+                "Nodes not connected",
+                "Deployment nodes in any state other than Connected. One node "
+                "out of sync degrades policy distribution; a PAN out of sync "
+                "stops configuration changes reaching the deployment.",
+                [instant(NODES_DISCONNECTED)],
+                thresholds=NONZERO_CRITICAL,
+                no_value=NO_DATA_CLEAN,
+                data_links=(drilldown("Which — control plane", "ise3-control"),),
+            ),
+            STAT_H,
+            SIXTH,
+        ),
+    ] + trust_pair(("radius_reporting", "active_sessions", "deployment"),
+                   span=EIGHTH)
+
+    diagnosis = [
+        sized(
+            tbl(
+                "Attention needed",
+                "One row per class of problem currently detected anywhere in "
+                "this deployment, with how many instances of it there are. An "
+                "empty table is the healthy state and needs no interpretation. "
+                "Rows sourced from ISE are suppressed while their dataset is "
+                "stale, so a fixed problem cannot keep raising an alarm from a "
+                "collection that has not refreshed yet.",
+                [instant(attention_needed)],
+                columns=["Count"],
+                sort=("Count", True),
+                labels={"issue": "Issue"},
+                column_overrides=[
+                    by_column("Count", thresholds=NONZERO_WARNING,
+                              colour_cells=True, width=110),
+                ],
+            ),
+            TALL_H,
+            HALF,
+        ),
+        sized(
+            ts(
+                "Authentication outcome",
+                "Passed and failed RADIUS authentications over time, stacked "
+                "because together they are the whole of the window's traffic. "
+                "A failure band that widens without the total growing is a "
+                "policy or identity-store problem; both growing together is "
+                "usually a retry storm.",
+                [
+                    query(AUTH_PASSED, "passed"),
+                    query(AUTH_FAILED, "failed", ref="B"),
+                ],
+                stacked=True,
+                series_colours=OUTCOME_COLOURS,
+            ),
+            TALL_H,
+            HALF,
+        ),
+        sized(
+            ts(
+                "Authentication latency",
+                "Mean and worst-case end-to-end authentication time as MnT "
+                "recorded it. The dashed lines are the thresholds an operator "
+                "should care about: past one second users notice, past three "
+                "supplicants start timing out and retrying.",
+                [
+                    query(
+                        gate(metric("ise3_session_authentication_latency_seconds",
+                                    'statistic="mean"'), "session_authorization"),
+                        "mean",
+                    ),
+                    query(
+                        gate(metric("ise3_session_authentication_latency_seconds",
+                                    'statistic="max"'), "session_authorization"),
+                        "worst", ref="B",
+                    ),
+                ],
+                unit="s",
+                thresholds=LATENCY_SECONDS,
+            ),
+            PANEL_H,
+            HALF,
+        ),
+        sized(
+            states(
+                "Dataset trustworthiness",
+                "One lane per dataset, green while that dataset both collected "
+                "and stayed inside its freshness window. This is how to tell "
+                "whether a step in any graph on any dashboard is ISE changing "
+                "or the exporter's view of ISE changing.",
+                [query(readiness_per_dataset(), "{{dataset}}")],
+            ),
+            PANEL_H,
+            HALF,
+        ),
+    ]
+
+    where = [
+        sized(
+            ranked(
+                "Failing network devices",
+                "Every network device with RADIUS errors in the window, worst "
+                "first. Complete — the table scrolls, so nothing is hidden "
+                "below a cut-off. A single device dominating this list is a "
+                "shared-secret or supplicant problem at that site, not an ISE "
+                "problem.",
+                gate(metric("ise3_radius_errors_by_nad"), "radius_errors"),
+                label="nad",
+                label_header="Network device",
+                header="Errors",
+                value_thresholds=NONZERO_WARNING,
+                colour_cells=True,
+                links=(drilldown("Isolate this device", "ise3-access",
+                                 nad=by_row("Network device")),),
+            ),
+            PANEL_H,
+            THIRD,
+        ),
+        sized(
+            ranked(
+                "Failing policy service nodes",
+                "RADIUS errors attributed to each PSN. Errors concentrated on "
+                "one PSN point at that node — resources, certificates, or its "
+                "identity-store connection. Errors spread evenly across all of "
+                "them point at policy or at the clients.",
+                gate(metric("ise3_radius_errors_by_psn"), "radius_errors"),
+                label="psn",
+                label_header="PSN",
+                header="Errors",
+                value_thresholds=NONZERO_WARNING,
+                colour_cells=True,
+                links=(drilldown("Inspect this PSN", "ise3-psn",
+                                 node=by_row("PSN")),),
+            ),
+            PANEL_H,
+            THIRD,
+        ),
+        sized(
+            ranked(
+                "Failure codes",
+                "ISE message codes behind the failures in this window, most "
+                "frequent first." + NAMED_CODES_NOTE + " The code is usually "
+                "enough to decide whether this is a client, a policy, or a "
+                "certificate problem before opening anything else.",
+                named_codes(
+                    gate(metric("ise3_radius_errors_by_message_code"),
+                         "radius_errors")),
+                label="message_code",
+                label_header="ISE message code",
+                header="Count",
+                value_thresholds=NONZERO_WARNING,
+                colour_cells=True,
+            ),
+            PANEL_H,
+            THIRD,
+        ),
+    ]
+
+    closing = [sized(about(
+        "answer, in ten seconds, whether ISE is authenticating users right now "
+        "— and nothing else.",
+        [
+            "Read the success rate. If it is green and the trust pair is 100%, "
+            "ISE is serving.",
+            "Read **Attention needed**. An empty table means nothing else is "
+            "known to be wrong.",
+            "If a row is populated, click into the dashboard named in that "
+            "panel's link rather than reading further here.",
+        ],
+        [
+            "Blank panels are not the same as zero — check **Data trustworthy** "
+            "first, then the Collection pipeline dashboard.",
+            "A change marker (purple, orange, blue) across every graph means "
+            "the exporter's view changed, not necessarily ISE.",
+        ],
+        ["RADIUS access", "PSN service", "Control plane", "Collection pipeline"],
+    ), STRIP_H, FULL)]
+
+    return assemble(
+        "ISE · Triage",
+        "ise3-triage",
+        "Tier 1. Is ISE authenticating users right now? Symptom-level only — "
+        "every panel links down into the dashboard that explains it. Open this "
+        "one first and nothing else until it points somewhere.",
+        [
+            ("Right now", now),
+            ("What is wrong", diagnosis),
+            ("Where it hurts", where),
+            ("Reference", closing, COLLAPSED),
+        ],
+        tier=TRIAGE,
     )
+
+
+# ---------------------------------------------------------------------------
+# Tier 2 — RADIUS access
+# ---------------------------------------------------------------------------
+
+ACCESS_PSN = 'psn=~"$psn"'
+ACCESS_NAD = 'nad=~"$nad"'
 
 
 def access_dashboard():
-    psn = label_variable(
-        "psn", "PSN", "ise3_radius_authentications_by_psn", "psn"
-    )
-    nad = label_variable(
-        "nad", "Network device", "ise3_radius_authentications_by_nad", "nad"
-    )
-    owner = label_variable(
-        "ops_owner",
-        "Ops owner",
-        "ise3_session_status_endpoints",
-        "ops_owner",
-    )
-    # Every NAD or PSN named on this dashboard is a place the next question is
-    # asked somewhere else, so each one is a link to where that question lives.
-    nad_series_drilldown = drilldown(
-        "This network device on Endpoints and devices",
-        "ise3-endpoints",
-        nad=by_series("nad"),
-    )
-    nad_row_drilldown = drilldown(
-        "This network device on Endpoints and devices",
-        "ise3-endpoints",
-        nad=by_row("nad"),
-    )
-    # The accounting metrics carry the device in a generic `value` label, since
-    # one metric serves every breakdown dimension, so they need their own link.
-    nad_value_drilldown = drilldown(
-        "This network device on Endpoints and devices",
-        "ise3-endpoints",
-        nad=by_series("value"),
-    )
-    psn_drilldown = drilldown(
-        "This node on PSN troubleshooting", "ise3-psn", node=by_series("psn")
-    )
-    auth = metric("ise3_radius_authentications")
-    passed = metric("ise3_radius_authentications", 'status="passed"')
-    failed = metric("ise3_radius_authentications", 'status="failed"')
-    error_nads = gate(
-        metric("ise3_radius_errors_by_nad", 'nad=~"$nad"'),
-        "radius_errors",
-    )
-    assignments = metric(
-        "ise3_network_device_assignment",
-        'nad=~"$nad",ops_owner=~"$ops_owner"',
-    )
-    # One union rather than three targets: profile, rule, and policy set share
-    # only ops_owner, so joining them into one table would pair an unrelated
-    # profile, rule, and policy set onto the same row.
-    failed_context = " or ".join(
-        "("
-        + gate(
-            metric(name, 'ops_owner=~"$ops_owner"'), "session_authorization"
-        )
-        + ")"
-        for name in (
-            "ise3_session_failed_authz_profile_endpoints",
-            "ise3_session_failed_authz_rule_endpoints",
-            "ise3_session_failed_policy_set_endpoints",
-        )
-    )
+    service = [
+        sized(
+            stat_panel(
+                "Success rate",
+                "Share of RADIUS authentications in the reporting window that "
+                "passed — the R and the E of RED for this service. Compare it "
+                "against what this deployment normally does before treating "
+                "amber as an incident.",
+                [instant(AUTH_SUCCESS_RATE)],
+                unit="percentunit",
+                thresholds=RATIO_HIGH_IS_GOOD,
+                minimum=0,
+                maximum=1,
+                sparkline=True,
+                no_value=NO_DATA_STALE,
+            ),
+            STAT_H,
+            FIFTH,
+        ),
+        sized(
+            stat_panel(
+                "Authentications",
+                "Total RADIUS authentications MnT recorded in the reporting "
+                "window — the rate half of RED. A collapse here with a healthy "
+                "success rate means clients stopped asking, which is a network "
+                "or supplicant story rather than an ISE one.",
+                [instant(AUTH_TOTAL)],
+                thresholds=NEUTRAL,
+                sparkline=True,
+                no_value=NO_DATA_STALE,
+            ),
+            STAT_H,
+            FIFTH,
+        ),
+        sized(
+            stat_panel(
+                "Failed",
+                "Failed RADIUS authentications in the reporting window. The "
+                "work queue below breaks this number down by device and "
+                "method; the error-code table says why each one failed.",
+                [instant(AUTH_FAILED)],
+                thresholds=NEUTRAL,
+                sparkline=True,
+                no_value=NO_DATA_STALE,
+            ),
+            STAT_H,
+            FIFTH,
+        ),
+        sized(
+            stat_panel(
+                "Endpoints and window",
+                "How many distinct endpoints authenticated, and how long the "
+                "reporting scan window is. Every count on this page is over "
+                "that window — read it before quoting any of them. Many "
+                "authentications from few endpoints is a retry loop, and the "
+                "ratio is the cheapest way to spot one.",
+                [
+                    instant(summed(gate(metric("ise3_radius_distinct_endpoints_total"),
+                                        "radius_reporting")), "endpoints"),
+                    instant(gate(metric("ise3_radius_reporting_window_seconds"),
+                                 "radius_reporting"), "window", ref="B"),
+                ],
+                thresholds=NEUTRAL,
+                overrides=[by_ref("B", unit="s")],
+                no_value=NO_DATA_STALE,
+            ),
+            STAT_H,
+            EIGHTH,
+        ),
+    ] + trust_pair(("radius_reporting", "radius_errors"), span=EIGHTH)
+
+    over_time = [
+        sized(
+            ts(
+                "Authentication outcome over time",
+                "Passed and failed authentications stacked, because together "
+                "they are the window's whole traffic. The shape of the failure "
+                "band is the diagnosis: a step means something changed, a ramp "
+                "means something is degrading, a spike means a retry storm.",
+                [
+                    query(AUTH_PASSED, "passed"),
+                    query(AUTH_FAILED, "failed", ref="B"),
+                ],
+                stacked=True,
+                series_colours=OUTCOME_COLOURS,
+            ),
+            PANEL_H,
+            HALF,
+        ),
+        sized(
+            ts(
+                "Authentication latency by PSN",
+                "Mean RADIUS authentication latency each PSN recorded, "
+                "filtered by the PSN variable. One node diverging from the "
+                "others is that node's problem; all of them rising together is "
+                "the identity store or the network path to it.",
+                [query(
+                    gate(metric("ise3_radius_authentication_latency_seconds",
+                                ACCESS_PSN), "radius_reporting"),
+                    "{{psn}}")],
+                unit="s",
+                thresholds=LATENCY_SECONDS,
+            ),
+            PANEL_H,
+            HALF,
+        ),
+    ]
+
+    isolation = [
+        sized(
+            tbl(
+                "Failure work queue",
+                "Every network device and authentication method pairing that "
+                "produced failures in the window, worst first. This is the "
+                "list to work through: each row is one concrete thing to go "
+                "and look at, and the device column links into a filtered view "
+                "of this same dashboard.",
+                [instant(gate(metric("ise3_radius_failures_by_nad_method",
+                                     f"{ACCESS_NAD}"), "radius_reporting"))],
+                columns=["Failures"],
+                sort=("Failures", True),
+                labels={"nad": "Network device", "method": "Method"},
+                column_overrides=[
+                    by_column("Failures", thresholds=NONZERO_WARNING,
+                              colour_cells=True, width=120),
+                    by_column("Network device", links=[
+                        drilldown("Filter to this device", "ise3-access",
+                                  nad=by_row("Network device"))]),
+                ],
+            ),
+            TALL_H,
+            HALF,
+        ),
+        sized(
+            ranked(
+                "Failure codes",
+                "ISE message codes behind the failures, most frequent first." +
+                NAMED_CODES_NOTE + " Read this before the work queue when the "
+                "failures are spread across many devices: one dominant code "
+                "usually explains all of them at once.",
+                named_codes(gate(metric("ise3_radius_errors_by_message_code"),
+                                 "radius_errors")),
+                label="message_code",
+                label_header="ISE message code",
+                header="Count",
+                value_thresholds=NONZERO_WARNING,
+                colour_cells=True,
+            ),
+            TALL_H,
+            HALF,
+        ),
+        sized(
+            ts(
+                "Failure codes over time",
+                "The same codes as a rate, with the error dataset's own total "
+                "drawn over them. A code that appears at one instant and stops "
+                "is an event; one that persists is a configuration problem "
+                "nobody has fixed yet. A total well above the sum of the named "
+                "codes means most failures carry a code this exporter cannot "
+                "name." + NAMED_CODES_NOTE,
+                [
+                    query(named_codes(gate(metric("ise3_radius_errors_by_message_code"),
+                                           "radius_errors")),
+                          "{{message_code}}"),
+                    query(summed(gate(metric("ise3_radius_errors_total"),
+                                      "radius_errors")),
+                          "all errors", ref="B"),
+                ],
+                legend_placement="right",
+            ),
+            PANEL_H,
+            HALF,
+        ),
+        sized(
+            ranked(
+                "Failure classes",
+                "Failures grouped into the class of thing that went wrong — "
+                "credentials, certificate or TLS, identity, timeout, policy "
+                "denial — derived by the exporter from the failure reason "
+                "string. The fastest way to decide which team owns the "
+                "problem.",
+                gate(metric("ise3_radius_failure_summary",
+                            'dimension="failure_class"'), "radius_reporting"),
+                label="value",
+                label_header="Failure class",
+                header="Failures",
+                value_thresholds=NONZERO_WARNING,
+                colour_cells=True,
+            ),
+            PANEL_H,
+            HALF,
+        ),
+        sized(
+            ranked(
+                "Errors by PSN",
+                "RADIUS errors attributed to each policy service node. "
+                "Concentration on one node is that node's problem; an even "
+                "spread is policy or clients. Links into the PSN dashboard "
+                "for the node's own resources and latency.",
+                gate(metric("ise3_radius_errors_by_psn", ACCESS_PSN),
+                     "radius_errors"),
+                label="psn",
+                label_header="PSN",
+                header="Errors",
+                value_thresholds=NONZERO_WARNING,
+                colour_cells=True,
+                links=(drilldown("Inspect this PSN", "ise3-psn",
+                                 node=by_row("PSN")),),
+            ),
+            PANEL_H,
+            THIRD,
+        ),
+        sized(
+            ranked(
+                "Errors by method",
+                "Which authentication methods are failing. A method-specific "
+                "failure is nearly always certificates, supplicant "
+                "configuration, or an identity store that does not support "
+                "what the client is offering.",
+                gate(metric("ise3_radius_errors_by_method"), "radius_errors"),
+                label="method",
+                label_header="Method",
+                header="Errors",
+                value_thresholds=NONZERO_WARNING,
+                colour_cells=True,
+            ),
+            PANEL_H,
+            THIRD,
+        ),
+        sized(
+            ranked(
+                "Failures by location",
+                "Failures grouped by the location attribute of the network "
+                "device, when ISE's schema carries one. A location that "
+                "dominates points at a site-wide cause — a switch template, a "
+                "shared secret, an upstream outage — rather than at ISE.",
+                gate(metric("ise3_radius_failure_summary", 'dimension="location"'),
+                     "radius_reporting"),
+                label="value",
+                label_header="Location",
+                header="Failures",
+                value_thresholds=NONZERO_WARNING,
+                colour_cells=True,
+            ),
+            PANEL_H,
+            THIRD,
+        ),
+    ]
+
+    dimensions = [
+        sized(
+            ranked(
+                "By method",
+                "Every authentication method in use and how much traffic each "
+                "carries, passed and failed together. Read it to know what the "
+                "estate actually runs before changing a policy that assumes "
+                "otherwise.",
+                summed(gate(metric("ise3_radius_authentications_by_method"),
+                            "radius_reporting"), by="instance,method"),
+                label="method",
+                label_header="Method",
+                header="Authentications",
+            ),
+            PANEL_H,
+            THIRD,
+        ),
+        sized(
+            ranked(
+                "By protocol",
+                "Authentication volume by RADIUS protocol. Useful when a "
+                "protocol is being retired: this is the panel that proves "
+                "whether anything still uses it.",
+                summed(gate(metric("ise3_radius_authentications_by_protocol"),
+                            "radius_reporting"), by="instance,protocol"),
+                label="protocol",
+                label_header="Protocol",
+                header="Authentications",
+            ),
+            PANEL_H,
+            THIRD,
+        ),
+        sized(
+            ranked(
+                "By authorization policy",
+                "Which authorization policies are being matched, and how "
+                "often. A policy with no traffic is either dead or shadowed by "
+                "one above it; either way it is worth knowing before an audit "
+                "asks.",
+                summed(gate(metric("ise3_radius_authentications_by_policy"),
+                            "radius_reporting"), by="instance,policy"),
+                label="policy",
+                label_header="Authorization policy",
+                header="Authentications",
+            ),
+            PANEL_H,
+            THIRD,
+        ),
+        sized(
+            ts(
+                "Authentication rate per PSN",
+                "Authentication volume each PSN is carrying over time, "
+                "filtered by the PSN variable. Divergence between nodes that "
+                "should be load-balanced equally is a load-balancer or "
+                "network-device configuration problem.",
+                [query(summed(gate(metric("ise3_radius_authentications_by_psn",
+                                          ACCESS_PSN), "radius_reporting"),
+                              by="instance,psn"),
+                       "{{psn}}")],
+            ),
+            PANEL_H,
+            HALF,
+        ),
+        sized(
+            ranked(
+                "By network device",
+                "Authentication volume per network device, complete and sorted. "
+                "Read beside the failure work queue: a device high in both is "
+                "busy and broken, a device high only here is just busy.",
+                summed(gate(metric("ise3_radius_authentications_by_nad",
+                                   ACCESS_NAD), "radius_reporting"),
+                       by="instance,nad"),
+                label="nad",
+                label_header="Network device",
+                header="Authentications",
+            ),
+            PANEL_H,
+            HALF,
+        ),
+    ]
+
+    authorization = [
+        sized(
+            ranked(
+                "Endpoint status by owner",
+                "Live authorization status of currently connected endpoints, "
+                "grouped by the operations owner attribute. This is the "
+                "current state of the network rather than the window's "
+                "history, so it answers 'who is affected right now'.",
+                summed(gate(metric("ise3_session_status_endpoints"),
+                            "session_authorization"),
+                       by="instance,ops_owner,status"),
+                label="ops_owner",
+                label_header="Operations owner",
+                header="Endpoints",
+            ),
+            PANEL_H,
+            THIRD,
+        ),
+        sized(
+            ranked(
+                "Live failure reasons",
+                "Failure reason codes attached to endpoints that are failing "
+                "authorization right now, from the live session table rather "
+                "than the reporting window. The complement to the historical "
+                "error codes above.",
+                summed(gate(metric("ise3_session_failure_reason_endpoints"),
+                            "session_authorization"),
+                       by="instance,reason_code"),
+                label="reason_code",
+                label_header="Reason code",
+                header="Endpoints",
+                value_thresholds=NONZERO_WARNING,
+                colour_cells=True,
+            ),
+            PANEL_H,
+            THIRD,
+        ),
+        sized(
+            ranked(
+                "Failed authorization profiles",
+                "Authorization profiles that endpoints matched on their way to "
+                "failing. A profile appearing here that should never fail is "
+                "usually a missing attribute or a broken downloadable ACL.",
+                summed(gate(metric("ise3_session_failed_authz_profile_endpoints"),
+                            "session_authorization"),
+                       by="instance,authz_profile"),
+                label="authz_profile",
+                label_header="Authorization profile",
+                header="Endpoints",
+                value_thresholds=NONZERO_WARNING,
+                colour_cells=True,
+            ),
+            PANEL_H,
+            THIRD,
+        ),
+        sized(
+            ranked(
+                "Failed authorization rules",
+                "The authorization rules those failing endpoints matched. Read "
+                "with the profiles panel: rule plus profile is enough to find "
+                "the policy line responsible.",
+                summed(gate(metric("ise3_session_failed_authz_rule_endpoints"),
+                            "session_authorization"),
+                       by="instance,authz_rule"),
+                label="authz_rule",
+                label_header="Authorization rule",
+                header="Endpoints",
+                value_thresholds=NONZERO_WARNING,
+                colour_cells=True,
+            ),
+            PANEL_H,
+            HALF,
+        ),
+        sized(
+            ranked(
+                "Failed policy sets",
+                "Policy sets containing the failures. A single policy set "
+                "carrying every failure narrows the search to one branch of "
+                "the policy tree.",
+                summed(gate(metric("ise3_session_failed_policy_set_endpoints"),
+                            "session_authorization"),
+                       by="instance,policy_set"),
+                label="policy_set",
+                label_header="Policy set",
+                header="Endpoints",
+                value_thresholds=NONZERO_WARNING,
+                colour_cells=True,
+            ),
+            PANEL_H,
+            HALF,
+        ),
+        sized(
+            ranked(
+                "Selected authorization profiles",
+                "The authorization profiles endpoints are actually landing on "
+                "right now, successful ones included. The failure tables above "
+                "say what went wrong; this one says what normally happens, "
+                "which is what you need to know a change did what was "
+                "intended.",
+                summed(gate(metric("ise3_session_authz_profile_endpoints"),
+                            "session_authorization"),
+                       by="instance,authz_profile"),
+                label="authz_profile",
+                label_header="Authorization profile",
+                header="Endpoints",
+            ),
+            PANEL_H,
+            THIRD,
+        ),
+        sized(
+            ranked(
+                "Matched authorization rules",
+                "Which authorization rules live sessions matched. A rule with "
+                "no traffic is dead or shadowed; a catch-all rule with most of "
+                "the traffic means the specific rules above it are not "
+                "matching.",
+                summed(gate(metric("ise3_session_authz_rule_endpoints"),
+                            "session_authorization"),
+                       by="instance,authz_rule"),
+                label="authz_rule",
+                label_header="Authorization rule",
+                header="Endpoints",
+            ),
+            PANEL_H,
+            THIRD,
+        ),
+        sized(
+            ranked(
+                "Matched policy sets",
+                "Which policy set each live session was evaluated in. An "
+                "unexpected distribution here is a policy-set condition "
+                "problem, and it explains authorization results that look "
+                "wrong for reasons no individual rule accounts for.",
+                summed(gate(metric("ise3_session_policy_set_endpoints"),
+                            "session_authorization"),
+                       by="instance,policy_set"),
+                label="policy_set",
+                label_header="Policy set",
+                header="Endpoints",
+            ),
+            PANEL_H,
+            THIRD,
+        ),
+        sized(
+            ranked(
+                "Live authentication methods",
+                "Authentication methods in use by currently connected "
+                "endpoints, from the live session list rather than the "
+                "reporting window. The 'what is on the network now' complement "
+                "to the historical method breakdown.",
+                summed(gate(metric("ise3_session_auth_method_endpoints"),
+                            "session_authorization"),
+                       by="instance,method"),
+                label="method",
+                label_header="Method",
+                header="Endpoints",
+            ),
+            PANEL_H,
+            HALF,
+        ),
+        sized(
+            ranked(
+                "Live sessions by owner",
+                "Live session count grouped by the operations owner attribute "
+                "of the network device. Turns a session number into a list of "
+                "teams — the fastest way to work out who to tell during an "
+                "access incident.",
+                gate(metric("ise3_active_sessions_by_ops_owner"), "active_sessions"),
+                label="ops_owner",
+                label_header="Operations owner",
+                header="Sessions",
+            ),
+            PANEL_H,
+            HALF,
+        ),
+        sized(
+            tbl(
+                "Policy sets by network device",
+                "Which policy set each network device's live sessions matched. "
+                "A device landing in an unexpected policy set is a device "
+                "group, location, or NAD attribute problem. Bounded by the "
+                "exporter's top-devices limit; the coverage panel on the "
+                "pipeline dashboard says how much is shown.",
+                [instant(gate(metric("ise3_session_policy_set_endpoints_by_nad",
+                                     ACCESS_NAD), "session_authorization"))],
+                columns=["Endpoints"],
+                sort=("Endpoints", True),
+                labels={"nad": "Network device", "policy_set": "Policy set"},
+            ),
+            PANEL_H,
+            FULL,
+        ),
+    ]
+
+    accounting = [
+        sized(
+            stat_panel(
+                "Accounting starts and stops",
+                "RADIUS accounting starts against stops in the scan window. "
+                "Persistently more starts than stops means sessions are not "
+                "being torn down cleanly, which inflates the live session "
+                "count and eventually the licence consumption.",
+                [
+                    instant(summed(gate(metric("ise3_radius_accounting_events",
+                                               'dimension="total",event_type="starts"'),
+                                        "radius_accounting")), "starts"),
+                    instant(summed(gate(metric("ise3_radius_accounting_events",
+                                               'dimension="total",event_type="stops"'),
+                                        "radius_accounting")), "stops", ref="B"),
+                ],
+                thresholds=NEUTRAL,
+                no_value=NO_DATA_STALE,
+            ),
+            STAT_H,
+            THIRD,
+        ),
+        sized(
+            stat_panel(
+                "Duration coverage and scan window",
+                "Share of accounting records that carried a usable session "
+                "duration, and how long the accounting scan window is. The "
+                "duration panels are only as meaningful as the coverage "
+                "figure: low coverage means the averages beside it are drawn "
+                "from a minority of sessions.",
+                [
+                    instant(summed(gate(metric("ise3_radius_accounting_duration_coverage",
+                                               'dimension="total"'),
+                                        "radius_accounting")), "coverage"),
+                    instant(gate(metric("ise3_radius_accounting_window_seconds"),
+                                 "radius_accounting"), "window", ref="B"),
+                ],
+                unit="percentunit",
+                thresholds=COVERAGE,
+                overrides=[by_ref("B", unit="s", thresholds=NEUTRAL)],
+                no_value=NO_DATA_STALE,
+            ),
+            STAT_H,
+            THIRD,
+        ),
+        sized(
+            stat_panel(
+                "Mean session duration",
+                "Average completed session length across the accounting scan "
+                "window. A collapse here alongside steady authentication "
+                "volume is the classic signature of a flapping link or an "
+                "aggressive session timeout.",
+                [instant(gate(metric("ise3_radius_accounting_session_duration_seconds",
+                                     'dimension="total",statistic="mean"'),
+                              "radius_accounting"))],
+                unit="s",
+                thresholds=NEUTRAL,
+                no_value=NO_DATA_STALE,
+            ),
+            STAT_H,
+            THIRD,
+        ),
+        sized(
+            ts(
+                "Accounting events by PSN",
+                "Accounting starts and stops each PSN is processing. Uneven "
+                "distribution here but even authentication distribution means "
+                "network devices are pointing accounting somewhere different "
+                "from authentication.",
+                [query(summed(gate(metric("ise3_radius_accounting_events",
+                                          'dimension="psn"'), "radius_accounting"),
+                              by="instance,value,event_type"),
+                       "{{value}} · {{event_type}}")],
+            ),
+            PANEL_H,
+            HALF,
+        ),
+        sized(
+            ranked(
+                "Accounting volume by network device",
+                "Accounting records per network device across the scan window, "
+                "complete and sorted. A device sending far more accounting "
+                "than authentication traffic is usually re-authenticating or "
+                "sending interim updates too aggressively.",
+                summed(gate(metric("ise3_radius_accounting_events",
+                                   'dimension="nad"'), "radius_accounting"),
+                       by="instance,value"),
+                label="value",
+                label_header="Network device",
+                header="Records",
+            ),
+            PANEL_H,
+            HALF,
+        ),
+    ]
+
+    closing = [sized(about(
+        "explain why RADIUS authentications are failing, once triage has said "
+        "that they are.",
+        [
+            "Confirm the success rate and the trust pair at the top.",
+            "Read **Failure codes** first — one dominant code often explains "
+            "everything below it.",
+            "Work the **Failure work queue** row by row; each row is one "
+            "device and method to go and look at.",
+            "Use the PSN and Network device variables to narrow the whole page "
+            "to one suspect.",
+        ],
+        [
+            "Errors on one PSN only: continue on the PSN service dashboard.",
+            "Errors on one device only: check its shared secret and the "
+            "supplicant configuration at that site.",
+            "Certificate or TLS failure classes: continue on the Control plane "
+            "dashboard's certificate panels.",
+        ],
+        ["Triage", "PSN service", "Control plane", "Endpoints"],
+    ), STRIP_H, FULL)]
+
     return assemble(
-        "ISE 3 — Access Troubleshooting",
+        "ISE · RADIUS access",
         "ise3-access",
-        "RADIUS outcomes, latency, errors, active sessions, and the live "
-        "authorization decisions needed to troubleshoot access failures.",
-        (
-            (
-                "Outcome and volume",
-                (
-                    sized(
-                        stat_panel(
-                            "Dataset readiness",
-                            "Freshness of reporting, accounting, error, live-session, "
-                            "and session-authorization datasets used below. NOT "
-                            "READY means the panels fed by that dataset stay blank.",
-                            [
-                                instant(ready_bool("radius_reporting"), "reporting"),
-                                instant(ready_bool("radius_errors"), "errors", "B"),
-                                instant(
-                                    ready_bool("active_sessions"), "sessions", "C"
-                                ),
-                                instant(
-                                    ready_bool("session_authorization"),
-                                    "authorization",
-                                    "D",
-                                ),
-                                instant(
-                                    ready_bool("radius_accounting"),
-                                    "accounting",
-                                    "E",
-                                ),
-                            ],
-                            mappings=READINESS,
-                            no_value=NO_DATA_EXPORTER,
-                        ),
-                        5,
-                        8,
-                    ),
-                    sized(
-                        stat_panel(
-                            "Pass rate",
-                            "Passed authentications divided by all authentication "
-                            "outcomes in the current reporting window.",
-                            [
-                                instant(
-                                    f"sum({gate(passed, 'radius_reporting')}) / "
-                                    f"clamp_min(sum({gate(auth, 'radius_reporting')}), 1)",
-                                    "pass rate",
-                                )
-                            ],
-                            unit="percentunit",
-                            thresholds=RATIO_HIGH_IS_GOOD,
-                            minimum=0,
-                            maximum=1,
-                            no_value=NO_DATA_STALE,
-                        ),
-                        5,
-                        8,
-                    ),
-                    sized(
-                        stat_panel(
-                            "Collection age",
-                            "Seconds since the most recent successful "
-                            "authentication, accounting, and error snapshots.",
-                            [
-                                instant(
-                                    "time() - "
-                                    + metric(
-                                        "ise3_dataset_last_success_timestamp",
-                                        'dataset="radius_reporting"',
-                                    ),
-                                    "authentication",
-                                ),
-                                instant(
-                                    "time() - "
-                                    + metric(
-                                        "ise3_dataset_last_success_timestamp",
-                                        'dataset="radius_accounting"',
-                                    ),
-                                    "accounting",
-                                    "B",
-                                ),
-                                instant(
-                                    "time() - "
-                                    + metric(
-                                        "ise3_dataset_last_success_timestamp",
-                                        'dataset="radius_errors"',
-                                    ),
-                                    "errors",
-                                    "C",
-                                ),
-                            ],
-                            unit="s",
-                        ),
-                        5,
-                        8,
-                    ),
-                    sized(
-                        stat_panel(
-                            "Reporting windows",
-                            "Exact time span each window gauge on this dashboard "
-                            "represents. Authentication and accounting totals are "
-                            "not counters: they are the volume seen in these "
-                            "windows, so a total only means what the window says.",
-                            [
-                                instant(
-                                    metric("ise3_radius_reporting_window_seconds"),
-                                    "authentication window",
-                                ),
-                                instant(
-                                    metric("ise3_radius_accounting_window_seconds"),
-                                    "accounting window",
-                                    "B",
-                                ),
-                            ],
-                            unit="s",
-                            no_value=NO_DATA_EXPORTER,
-                        ),
-                        5,
-                        8,
-                    ),
-                    sized(
-                        stat_panel(
-                            "Failed authentications",
-                            "Exact failed-authentication total for the reporting "
-                            "window, independent of dimensional breakdowns.",
-                            [
-                                instant(
-                                    f"sum({gate(failed, 'radius_reporting')})",
-                                    "failed",
-                                )
-                            ],
-                            no_value=NO_DATA_STALE,
-                        ),
-                        5,
-                        8,
-                    ),
-                    sized(
-                        stat_panel(
-                            "Repeat authentication intensity",
-                            "Authentication attempts divided by distinct "
-                            "authenticating endpoints in the same exact reporting "
-                            "window; values above one identify repeated attempts.",
-                            [
-                                instant(
-                                    f"sum({gate(auth, 'radius_reporting')}) / "
-                                    "clamp_min(sum("
-                                    + gate(
-                                        metric(
-                                            "ise3_radius_distinct_endpoints_total"
-                                        ),
-                                        "radius_reporting",
-                                    )
-                                    + "), 1)",
-                                    "attempts per endpoint",
-                                )
-                            ],
-                            no_value=NO_DATA_STALE,
-                        ),
-                        5,
-                        8,
-                    ),
-                    sized(
-                        ts(
-                            "Authentication outcome",
-                            "Passed and failed authentication totals over time; "
-                            "these are window gauges rather than event counters.",
-                            [
-                                query(
-                                    gate(auth, "radius_reporting"),
-                                    "{{status}}",
-                                )
-                            ],
-                        )
-                    ),
-                    sized(
-                        ts(
-                            "Active sessions and endpoints",
-                            "Current session count and distinct endpoints holding "
-                            "sessions from the active live-session provider.",
-                            [
-                                query(
-                                    gate(
-                                        metric("ise3_active_sessions_total"),
-                                        "active_sessions",
-                                    ),
-                                    "{{provider}} sessions",
-                                ),
-                                query(
-                                    gate(
-                                        metric("ise3_active_session_endpoints"),
-                                        "active_sessions",
-                                    ),
-                                    "{{provider}} endpoints",
-                                    ref="B",
-                                ),
-                            ],
-                        )
-                    ),
-                ),
-            ),
-            (
-                "Failure isolation",
-                (
-                    sized(
-                        stat_panel(
-                            "RADIUS errors",
-                            "Exact number of error-view rows in the current "
-                            "reporting window from the selected provider.",
-                            [
-                                instant(
-                                    f"sum({gate(metric('ise3_radius_errors_total'), 'radius_errors')})",
-                                    "errors",
-                                )
-                            ],
-                            no_value=NO_DATA_STALE,
-                        ),
-                        5,
-                        12,
-                    ),
-                    sized(
-                        stat_panel(
-                            "Certificate and PKI errors",
-                            "RADIUS error events carrying ISE message codes "
-                            "associated with certificate validation, trust, or "
-                            "public-key infrastructure failures.",
-                            [
-                                instant(
-                                    "sum("
-                                    + gate(
-                                        metric(
-                                            "ise3_radius_errors_by_message_code",
-                                            "message_code=~\""
-                                            + "|".join(PKI_MESSAGE_CODES)
-                                            + "\"",
-                                        ),
-                                        "radius_errors",
-                                    )
-                                    + ")",
-                                    "PKI errors",
-                                )
-                            ],
-                            thresholds=NONZERO_WARNING,
-                            no_value=NO_DATA_STALE,
-                        ),
-                        5,
-                        12,
-                    ),
-                    sized(
-                        bar(
-                            "Top error codes",
-                            "ISE message-code distribution for the current error "
-                            "window, sorted from most to least frequent."
-                            + NAMED_CODES_NOTE,
-                            [
-                                instant(
-                                    "sort_desc("
-                                    + named_codes(
-                                        "sum by (message_code) "
-                                        f"({gate(metric('ise3_radius_errors_by_message_code'), 'radius_errors')})"
-                                    )
-                                    + ")",
-                                    "{{message_code}}",
-                                )
-                            ],
-                        )
-                    ),
-                    sized(
-                        ts(
-                            "Errors by message code over time",
-                            "When did this error start: the same message-code "
-                            "distribution as the bar above, plotted over time. "
-                            "These are window gauges rather than counters, so a "
-                            "line is the volume seen in each reporting window and "
-                            "its onset is the moment the failure began."
-                            + NAMED_CODES_NOTE,
-                            [
-                                query(
-                                    named_codes(
-                                        "sum by (message_code) "
-                                        f"({gate(metric('ise3_radius_errors_by_message_code'), 'radius_errors')})"
-                                    ),
-                                    "{{message_code}}",
-                                )
-                            ],
-                        )
-                    ),
-                    sized(
-                        bar(
-                            "Failure classes",
-                            "Historical failed authentications classified into "
-                            "bounded operational causes from ISE failure text.",
-                            [
-                                instant(
-                                    "sort_desc("
-                                    + gate(
-                                        metric(
-                                            "ise3_radius_failure_summary",
-                                            'dimension="failure_class"',
-                                        ),
-                                        "radius_reporting",
-                                    )
-                                    + ")",
-                                    "{{value}}",
-                                )
-                            ],
-                        )
-                    ),
-                    sized(
-                        ts(
-                            "Failure classes over time",
-                            "When did this class of failure start: the bounded "
-                            "operational causes from the bar above, plotted over "
-                            "time. The window gauge makes onset and recovery "
-                            "visible, which a single current value cannot show.",
-                            [
-                                query(
-                                    gate(
-                                        metric(
-                                            "ise3_radius_failure_summary",
-                                            'dimension="failure_class"',
-                                        ),
-                                        "radius_reporting",
-                                    ),
-                                    "{{value}}",
-                                )
-                            ],
-                        )
-                    ),
-                    sized(
-                        bar(
-                            "Failed authorization and identity summary",
-                            "Historical failed authentications by authorization "
-                            "profile, identity store/group, device type, and "
-                            "security group. These are marginals and are not "
-                            "additive across dimensions.",
-                            [
-                                instant(
-                                    "sort_desc("
-                                    + gate(
-                                        metric(
-                                            "ise3_radius_failure_summary",
-                                            'dimension=~"authorization_profile|identity_store|identity_group|device_type|security_group"',
-                                        ),
-                                        "radius_reporting",
-                                    )
-                                    + ")",
-                                    "{{dimension}} · {{value}}",
-                                )
-                            ],
-                        )
-                    ),
-                    sized(
-                        bar(
-                            "Failing network devices",
-                            capped(
-                                "Network devices represented in the RADIUS "
-                                "error view, worst first.",
-                                "The complete per-device error list, including "
-                                "every low-volume device, is the \"RADIUS "
-                                "failure work queue\" table below.",
-                            ),
-                            [
-                                instant(
-                                    "sort_desc("
-                                    + top(
-                                        "sum by (nad) "
-                                        "("
-                                        + gate(
-                                            metric(
-                                                "ise3_radius_errors_by_nad",
-                                                'nad=~"$nad"',
-                                            ),
-                                            "radius_errors",
-                                        )
-                                        + ")"
-                                    )
-                                    + ")",
-                                    "{{nad}}",
-                                )
-                            ],
-                            data_links=(nad_series_drilldown,),
-                        )
-                    ),
-                    sized(
-                        bar(
-                            "Failure methods",
-                            "Authentication methods represented in RADIUS errors, "
-                            "which separates protocol issues from device issues.",
-                            [
-                                instant(
-                                    "sort_desc(sum by (method) "
-                                    f"({gate(metric('ise3_radius_errors_by_method'), 'radius_errors')}))",
-                                    "{{method}}",
-                                )
-                            ],
-                        )
-                    ),
-                    sized(
-                        bar(
-                            "Authentication methods at failing NADs",
-                            "The deliberately bounded NAD-by-method failure "
-                            "correlation. Unlike separate marginals, this retains "
-                            "which method failed at which network device.",
-                            [
-                                instant(
-                                    "sort_desc("
-                                    + gate(
-                                        metric(
-                                            "ise3_radius_failures_by_nad_method",
-                                            'nad=~"$nad"',
-                                        ),
-                                        "radius_reporting",
-                                    )
-                                    + ")",
-                                    "{{nad}} · {{method}}",
-                                )
-                            ],
-                        )
-                    ),
-                    sized(
-                        stat_panel(
-                            "Failure-context coverage",
-                            "Published versus existing NAD-by-method failure "
-                            "groups, making the troubleshooting bound explicit.",
-                            [
-                                instant(
-                                    metric(
-                                        "ise3_topk_groups_returned",
-                                        'dataset="radius_reporting",breakdown="failure_context"',
-                                    ),
-                                    "published",
-                                ),
-                                instant(
-                                    metric(
-                                        "ise3_topk_groups_total",
-                                        'dataset="radius_reporting",breakdown="failure_context"',
-                                    ),
-                                    "total",
-                                    "B",
-                                ),
-                                instant(
-                                    metric(
-                                        "ise3_topk_truncated",
-                                        'dataset="radius_reporting",breakdown="failure_context"',
-                                    ),
-                                    "truncated",
-                                    "C",
-                                ),
-                            ],
-                            overrides=(
-                                by_ref(
-                                    "C",
-                                    mappings=TRUNCATED,
-                                    thresholds=NONZERO_WARNING,
-                                ),
-                            ),
-                        ),
-                        5,
-                        12,
-                    ),
-                    sized(
-                        bar(
-                            "Errors by PSN",
-                            "RADIUS error volume by policy service node for the "
-                            "currently selected PSN scope.",
-                            [
-                                instant(
-                                    "sort_desc(sum by (psn) "
-                                    "("
-                                    + gate(
-                                        metric(
-                                            "ise3_radius_errors_by_psn",
-                                            'psn=~"$psn"',
-                                        ),
-                                        "radius_errors",
-                                    )
-                                    + "))",
-                                    "{{psn}}",
-                                )
-                            ],
-                            data_links=(psn_drilldown,),
-                        )
-                    ),
-                    sized(
-                        bar(
-                            "Failure locations",
-                            "RADIUS error volume joined to authoritative NAD "
-                            "location assignments for operational routing.",
-                            [
-                                instant(
-                                    "sort_desc(sum by (location) (("
-                                    + error_nads
-                                    + ") * on(instance,nad) "
-                                    "group_left(location) ("
-                                    + assignments
-                                    + ")))",
-                                    "{{location}}",
-                                )
-                            ],
-                        )
-                    ),
-                    sized(
-                        bar(
-                            "Errors by ops owner",
-                            "RADIUS error volume joined to the operations group "
-                            "responsible for each network device.",
-                            [
-                                instant(
-                                    "sort_desc(sum by (ops_owner) (("
-                                    + error_nads
-                                    + ") * on(instance,nad) "
-                                    "group_left(ops_owner) ("
-                                    + assignments
-                                    + ")))",
-                                    "{{ops_owner}}",
-                                )
-                            ],
-                        )
-                    ),
-                    sized(
-                        tbl(
-                            "RADIUS failure work queue",
-                            "Per-NAD error evidence enriched with location and "
-                            "ops owner so each failure can be routed directly.",
-                            [
-                                instant(
-                                    "sort_desc(("
-                                    + error_nads
-                                    + ") * on(instance,nad) "
-                                    "group_left(location,ops_owner) ("
-                                    + assignments
-                                    + "))",
-                                    "{{nad}} · {{location}} · {{ops_owner}}",
-                                )
-                            ],
-                            columns=("errors",),
-                            column_overrides=(
-                                by_column("nad", links=(nad_row_drilldown,)),
-                            ),
-                        )
-                    ),
-                ),
-            ),
-            (
-                "Authentication dimensions",
-                (
-                    sized(
-                        bar(
-                            "Authentication methods",
-                            "Complete authentication-method marginal split by "
-                            "outcome for the current reporting window.",
-                            [
-                                instant(
-                                    "sort_desc(sum by (method,status) "
-                                    f"({gate(metric('ise3_radius_authentications_by_method'), 'radius_reporting')}))",
-                                    "{{method}} · {{status}}",
-                                )
-                            ],
-                        )
-                    ),
-                    sized(
-                        bar(
-                            "Authentication protocols",
-                            "Complete protocol marginal split by outcome without "
-                            "a top-K tail that could hide quiet protocols.",
-                            [
-                                instant(
-                                    "sort_desc(sum by (protocol,status) "
-                                    f"({gate(metric('ise3_radius_authentications_by_protocol'), 'radius_reporting')}))",
-                                    "{{protocol}} · {{status}}",
-                                )
-                            ],
-                        )
-                    ),
-                    sized(
-                        bar(
-                            "Authorization policies",
-                            "Matched authorization-policy volume by outcome from "
-                            "the raw authentication reporting view.",
-                            [
-                                instant(
-                                    "sort_desc(sum by (policy,status) "
-                                    f"({gate(metric('ise3_radius_authentications_by_policy'), 'radius_reporting')}))",
-                                    "{{policy}} · {{status}}",
-                                )
-                            ],
-                        )
-                    ),
-                    sized(
-                        bar(
-                            "Authentication by PSN",
-                            "Authentication volume by policy service node and "
-                            "outcome, scoped by the selected PSN variable.",
-                            [
-                                instant(
-                                    "sort_desc(sum by (psn,status) "
-                                    "("
-                                    + gate(
-                                        metric(
-                                            "ise3_radius_authentications_by_psn",
-                                            'psn=~"$psn"',
-                                        ),
-                                        "radius_reporting",
-                                    )
-                                    + "))",
-                                    "{{psn}} · {{status}}",
-                                )
-                            ],
-                            data_links=(psn_drilldown,),
-                        )
-                    ),
-                    sized(
-                        ts(
-                            "Authentication rate per PSN",
-                            "Rolling-window authentication volume divided by the "
-                            "exact represented window, preserving passed and "
-                            "failed outcomes per selected PSN.",
-                            [
-                                query(
-                                    gate(
-                                        metric(
-                                            "ise3_radius_authentications_by_psn",
-                                            'psn=~"$psn"',
-                                        ),
-                                        "radius_reporting",
-                                    )
-                                    + " / on(instance,provider) group_left "
-                                    + metric(
-                                        "ise3_radius_reporting_window_seconds"
-                                    ),
-                                    "{{psn}} · {{status}}",
-                                )
-                            ],
-                            unit="reqps",
-                        )
-                    ),
-                    sized(
-                        bar(
-                            "Authentication by network device",
-                            capped(
-                                "Per-NAD authentication volume by outcome.",
-                                "The complete sortable per-device list is the "
-                                "\"Per-NAD authentication volume\" table beside "
-                                "this gauge.",
-                            ),
-                            [
-                                instant(
-                                    "sort_desc("
-                                    + top(
-                                        "sum by (nad,status) "
-                                        "("
-                                        + gate(
-                                            metric(
-                                                "ise3_radius_authentications_by_nad",
-                                                'nad=~"$nad"',
-                                            ),
-                                            "radius_reporting",
-                                        )
-                                        + ")"
-                                    )
-                                    + ")",
-                                    "{{nad}} · {{status}}",
-                                )
-                            ],
-                            data_links=(nad_series_drilldown,),
-                        )
-                    ),
-                    sized(
-                        tbl(
-                            "Per-NAD authentication volume",
-                            "The complete per-device marginal behind the capped "
-                            "gauge: passed and failed volume for every selected "
-                            "network device in the reporting window, with no "
-                            "top-K applied.",
-                            [
-                                instant(
-                                    "sum by (instance,nad,status) ("
-                                    + gate(
-                                        metric(
-                                            "ise3_radius_authentications_by_nad",
-                                            'nad=~"$nad"',
-                                        ),
-                                        "radius_reporting",
-                                    )
-                                    + ")",
-                                    "{{nad}} · {{status}}",
-                                )
-                            ],
-                            columns=("authentications",),
-                            sort=("authentications", True),
-                            column_overrides=(
-                                by_column("nad", links=(nad_row_drilldown,)),
-                            ),
-                        )
-                    ),
-                    sized(
-                        bar(
-                            "Authentication latency by PSN",
-                            "Mean trusted authentication latency per PSN beside "
-                            "the fraction of samples whose latency was usable.",
-                            [
-                                instant(
-                                    metric(
-                                        "ise3_radius_authentication_latency_seconds",
-                                        'psn=~"$psn"',
-                                    ),
-                                    "{{psn}} latency",
-                                ),
-                                instant(
-                                    metric(
-                                        "ise3_radius_authentication_latency_coverage",
-                                        'psn=~"$psn"',
-                                    ),
-                                    "{{psn}} coverage",
-                                    "B",
-                                ),
-                            ],
-                            unit="s",
-                            # Coverage is a fraction, not a latency.
-                            overrides=(
-                                by_ref(
-                                    "B",
-                                    unit="percentunit",
-                                    thresholds=COVERAGE,
-                                    minimum=0,
-                                    maximum=1,
-                                ),
-                            ),
-                            data_links=(psn_drilldown,),
-                        )
-                    ),
-                ),
-            ),
-            (
-                "Accounting",
-                (
-                    sized(
-                        stat_panel(
-                            "Accounting starts and stops",
-                            "Exact accounting start, stop, and other event totals "
-                            "for the current reporting window.",
-                            [
-                                instant(
-                                    "sum("
-                                    + gate(
-                                        metric(
-                                            "ise3_radius_accounting_events",
-                                            'dimension="total",event_type="starts"',
-                                        ),
-                                        "radius_accounting",
-                                    )
-                                    + ")",
-                                    "starts",
-                                ),
-                                instant(
-                                    "sum("
-                                    + gate(
-                                        metric(
-                                            "ise3_radius_accounting_events",
-                                            'dimension="total",event_type="stops"',
-                                        ),
-                                        "radius_accounting",
-                                    )
-                                    + ")",
-                                    "stops",
-                                    "B",
-                                ),
-                                instant(
-                                    "sum("
-                                    + gate(
-                                        metric(
-                                            "ise3_radius_accounting_events",
-                                            'dimension="total",event_type="other"',
-                                        ),
-                                        "radius_accounting",
-                                    )
-                                    + ")",
-                                    "other",
-                                    "C",
-                                ),
-                            ],
-                            no_value=NO_DATA_STALE,
-                        ),
-                        5,
-                        24,
-                    ),
-                    sized(
-                        bar(
-                            "Accounting events by network device",
-                            capped(
-                                "Start and stop accounting volume per selected "
-                                "NAD.",
-                                "The exact deployment-wide event totals, "
-                                "unaffected by this cap, are the \"Accounting "
-                                "starts and stops\" panel above.",
-                            ),
-                            [
-                                instant(
-                                    "sort_desc("
-                                    + top(
-                                        "sum by (value,event_type) ("
-                                        + gate(
-                                            metric(
-                                                "ise3_radius_accounting_events",
-                                                'dimension="nad",value=~"$nad"',
-                                            ),
-                                            "radius_accounting",
-                                        )
-                                        + ")"
-                                    )
-                                    + ")",
-                                    "{{value}} · {{event_type}}",
-                                )
-                            ],
-                            data_links=(nad_value_drilldown,),
-                        )
-                    ),
-                    sized(
-                        bar(
-                            "Accounting session duration",
-                            capped(
-                                "Mean and maximum completed-session duration "
-                                "per selected NAD, with zero-duration records "
-                                "excluded.",
-                                "Coverage for the same records is in "
-                                "\"Accounting duration coverage\" below.",
-                            ),
-                            [
-                                instant(
-                                    "sort_desc("
-                                    + top(
-                                        gate(
-                                            metric(
-                                                "ise3_radius_accounting_session_duration_seconds",
-                                                'dimension="nad",value=~"$nad"',
-                                            ),
-                                            "radius_accounting",
-                                        )
-                                    )
-                                    + ")",
-                                    "{{value}} · {{statistic}}",
-                                )
-                            ],
-                            unit="s",
-                            data_links=(nad_value_drilldown,),
-                        )
-                    ),
-                    sized(
-                        ts(
-                            "Accounting events by PSN",
-                            "Start and stop accounting-window volume over time "
-                            "for each selected policy service node.",
-                            [
-                                query(
-                                    gate(
-                                        metric(
-                                            "ise3_radius_accounting_events",
-                                            'dimension="psn",value=~"$psn"',
-                                        ),
-                                        "radius_accounting",
-                                    ),
-                                    "{{value}} · {{event_type}}",
-                                )
-                            ],
-                        )
-                    ),
-                    sized(
-                        ts(
-                            "Accounting event rate per PSN",
-                            "Rolling-window accounting events divided by the exact "
-                            "represented window for each selected PSN and event "
-                            "type.",
-                            [
-                                query(
-                                    gate(
-                                        metric(
-                                            "ise3_radius_accounting_events",
-                                            'dimension="psn",value=~"$psn"',
-                                        ),
-                                        "radius_accounting",
-                                    )
-                                    + " / on(instance,provider) group_left "
-                                    + metric(
-                                        "ise3_radius_accounting_window_seconds"
-                                    ),
-                                    "{{value}} · {{event_type}}",
-                                )
-                            ],
-                            unit="eps",
-                        )
-                    ),
-                    sized(
-                        bar(
-                            "Accounting duration coverage",
-                            capped(
-                                "Fraction of accounting records with a usable "
-                                "positive session duration for each NAD, worst "
-                                "coverage first.",
-                                "Devices above the cap are the ones already "
-                                "reporting usable durations.",
-                                lowest=True,
-                            ),
-                            [
-                                instant(
-                                    "sort("
-                                    + top(
-                                        gate(
-                                            metric(
-                                                "ise3_radius_accounting_duration_coverage",
-                                                'dimension="nad",value=~"$nad"',
-                                            ),
-                                            "radius_accounting",
-                                        ),
-                                        lowest=True,
-                                    )
-                                    + ")",
-                                    "{{value}}",
-                                )
-                            ],
-                            unit="percentunit",
-                            thresholds=COVERAGE,
-                            minimum=0,
-                            maximum=1,
-                            data_links=(nad_value_drilldown,),
-                        )
-                    ),
-                ),
-                COLLAPSED,
-            ),
-            (
-                "Live authorization decisions",
-                (
-                    sized(
-                        bar(
-                            "Current endpoint status by ops owner",
-                            "Distinct active endpoints by authentication status "
-                            "and operational owner from MnT session detail.",
-                            [
-                                instant(
-                                    "sort_desc(sum by (ops_owner,status) "
-                                    "("
-                                    + gate(
-                                        metric(
-                                            "ise3_session_status_endpoints",
-                                            'ops_owner=~"$ops_owner"',
-                                        ),
-                                        "session_authorization",
-                                    )
-                                    + "))",
-                                    "{{ops_owner}} · {{status}}",
-                                )
-                            ],
-                        )
-                    ),
-                    sized(
-                        bar(
-                            "Failure reasons by ops owner",
-                            "Distinct active endpoints by ISE failure reason code "
-                            "and owning operations group. The reason code is the "
-                            "leading code of the session's failure reason, which "
-                            "shares ISE's message-code namespace."
-                            + NAMED_CODES_NOTE,
-                            [
-                                instant(
-                                    "sort_desc("
-                                    + named_codes(
-                                        "sum by (reason_code,ops_owner) "
-                                        "("
-                                        + gate(
-                                            metric(
-                                                "ise3_session_failure_reason_endpoints",
-                                                'ops_owner=~"$ops_owner"',
-                                            ),
-                                            "session_authorization",
-                                        )
-                                        + ")",
-                                        label="reason_code",
-                                    )
-                                    + ")",
-                                    "{{reason_code}} · {{ops_owner}}",
-                                )
-                            ],
-                        )
-                    ),
-                    sized(
-                        tbl(
-                            "Failed authorization and policy context",
-                            "Selected profile, matched rule, and matched policy "
-                            "set retained only for failed active endpoints and "
-                            "grouped by the responsible operations owner.",
-                            [
-                                instant(
-                                    f"sort_desc({failed_context})",
-                                    "{{ops_owner}} · {{authz_profile}} "
-                                    "{{authz_rule}} {{policy_set}}",
-                                ),
-                            ],
-                            columns=("failed endpoints",),
-                        )
-                    ),
-                    sized(
-                        bar(
-                            "Live authentication methods",
-                            "Methods currently used by distinct active endpoints, "
-                            "grouped by the owner responsible for their NAD.",
-                            [
-                                instant(
-                                    "sort_desc(sum by (method,ops_owner) "
-                                    "("
-                                    + gate(
-                                        metric(
-                                            "ise3_session_auth_method_endpoints",
-                                            'ops_owner=~"$ops_owner"',
-                                        ),
-                                        "session_authorization",
-                                    )
-                                    + "))",
-                                    "{{method}} · {{ops_owner}}",
-                                )
-                            ],
-                        )
-                    ),
-                    sized(
-                        bar(
-                            "Selected authorization profiles",
-                            "Authorization profiles selected for active endpoints, "
-                            "grouped by operational owner.",
-                            [
-                                instant(
-                                    "sort_desc(sum by (authz_profile,ops_owner) "
-                                    "("
-                                    + gate(
-                                        metric(
-                                            "ise3_session_authz_profile_endpoints",
-                                            'ops_owner=~"$ops_owner"',
-                                        ),
-                                        "session_authorization",
-                                    )
-                                    + "))",
-                                    "{{authz_profile}} · {{ops_owner}}",
-                                )
-                            ],
-                        )
-                    ),
-                    sized(
-                        bar(
-                            "Matched authorization rules",
-                            "Ground-truth matched rules for active sessions, used "
-                            "to distinguish open-mode from closed-mode behavior.",
-                            [
-                                instant(
-                                    "sort_desc(sum by (authz_rule,ops_owner) "
-                                    "("
-                                    + gate(
-                                        metric(
-                                            "ise3_session_authz_rule_endpoints",
-                                            'ops_owner=~"$ops_owner"',
-                                        ),
-                                        "session_authorization",
-                                    )
-                                    + "))",
-                                    "{{authz_rule}} · {{ops_owner}}",
-                                )
-                            ],
-                        )
-                    ),
-                    sized(
-                        bar(
-                            "Matched policy sets",
-                            "Policy sets matched by active endpoints per operations "
-                            "owner, parsed from the live authorization decision.",
-                            [
-                                instant(
-                                    "sort_desc(sum by (policy_set,ops_owner) "
-                                    "("
-                                    + gate(
-                                        metric(
-                                            "ise3_session_policy_set_endpoints",
-                                            'ops_owner=~"$ops_owner"',
-                                        ),
-                                        "session_authorization",
-                                    )
-                                    + "))",
-                                    "{{policy_set}} · {{ops_owner}}",
-                                )
-                            ],
-                        )
-                    ),
-                    sized(
-                        tbl(
-                            "Policy sets by network device",
-                            "Per-switch policy-set evidence for finding NADs still "
-                            "operating under an unintended access mode.",
-                            [
-                                instant(
-                                    "sort_desc("
-                                    + gate(
-                                        metric(
-                                            "ise3_session_policy_set_endpoints_by_nad",
-                                            'nad=~"$nad"',
-                                        ),
-                                        "session_authorization",
-                                    )
-                                    + ")",
-                                    "{{nad}} · {{policy_set}}",
-                                )
-                            ],
-                            columns=("endpoints",),
-                        )
-                    ),
-                    sized(
-                        stat_panel(
-                            "Policy-set NAD coverage",
-                            "Published versus available NAD groups for the bounded "
-                            "per-policy-set switch breakdown.",
-                            [
-                                instant(
-                                    metric(
-                                        "ise3_topk_groups_returned",
-                                        'dataset="session_authorization",breakdown=~".*nad.*"',
-                                    ),
-                                    "published",
-                                ),
-                                instant(
-                                    metric(
-                                        "ise3_topk_groups_total",
-                                        'dataset="session_authorization",breakdown=~".*nad.*"',
-                                    ),
-                                    "total",
-                                    "B",
-                                ),
-                            ],
-                        )
-                    ),
-                ),
-                COLLAPSED,
-            ),
+        "Tier 2 diagnostic. Why are RADIUS authentications failing? Service "
+        "level first, then failure isolation, then the dimensions and live "
+        "authorization detail needed to close it out.",
+        [
+            ("Service level", service),
+            ("Over time", over_time),
+            ("Failure isolation", isolation),
+            ("Authentication dimensions", dimensions, COLLAPSED),
+            ("Live authorization decisions", authorization, COLLAPSED),
+            ("Accounting", accounting, COLLAPSED),
+            ("Reference", closing, COLLAPSED),
+        ],
+        tier=DIAGNOSTIC,
+        variables=(
+            label_variable("psn", "PSN", "ise3_radius_authentications_by_psn", "psn"),
+            label_variable("nad", "Network device",
+                           "ise3_radius_authentications_by_nad", "nad"),
         ),
-        variables=(psn, nad, owner),
     )
 
 
-def endpoints_dashboard():
-    nad = label_variable(
-        "nad", "Network device", "ise3_network_device_assignment", "nad"
-    )
-    return assemble(
-        "ISE 3 — Endpoints and Network Devices",
-        "ise3-endpoints",
-        "Endpoint inventory and attributes alongside authoritative NAD "
-        "classification, detail coverage, and authentication activity.",
-        (
-            (
-                "Endpoint inventory",
-                (
-                    sized(
-                        stat_panel(
-                            "Endpoint inventory readiness",
-                            "Availability and freshness of inventory, profiling "
-                            "events, and optional live endpoint attributes. NOT "
-                            "READY means the panels fed by that dataset stay blank.",
-                            [
-                                instant(
-                                    ready_bool("endpoint_inventory"), "inventory"
-                                ),
-                                instant(
-                                    ready_bool("endpoint_attributes"),
-                                    "live attributes",
-                                    "B",
-                                ),
-                                instant(
-                                    ready_bool("profile_events"),
-                                    "profile events",
-                                    "C",
-                                ),
-                            ],
-                            mappings=READINESS,
-                            no_value=NO_DATA_EXPORTER,
-                        ),
-                        5,
-                        8,
-                    ),
-                    sized(
-                        stat_panel(
-                            "Dataset collection age",
-                            "Seconds since the latest successful endpoint inventory "
-                            "and profiling-event snapshots.",
-                            [
-                                instant(
-                                    "time() - "
-                                    + metric(
-                                        "ise3_dataset_last_success_timestamp",
-                                        'dataset="endpoint_inventory"',
-                                    ),
-                                    "inventory",
-                                ),
-                                instant(
-                                    "time() - "
-                                    + metric(
-                                        "ise3_dataset_last_success_timestamp",
-                                        'dataset="profile_events"',
-                                    ),
-                                    "profile events",
-                                    "B",
-                                ),
-                            ],
-                            unit="s",
-                        ),
-                        5,
-                        8,
-                    ),
-                    sized(
-                        stat_panel(
-                            "Endpoints",
-                            "Authoritative endpoint database total from the active "
-                            "inventory provider.",
-                            [
-                                instant(
-                                    f"sum({gate(metric('ise3_endpoints_total'), 'endpoint_inventory')})",
-                                    "endpoints",
-                                )
-                            ],
-                            no_value=NO_DATA_STALE,
-                        ),
-                        5,
-                        8,
-                    ),
-                    sized(
-                        stat_panel(
-                            "Unprofiled and posture-applicable",
-                            "Endpoint counts needing profile attention and those "
-                            "eligible for posture assessment.",
-                            [
-                                instant(
-                                    f"sum({gate(metric('ise3_endpoints_unprofiled'), 'endpoint_inventory')})",
-                                    "unprofiled",
-                                ),
-                                instant(
-                                    "sum("
-                                    + gate(
-                                        metric(
-                                            "ise3_endpoints_posture_applicable",
-                                            'applicable="true"',
-                                        ),
-                                        "endpoint_inventory",
-                                    )
-                                    + ")",
-                                    "posture applicable",
-                                    "B",
-                                ),
-                            ],
-                            no_value=NO_DATA_STALE,
-                        ),
-                        5,
-                        8,
-                    ),
-                    sized(
-                        stat_panel(
-                            "Populated profiles and identity groups",
-                            "Number of non-empty endpoint profile and identity-group "
-                            "categories currently represented in inventory.",
-                            [
-                                instant(
-                                    "count("
-                                    + gate(
-                                        metric("ise3_endpoints_by_profile"),
-                                        "endpoint_inventory",
-                                    )
-                                    + " > 0)",
-                                    "profiles",
-                                ),
-                                instant(
-                                    "count("
-                                    + gate(
-                                        metric(
-                                            "ise3_endpoints_by_identity_group"
-                                        ),
-                                        "endpoint_inventory",
-                                    )
-                                    + " > 0)",
-                                    "identity groups",
-                                    "B",
-                                ),
-                            ],
-                            no_value=NO_DATA_STALE,
-                        ),
-                        5,
-                        8,
-                    ),
-                    sized(
-                        bar(
-                            "Endpoints by profile",
-                            "Complete endpoint-policy distribution from the "
-                            "authoritative endpoint inventory.",
-                            [
-                                instant(
-                                    "sort_desc(sum by (profile) "
-                                    f"({gate(metric('ise3_endpoints_by_profile'), 'endpoint_inventory')}))",
-                                    "{{profile}}",
-                                )
-                            ],
-                        )
-                    ),
-                    sized(
-                        bar(
-                            "Endpoints by identity group",
-                            "Complete identity-group distribution for endpoints "
-                            "currently stored in ISE.",
-                            [
-                                instant(
-                                    "sort_desc(sum by (identity_group) "
-                                    f"({gate(metric('ise3_endpoints_by_identity_group'), 'endpoint_inventory')}))",
-                                    "{{identity_group}}",
-                                )
-                            ],
-                        )
-                    ),
-                    sized(
-                        bar(
-                            "Endpoint operational field coverage",
-                            "Fraction of endpoint inventory rows carrying profile, "
-                            "identity-group, and posture-applicability fields.",
-                            [
-                                instant(
-                                    "sort_desc("
-                                    + gate(
-                                        metric(
-                                            "ise3_endpoint_inventory_field_coverage"
-                                        ),
-                                        "endpoint_inventory",
-                                    )
-                                    + ")",
-                                    "{{field}}",
-                                )
-                            ],
-                            unit="percentunit",
-                            thresholds=COVERAGE,
-                            minimum=0,
-                            maximum=1,
-                        )
-                    ),
-                    sized(
-                        bar(
-                            "Profile events by source and action",
-                            "Historical endpoint profiling changes grouped by the "
-                            "source that classified them and the resulting action.",
-                            [
-                                instant(
-                                    "sort_desc(sum by (source,action) ("
-                                    + gate(
-                                        metric(
-                                            "ise3_endpoint_profile_events"
-                                        ),
-                                        "profile_events",
-                                    )
-                                    + "))",
-                                    "{{source}} · {{action}}",
-                                )
-                            ],
-                        )
-                    ),
-                ),
-            ),
-            (
-                "Live endpoint attributes",
-                (
-                    sized(
-                        stat_panel(
-                            "Attribute-source coverage",
-                            "Endpoints for which ISE publishes live model, OS, and "
-                            "MDM context; this source is intentionally partial.",
-                            [
-                                instant(
-                                    metric("ise3_endpoint_attributes_published"),
-                                    "{{provider}}",
-                                )
-                            ],
-                        ),
-                        5,
-                        24,
-                    ),
-                    sized(
-                        bar(
-                            "Endpoints by hardware model",
-                            "Manufacturer and model distribution for endpoints "
-                            "visible to the live attribute source.",
-                            [
-                                instant(
-                                    "sort_desc(sum by (manufacturer,model) "
-                                    f"({gate(metric('ise3_endpoint_model'), 'endpoint_attributes')}))",
-                                    "{{manufacturer}} · {{model}}",
-                                )
-                            ],
-                        )
-                    ),
-                    sized(
-                        bar(
-                            "Endpoints by operating system",
-                            "Operating-system distribution for endpoints visible "
-                            "to the live attribute source.",
-                            [
-                                instant(
-                                    "sort_desc(sum by (os) "
-                                    f"({gate(metric('ise3_endpoint_operating_system'), 'endpoint_attributes')}))",
-                                    "{{os}}",
-                                )
-                            ],
-                        )
-                    ),
-                    sized(
-                        bar(
-                            "MDM registration",
-                            "Registration-state distribution from endpoint MDM "
-                            "context published by ISE.",
-                            [
-                                instant(
-                                    "sort_desc(sum by (registered) "
-                                    f"({gate(metric('ise3_endpoint_mdm_registered'), 'endpoint_attributes')}))",
-                                    "{{registered}}",
-                                )
-                            ],
-                        )
-                    ),
-                    sized(
-                        bar(
-                            "MDM compliance",
-                            "Compliance-state distribution from endpoint MDM "
-                            "context published by ISE.",
-                            [
-                                instant(
-                                    "sort_desc(sum by (compliant) "
-                                    f"({gate(metric('ise3_endpoint_mdm_compliant'), 'endpoint_attributes')}))",
-                                    "{{compliant}}",
-                                )
-                            ],
-                        )
-                    ),
-                ),
-            ),
-            (
-                "Network device inventory",
-                (
-                    sized(
-                        stat_panel(
-                            "Network devices and classification",
-                            "Configured NAD total beside the number whose group "
-                            "detail has converged into the local classification.",
-                            [
-                                instant(
-                                    metric("ise3_network_devices_total"),
-                                    "total",
-                                ),
-                                instant(
-                                    metric("ise3_network_devices_classified"),
-                                    "classified",
-                                    "B",
-                                ),
-                            ],
-                        ),
-                        5,
-                        24,
-                    ),
-                    sized(
-                        bar(
-                            "Devices by location",
-                            "Configured network devices grouped by normalized ISE "
-                            "location hierarchy.",
-                            [
-                                instant(
-                                    "sort_desc(sum by (location) "
-                                    f"({gate(metric('ise3_network_devices_by_location'), 'network_devices')}))",
-                                    "{{location}}",
-                                )
-                            ],
-                        )
-                    ),
-                    sized(
-                        bar(
-                            "Devices by ops owner",
-                            "Configured network devices grouped by the operational "
-                            "owner derived from Network Device Groups.",
-                            [
-                                instant(
-                                    "sort_desc(sum by (ops_owner) "
-                                    f"({gate(metric('ise3_network_devices_by_ops_owner'), 'network_devices')}))",
-                                    "{{ops_owner}}",
-                                )
-                            ],
-                        )
-                    ),
-                    sized(
-                        bar(
-                            "Devices by type",
-                            "Configured network devices grouped by normalized "
-                            "device-type membership.",
-                            [
-                                instant(
-                                    "sort_desc(sum by (device_type) "
-                                    f"({gate(metric('ise3_network_devices_by_type'), 'network_devices')}))",
-                                    "{{device_type}}",
-                                )
-                            ],
-                        )
-                    ),
-                    sized(
-                        tbl(
-                            "Network device assignments",
-                            "Per-NAD location, operations owner, and device type "
-                            "for inventory and session correlation.",
-                            [
-                                instant(
-                                    metric(
-                                        "ise3_network_device_assignment",
-                                        'nad=~"$nad"',
-                                    ),
-                                    "{{nad}} · {{location}} · {{ops_owner}}",
-                                )
-                            ],
-                            columns=(None,),
-                        )
-                    ),
-                    sized(
-                        ts(
-                            "NAD detail-cache coverage",
-                            "Warm-up coverage, deferred detail reads, and cache "
-                            "entries for network-device classification.",
-                            [
-                                query(
-                                    metric(
-                                        "ise3_detail_cache_coverage",
-                                        'cache="ers_network_device"',
-                                    ),
-                                    "coverage",
-                                ),
-                                query(
-                                    metric(
-                                        "ise3_detail_fetches_deferred",
-                                        'cache="ers_network_device"',
-                                    ),
-                                    "deferred",
-                                    ref="B",
-                                ),
-                                query(
-                                    metric(
-                                        "ise3_detail_cache_entries",
-                                        'cache="ers_network_device"',
-                                    ),
-                                    "entries",
-                                    ref="C",
-                                ),
-                            ],
-                        )
-                    ),
-                ),
-            ),
-            (
-                "NAD activity",
-                (
-                    sized(
-                        stat_panel(
-                            "Silent and covered NADs",
-                            "Configured network devices with no recent activity "
-                            "beside the inventory surface reached by the scan.",
-                            [
-                                instant(metric("ise3_nad_silent_total"), "silent"),
-                                instant(
-                                    metric("ise3_nad_activity_covered"),
-                                    "covered",
-                                    "B",
-                                ),
-                            ],
-                            thresholds=NONZERO_WARNING,
-                            # Covered NADs are inventory reach, not a finding.
-                            overrides=(by_ref("B", thresholds=NEUTRAL),),
-                        ),
-                        5,
-                        24,
-                    ),
-                    sized(
-                        tbl(
-                            "Stalest network devices",
-                            "Seconds since each selected NAD last authenticated "
-                            "anything in the reporting scan window.",
-                            [
-                                instant(
-                                    "sort_desc("
-                                    + gate(
-                                        metric(
-                                            "ise3_nad_last_authentication_age_seconds",
-                                            'nad=~"$nad"',
-                                        ),
-                                        "nad_health",
-                                    )
-                                    + ")",
-                                    "{{nad}}",
-                                )
-                            ],
-                            columns=("age s",),
-                            column_overrides=(by_column("age s", **SECONDS_CELL),),
-                        )
-                    ),
-                    sized(
-                        tbl(
-                            "Never-authenticated network devices",
-                            "Configured NADs with zero accumulated authentication "
-                            "activity in the current scan window.",
-                            [
-                                instant(
-                                    "sum by (instance,nad) ("
-                                    + gate(
-                                        metric(
-                                            "ise3_nad_authentications",
-                                            'nad=~"$nad"',
-                                        ),
-                                        "nad_health",
-                                    )
-                                    + ") == 0",
-                                    "{{nad}}",
-                                )
-                            ],
-                            columns=("authentications",),
-                        )
-                    ),
-                    sized(
-                        bar(
-                            "Per-NAD authentication activity (top 10)",
-                            "Ten busiest selected network devices by passed and "
-                            "failed authentication volume in the scan window.",
-                            [
-                                instant(
-                                    "topk(10, sum by (nad,status) "
-                                    "("
-                                    + gate(
-                                        metric(
-                                            "ise3_nad_authentications",
-                                            'nad=~"$nad"',
-                                        ),
-                                        "nad_health",
-                                    )
-                                    + "))",
-                                    "{{nad}} · {{status}}",
-                                )
-                            ],
-                        )
-                    ),
-                    sized(
-                        stat_panel(
-                            "Session attribution coverage",
-                            "Session-bearing NADs matched and unmatched against "
-                            "the authoritative network-device directory. Unmatched "
-                            "devices carry sessions but no location or ops owner.",
-                            [
-                                instant(
-                                    metric(
-                                        "ise3_nad_directory_attributed",
-                                        'matched="yes"',
-                                    ),
-                                    "matched",
-                                ),
-                                instant(
-                                    metric(
-                                        "ise3_nad_directory_attributed",
-                                        'matched="no"',
-                                    ),
-                                    "unmatched",
-                                    "B",
-                                ),
-                            ],
-                            # Unmatched NADs are a routing gap, matched ones are not.
-                            overrides=(by_ref("B", thresholds=NONZERO_WARNING),),
-                        ),
-                        5,
-                        12,
-                    ),
-                    sized(
-                        stat_panel(
-                            "NAD directory entries",
-                            "Current number of NAD identities resolvable to a "
-                            "normalized location and operational owner.",
-                            [
-                                instant(
-                                    metric("ise3_nad_directory_entries"),
-                                    "entries",
-                                )
-                            ],
-                        ),
-                        5,
-                        12,
-                    ),
-                ),
-            ),
-        ),
-        variables=(nad,),
-    )
+# ---------------------------------------------------------------------------
+# Tier 2 — PSN service
+# ---------------------------------------------------------------------------
 
-
-def health_dashboard():
-    dataset = label_variable(
-        "dataset", "Dataset", "ise3_dataset_enabled", "dataset"
-    )
-    return assemble(
-        "ISE Exporter 3 — Health",
-        "ise3-health",
-        "Collection readiness, failure detail, transport health, Data Connect "
-        "cost, bounded-breakdown coverage, caches, and exporter identity.",
-        (
-            (
-                "Dataset readiness",
-                (
-                    sized(
-                        tbl(
-                            "Dataset collection status",
-                            "Enabled, active-provider, up, fresh, and next-run "
-                            "state for every selected dataset.",
-                            [
-                                instant(
-                                    # ise3_dataset_enabled carries no provider
-                                    # label, and merge attaches an unbroadcast
-                                    # value only to the first provider row of
-                                    # each dataset; multiplying it onto the
-                                    # per-provider active series gives every
-                                    # provider row its enabled cell.
-                                    "("
-                                    + metric(
-                                        "ise3_dataset_provider_active",
-                                        'dataset=~"$dataset"',
-                                    )
-                                    + " * 0) + on(instance, dataset) group_left() "
-                                    + metric(
-                                        "ise3_dataset_enabled",
-                                        'dataset=~"$dataset"',
-                                    ),
-                                    "{{dataset}} enabled",
-                                ),
-                                instant(
-                                    metric(
-                                        "ise3_dataset_provider_active",
-                                        'dataset=~"$dataset"',
-                                    ),
-                                    "{{dataset}} · {{provider}} active",
-                                    "B",
-                                ),
-                                instant(
-                                    metric(
-                                        "ise3_dataset_up",
-                                        'dataset=~"$dataset"',
-                                    ),
-                                    "{{dataset}} · {{provider}} up",
-                                    "C",
-                                ),
-                                instant(
-                                    metric(
-                                        "ise3_dataset_fresh",
-                                        'dataset=~"$dataset"',
-                                    ),
-                                    "{{dataset}} · {{provider}} fresh",
-                                    "D",
-                                ),
-                            ],
-                            columns=("enabled", "active", "up", "fresh"),
-                            column_overrides=(
-                                by_column("enabled", **BOOLEAN_CELL),
-                                by_column("active", **BOOLEAN_CELL),
-                                by_column("up", **BOOLEAN_CELL),
-                                by_column("fresh", **BOOLEAN_CELL),
-                            ),
-                        )
-                    ),
-                    sized(
-                        tbl(
-                            "Latest dataset failure",
-                            "One bounded reason and operator explanation for each "
-                            "currently failing dataset.",
-                            [
-                                instant(
-                                    metric(
-                                        "ise3_dataset_last_failure_detail_info",
-                                        'dataset=~"$dataset"',
-                                    ),
-                                    "{{dataset}} · {{provider}} · {{reason}} · {{detail}}",
-                                )
-                            ],
-                            columns=(None,),
-                        )
-                    ),
-                    sized(
-                        ts(
-                            "Collection attempt and success age",
-                            "Time since each dataset last attempted collection "
-                            "and last completed successfully.",
-                            [
-                                query(
-                                    "time() - "
-                                    + metric(
-                                        "ise3_dataset_last_attempt_timestamp",
-                                        'dataset=~"$dataset"',
-                                    ),
-                                    "{{dataset}} attempt",
-                                ),
-                                query(
-                                    "time() - "
-                                    + metric(
-                                        "ise3_dataset_last_success_timestamp",
-                                        'dataset=~"$dataset"',
-                                    ),
-                                    "{{dataset}} success",
-                                    ref="B",
-                                ),
-                            ],
-                            unit="s",
-                        )
-                    ),
-                    sized(
-                        ts(
-                            "Collection duration",
-                            "Latest collection wall time by dataset and provider, "
-                            "used to find cadences the collector cannot sustain.",
-                            [
-                                query(
-                                    metric(
-                                        "ise3_dataset_collection_duration_seconds",
-                                        'dataset=~"$dataset"',
-                                    ),
-                                    "{{dataset}} · {{provider}}",
-                                )
-                            ],
-                            unit="s",
-                        )
-                    ),
-                    sized(
-                        ts(
-                            "Consecutive and cumulative failures",
-                            "Current consecutive failures beside the rate of "
-                            "failures by bounded reason.",
-                            [
-                                query(
-                                    metric(
-                                        "ise3_dataset_consecutive_failures",
-                                        'dataset=~"$dataset"',
-                                    ),
-                                    "{{dataset}} consecutive",
-                                ),
-                                query(
-                                    "sum by (dataset,reason) (rate("
-                                    + metric(
-                                        "ise3_dataset_failures_total",
-                                        'dataset=~"$dataset"',
-                                    )
-                                    + "[15m]))",
-                                    "{{dataset}} · {{reason}} rate",
-                                    ref="B",
-                                ),
-                            ],
-                            thresholds=NONZERO_CRITICAL,
-                        )
-                    ),
-                    sized(
-                        tbl(
-                            "Provider availability and fallback reason",
-                            "Declared providers that cannot run and the bounded "
-                            "reason a lower-preference source was selected.",
-                            [
-                                instant(
-                                    metric(
-                                        "ise3_dataset_provider_available",
-                                        'dataset=~"$dataset"',
-                                    ),
-                                    "{{dataset}} · {{provider}}",
-                                ),
-                                instant(
-                                    metric(
-                                        "ise3_dataset_provider_reason_info",
-                                        'dataset=~"$dataset"',
-                                    ),
-                                    "{{dataset}} · {{provider}} · {{reason}}",
-                                    "B",
-                                ),
-                            ],
-                            columns=("available", None),
-                            column_overrides=(by_column("available", **BOOLEAN_CELL),),
-                        )
-                    ),
-                ),
-            ),
-            (
-                "Reporting and transport",
-                (
-                    sized(
-                        tbl(
-                            "Data Connect source freshness",
-                            "Whether each reporting view's probe answered, "
-                            "whether the view has recent rows, and the age of "
-                            "its newest row. Probed zero means the statement "
-                            "carrying that view failed, so its other cells are "
-                            "unknown rather than empty. endpoints_data is "
-                            "judged against Cisco's documented 12h attribute "
-                            "sync, so an age inside that horizon still counts "
-                            "as recent there.",
-                            [
-                                instant(
-                                    metric("ise3_source_probed"),
-                                    "{{view}} probed",
-                                ),
-                                instant(
-                                    metric("ise3_source_has_recent_rows"),
-                                    "{{view}} recent",
-                                    "B",
-                                ),
-                                instant(
-                                    metric("ise3_source_latest_row_age_seconds"),
-                                    "{{view}} age",
-                                    "C",
-                                ),
-                            ],
-                            columns=("probed", "recent", "age s"),
-                            sort=("age s", True),
-                            column_overrides=(
-                                by_column("probed", **BOOLEAN_CELL),
-                                by_column("recent", **BOOLEAN_CELL),
-                                by_column("age s", **SECONDS_CELL),
-                            ),
-                        )
-                    ),
-                    sized(
-                        tbl(
-                            "Data Connect schema capability gaps",
-                            "Missing required columns are dataset blockers; missing "
-                            "optional columns identify the exact dashboard "
-                            "breakdowns this ISE release or account cannot supply.",
-                            [
-                                # A union, not two targets: a missing column and
-                                # a missing view are different rows of one gap
-                                # list, and joining them on view would attach a
-                                # missing view to an unrelated column.
-                                instant(
-                                    "(1 - "
-                                    + metric(
-                                        "ise3_dataconnect_schema_column_available"
-                                    )
-                                    + ") > 0 or (1 - "
-                                    + metric(
-                                        "ise3_dataconnect_schema_view_available"
-                                    )
-                                    + ") > 0",
-                                    "{{requirement}} · {{view}}.{{column}}",
-                                ),
-                            ],
-                            columns=(None,),
-                        )
-                    ),
-                    sized(
-                        ts(
-                            "Data Connect statements",
-                            "Statement execution rate by reporting view and "
-                            "result, exposing failing or unexpectedly busy views.",
-                            [
-                                query(
-                                    "sum by (view,result) (rate("
-                                    + metric("ise3_dataconnect_queries_total")
-                                    + "[15m]))",
-                                    "{{view}} · {{result}}",
-                                )
-                            ],
-                            unit="ops",
-                        )
-                    ),
-                    sized(
-                        bar(
-                            "Latest Data Connect duration",
-                            "Most recent statement duration by reporting view and "
-                            "result, sorted by cost.",
-                            [
-                                instant(
-                                    "sort_desc("
-                                    + metric(
-                                        "ise3_dataconnect_query_last_duration_seconds"
-                                    )
-                                    + ")",
-                                    "{{view}} · {{result}}",
-                                )
-                            ],
-                            unit="s",
-                        )
-                    ),
-                    sized(
-                        bar(
-                            "Latest rows returned",
-                            "Rows returned by each reporting view's most recent "
-                            "statement, compared with configured safety limits.",
-                            [
-                                instant(
-                                    "sort_desc("
-                                    + metric("ise3_dataconnect_query_rows")
-                                    + ")",
-                                    "{{view}}",
-                                )
-                            ],
-                        )
-                    ),
-                    sized(
-                        ts(
-                            "Data Connect cooldown",
-                            "Global cooldown imposed after each view completes; "
-                            "one slow view delays every reporting dataset.",
-                            [
-                                query(
-                                    metric(
-                                        "ise3_dataconnect_query_cooldown_seconds"
-                                    ),
-                                    "{{view}}",
-                                )
-                            ],
-                            unit="s",
-                        )
-                    ),
-                    sized(
-                        tbl(
-                            "pxGrid session stream",
-                            "Persistent STOMP/WebSocket health, reconciled "
-                            "session state, last-frame age, and successful "
-                            "connection count. A connected value of one means "
-                            "the stream also completed its getSessions baseline.",
-                            [
-                                instant(
-                                    metric("ise3_pxgrid_stream_connected"),
-                                    "connected",
-                                ),
-                                instant(
-                                    metric("ise3_pxgrid_stream_sessions"),
-                                    "sessions",
-                                    "B",
-                                ),
-                                instant(
-                                    "time() - "
-                                    + metric(
-                                        "ise3_pxgrid_stream_last_frame_timestamp"
-                                    ),
-                                    "last frame age",
-                                    "C",
-                                ),
-                                instant(
-                                    metric(
-                                        "ise3_pxgrid_stream_reconnects_total"
-                                    ),
-                                    "connections",
-                                    "D",
-                                ),
-                            ],
-                            columns=(
-                                "connected", "sessions", "last frame age s", "connections",
-                            ),
-                            column_overrides=(
-                                by_column("connected", **BOOLEAN_CELL),
-                                by_column("last frame age s", **SECONDS_CELL),
-                            ),
-                        )
-                    ),
-                    sized(
-                        ts(
-                            "API request rate",
-                            "Outbound requests by ISE target, API surface, and "
-                            "outcome after all rate limiting.",
-                            [
-                                query(
-                                    "sum by (target,api,status) (rate("
-                                    + metric("ise3_api_requests_total")
-                                    + "[5m]))",
-                                    "{{target}} · {{api}} · {{status}}",
-                                )
-                            ],
-                            unit="reqps",
-                        )
-                    ),
-                    sized(
-                        ts(
-                            "API errors",
-                            "Outbound API error rate by target, API, bounded error "
-                            "type, and HTTP status code.",
-                            [
-                                query(
-                                    "sum by (target,api,error_type,http_code) (rate("
-                                    + metric("ise3_api_errors_total")
-                                    + "[5m]))",
-                                    "{{target}} · {{api}} · {{error_type}} · {{http_code}}",
-                                )
-                            ],
-                            unit="reqps",
-                        )
-                    ),
-                    sized(
-                        ts(
-                            "API latency p95",
-                            "Ninety-fifth percentile outbound request duration by "
-                            "target and API surface.",
-                            [
-                                query(
-                                    "histogram_quantile(0.95, sum by "
-                                    "(le,target,api) (rate("
-                                    + metric(
-                                        "ise3_api_request_duration_seconds_bucket"
-                                    )
-                                    + "[5m])))",
-                                    "{{target}} · {{api}}",
-                                )
-                            ],
-                            unit="s",
-                        )
-                    ),
-                ),
-            ),
-            (
-                "Scheduler, budget, and bounds",
-                (
-                    sized(
-                        ts(
-                            "Lane activity and queue depth",
-                            "Serialized target lanes currently busy and datasets "
-                            "waiting behind each lane.",
-                            [
-                                query(metric("ise3_lane_busy"), "{{target}} busy"),
-                                query(
-                                    metric("ise3_lane_queue_depth"),
-                                    "{{target}} queued",
-                                    ref="B",
-                                ),
-                            ],
-                        )
-                    ),
-                    sized(
-                        ts(
-                            "Budget enforcement",
-                            "Enforced request rate, warm-up state, and cumulative "
-                            "time requests spent waiting for budget.",
-                            [
-                                query(
-                                    metric(
-                                        "ise3_budget_enforced_requests_per_hour"
-                                    ),
-                                    "{{target}} enforced",
-                                ),
-                                query(
-                                    metric("ise3_budget_warming"),
-                                    "{{target}} warming",
-                                    ref="B",
-                                ),
-                                query(
-                                    metric("ise3_budget_wait_seconds_total"),
-                                    "{{target}} wait",
-                                    ref="C",
-                                ),
-                            ],
-                        )
-                    ),
-                    sized(
-                        ts(
-                            "Budget throttling rate",
-                            "Requests delayed by budget enforcement, grouped by "
-                            "target and API surface.",
-                            [
-                                query(
-                                    "sum by (target,api) (rate("
-                                    + metric("ise3_budget_throttled_total")
-                                    + "[15m]))",
-                                    "{{target}} · {{api}}",
-                                )
-                            ],
-                        )
-                    ),
-                    sized(
-                        ts(
-                            "Bounded breakdown coverage",
-                            "Published groups divided by groups that existed for "
-                            "every explicitly bounded breakdown.",
-                            [
-                                query(
-                                    metric("ise3_topk_groups_returned")
-                                    + " / clamp_min("
-                                    + metric("ise3_topk_groups_total")
-                                    + ", 1)",
-                                    "{{dataset}} · {{breakdown}}",
-                                )
-                            ],
-                            unit="percentunit",
-                            thresholds=COVERAGE,
-                            minimum=0,
-                            maximum=1,
-                        )
-                    ),
-                    sized(
-                        bar(
-                            "Dataset series",
-                            "Series published by each dataset in its latest "
-                            "snapshot, exposing cardinality growth.",
-                            [
-                                instant(
-                                    "sort_desc("
-                                    + metric(
-                                        "ise3_dataset_series",
-                                        'dataset=~"$dataset"',
-                                    )
-                                    + ")",
-                                    "{{dataset}}",
-                                )
-                            ],
-                        )
-                    ),
-                ),
-            ),
-            (
-                "Caches and identity",
-                (
-                    sized(
-                        ts(
-                            "Detail-cache coverage",
-                            "Coverage and deferred work for each converging "
-                            "per-entity detail cache.",
-                            [
-                                query(
-                                    metric("ise3_detail_cache_coverage"),
-                                    "{{cache}} coverage",
-                                ),
-                                query(
-                                    metric("ise3_detail_fetches_deferred"),
-                                    "{{cache}} deferred",
-                                    ref="B",
-                                ),
-                            ],
-                        )
-                    ),
-                    sized(
-                        ts(
-                            "Detail-fetch results",
-                            "Per-entity detail fetch rate by cache and bounded "
-                            "result classification.",
-                            [
-                                query(
-                                    "sum by (cache,result) (rate("
-                                    + metric("ise3_detail_fetches_total")
-                                    + "[15m]))",
-                                    "{{cache}} · {{result}}",
-                                )
-                            ],
-                        )
-                    ),
-                    sized(
-                        stat_panel(
-                            "Posture assessment eligibility backlog",
-                            "Endpoints subject to posture policy beside those "
-                            "recently assessed and those still lacking recent "
-                            "assessment evidence.",
-                            [
-                                instant(
-                                    metric(
-                                        "ise3_posture_eligible_endpoints_total"
-                                    ),
-                                    "eligible",
-                                ),
-                                instant(
-                                    metric(
-                                        "ise3_posture_eligible_recently_assessed_total"
-                                    ),
-                                    "recently assessed",
-                                    "B",
-                                ),
-                                instant(
-                                    metric(
-                                        "ise3_posture_eligible_without_recent_assessment_total"
-                                    ),
-                                    "without recent assessment",
-                                    "C",
-                                ),
-                            ],
-                            overrides=(by_ref("C", thresholds=NONZERO_WARNING),),
-                        )
-                    ),
-                    sized(
-                        stat_panel(
-                            "Exporter state footprint",
-                            "Bytes of persistent local exporter state; sustained "
-                            "growth means history is accumulating in the wrong place.",
-                            [
-                                instant(
-                                    metric("ise3_exporter_state_bytes"),
-                                    "{{instance}}",
-                                )
-                            ],
-                            unit="bytes",
-                        ),
-                        5,
-                        12,
-                    ),
-                    sized(
-                        tbl(
-                            "Exporter build identity",
-                            "Running exporter version and supported ISE release "
-                            "target for every selected deployment.",
-                            [
-                                instant(
-                                    metric("ise3_exporter_build_info"),
-                                    "{{version}} · ISE {{target_ise_release}}",
-                                )
-                            ],
-                            columns=(None,),
-                        ),
-                        5,
-                        12,
-                    ),
-                ),
-            ),
-        ),
-        variables=(dataset,),
-        refresh="1m",
-    )
+PSN_NODE = 'node=~"$node"'
 
 
 def psn_dashboard():
-    node = label_variable(
-        "node", "PSN", "ise3_psn_radius_requests_per_hour", "node"
-    )
+    service = [
+        sized(
+            stat_panel(
+                "Busiest node load",
+                "Highest RADIUS load percentage reported by any selected PSN — "
+                "the saturation signal of USE for this service. Amber at 80%, "
+                "red at 90%: past that, latency rises before throughput falls, "
+                "so this leads the symptom.",
+                [instant(f"max by (instance) ("
+                         f"{gate(metric('ise3_psn_load_percent', PSN_NODE), 'psn_performance')})")],
+                unit="percent",
+                thresholds=UTILISATION,
+                minimum=0,
+                maximum=100,
+                sparkline=True,
+                no_value=NO_DATA_STALE,
+            ),
+            STAT_H,
+            FIFTH,
+        ),
+        sized(
+            stat_panel(
+                "Worst node latency",
+                "Slowest average RADIUS latency across the selected PSNs. A "
+                "single slow node is that node's resources or identity-store "
+                "path; all of them slow together is the identity store itself.",
+                [instant(f"max by (instance) ("
+                         f"{gate(metric('ise3_psn_average_latency_seconds', PSN_NODE), 'psn_performance')})")],
+                unit="s",
+                thresholds=LATENCY_SECONDS,
+                sparkline=True,
+                no_value=NO_DATA_STALE,
+            ),
+            STAT_H,
+            FIFTH,
+        ),
+        sized(
+            stat_panel(
+                "RADIUS requests per hour",
+                "Combined RADIUS request rate across the selected PSNs, as ISE "
+                "itself reports it. The throughput half of the picture: read it "
+                "beside load to tell a busy deployment from a struggling one.",
+                [instant(summed(gate(metric("ise3_psn_radius_requests_per_hour",
+                                            PSN_NODE), "psn_performance")))],
+                thresholds=NEUTRAL,
+                sparkline=True,
+                no_value=NO_DATA_STALE,
+            ),
+            STAT_H,
+            FIFTH,
+        ),
+        sized(
+            stat_panel(
+                "Diagnostic events",
+                "Diagnostic events ISE raised on the selected PSNs in the "
+                "window. Not all are errors, but a step change is worth "
+                "reading — the diagnostic work queue below names them.",
+                [instant(summed(gate(metric("ise3_psn_diagnostic_events_total"),
+                                     "psn_performance")))],
+                thresholds=NEUTRAL,
+                no_value=NO_DATA_STALE,
+            ),
+            STAT_H,
+            EIGHTH,
+        ),
+    ] + trust_pair(("psn_performance", "active_sessions"), span=EIGHTH)
+
+    throughput = [
+        sized(
+            ts(
+                "Active sessions per PSN",
+                "Live sessions each PSN is holding. Nodes that should be "
+                "load-balanced equally and are not point at the network "
+                "devices' RADIUS server ordering rather than at ISE.",
+                [query(gate(metric("ise3_active_sessions_by_psn"), "active_sessions"),
+                       "{{psn}}")],
+            ),
+            PANEL_H,
+            HALF,
+        ),
+        sized(
+            ts(
+                "RADIUS requests per hour by PSN",
+                "Per-node request rate over time. Compare the shape against "
+                "active sessions: rate rising while sessions stay flat is "
+                "re-authentication churn, not growth.",
+                [query(gate(metric("ise3_psn_radius_requests_per_hour", PSN_NODE),
+                            "psn_performance"), "{{node}}")],
+            ),
+            PANEL_H,
+            HALF,
+        ),
+    ]
+
+    saturation = [
+        sized(
+            ts(
+                "CPU utilisation",
+                "Per-node CPU as ISE reports it, with the amber and red "
+                "thresholds drawn. Sustained time above 80% is the point at "
+                "which authentication latency starts to move.",
+                [query(gate(metric("ise3_node_cpu_utilization_percent", PSN_NODE),
+                            "psn_performance"), "{{node}}")],
+                unit="percent",
+                thresholds=UTILISATION,
+                minimum=0,
+                maximum=100,
+            ),
+            PANEL_H,
+            THIRD,
+        ),
+        sized(
+            ts(
+                "Memory utilisation",
+                "Per-node memory as ISE reports it. A node climbing steadily "
+                "without a matching rise in sessions is usually a leak or a "
+                "log-processing backlog rather than load.",
+                [query(gate(metric("ise3_node_memory_utilization_percent", PSN_NODE),
+                            "psn_performance"), "{{node}}")],
+                unit="percent",
+                thresholds=UTILISATION,
+                minimum=0,
+                maximum=100,
+            ),
+            PANEL_H,
+            THIRD,
+        ),
+        sized(
+            ts(
+                "Disk utilisation, worst filesystem per node",
+                "The fullest filesystem on each node. ISE degrades badly when "
+                "a node runs out of disk — logging stops first, then services "
+                "— so this is a saturation signal worth watching ahead of CPU.",
+                [query(f"max by (instance,node) ("
+                       f"{gate(metric('ise3_node_disk_utilization_percent', PSN_NODE), 'psn_performance')})",
+                       "{{node}}")],
+                unit="percent",
+                thresholds=UTILISATION,
+                minimum=0,
+                maximum=100,
+            ),
+            PANEL_H,
+            THIRD,
+        ),
+        sized(
+            ts(
+                "Average RADIUS latency by PSN",
+                "Per-node average RADIUS transaction time. This is the number "
+                "users experience; the thresholds mark where they notice and "
+                "where supplicants start retrying.",
+                [query(gate(metric("ise3_psn_average_latency_seconds", PSN_NODE),
+                            "psn_performance"), "{{node}}")],
+                unit="s",
+                thresholds=LATENCY_SECONDS,
+            ),
+            PANEL_H,
+            HALF,
+        ),
+        sized(
+            ts(
+                "RADIUS errors by PSN",
+                "Errors attributed to each node over the window. Read against "
+                "the CPU and latency panels above: errors that follow "
+                "saturation are a capacity problem, errors without it are a "
+                "configuration or certificate problem.",
+                [query(gate(metric("ise3_radius_errors_by_psn"), "radius_errors"),
+                       "{{psn}}")],
+                series_colours=OUTCOME_COLOURS,
+            ),
+            PANEL_H,
+            HALF,
+        ),
+    ]
+
+    reporting = [
+        sized(
+            states(
+                "PSN connection state",
+                "One lane per node, green while ISE reported it Connected. A "
+                "node dropping out here explains a simultaneous drop in its "
+                "sessions and request rate without any of it being a RADIUS "
+                "problem.",
+                [query(NODE_CONNECTED, "{{node}}")],
+                mappings=CONNECTED,
+            ),
+            STRIP_H,
+            HALF,
+        ),
+        sized(
+            ts(
+                "Logging, noise, and suppression per hour",
+                "MnT log volume each node is generating, with the share ISE "
+                "classified as noise and the share it suppressed. Suppression "
+                "climbing is ISE protecting itself, and it makes the reporting "
+                "views this exporter reads less complete.",
+                [
+                    query(gate(metric("ise3_psn_mnt_logs_per_hour", PSN_NODE),
+                               "psn_performance"), "{{node}} logs"),
+                    query(gate(metric("ise3_psn_noise_per_hour", PSN_NODE),
+                               "psn_performance"), "{{node}} noise", ref="B"),
+                    query(gate(metric("ise3_psn_suppression_per_hour", PSN_NODE),
+                               "psn_performance"), "{{node}} suppressed", ref="C"),
+                ],
+            ),
+            PANEL_H,
+            HALF,
+        ),
+        sized(
+            tbl(
+                "Diagnostic work queue",
+                "Diagnostic events ISE raised, by node, severity, and message "
+                "code, worst first. Each row is a concrete thing ISE is "
+                "complaining about on a named node — the closest thing this "
+                "exporter has to reading the appliance's own alarm list.",
+                [instant(gate(metric("ise3_psn_diagnostic_events", PSN_NODE),
+                              "psn_performance"))],
+                columns=["Events"],
+                sort=("Events", True),
+                labels={"node": "Node", "severity": "Severity",
+                        "message_code": "Code", "category": "Category",
+                        "source": "Source"},
+                column_overrides=[
+                    by_column("Events", thresholds=NONZERO_WARNING,
+                              colour_cells=True, width=100),
+                ],
+            ),
+            TALL_H,
+            HALF,
+        ),
+        sized(
+            tbl(
+                "Reporting source freshness",
+                "Age of the newest row in each Data Connect view this exporter "
+                "reads from MnT. A view that stops advancing means ISE stopped "
+                "writing to it, which makes every panel fed from it quietly "
+                "stale rather than obviously broken.",
+                [
+                    instant(metric("ise3_source_latest_row_age_seconds"), ref="A"),
+                    instant(metric("ise3_source_has_recent_rows"), ref="B"),
+                ],
+                columns=["Newest row age", "Recent rows"],
+                sort=("Newest row age", True),
+                labels={"view": "View"},
+                column_overrides=[
+                    by_column("Newest row age", **SECONDS_CELL),
+                    by_column("Recent rows", **BOOLEAN_CELL),
+                ],
+            ),
+            TALL_H,
+            HALF,
+        ),
+    ]
+
+    closing = [sized(about(
+        "decide whether the policy service nodes are coping, and which one is "
+        "not.",
+        [
+            "Read busiest load and worst latency. Both green means the PSNs "
+            "are not the problem — go back to RADIUS access.",
+            "Find the outlier node in the utilisation panels.",
+            "Confirm it in the diagnostic work queue and the connection-state "
+            "timeline.",
+        ],
+        [
+            "Saturation with errors: a capacity problem — rebalance or add a "
+            "node.",
+            "Errors without saturation: certificates, the identity store, or "
+            "policy — continue on RADIUS access.",
+            "Suppression climbing: ISE is dropping logs, so treat the reporting "
+            "panels on every dashboard as incomplete until it recovers.",
+        ],
+        ["Triage", "RADIUS access", "Control plane", "Collection pipeline"],
+    ), STRIP_H, FULL)]
+
     return assemble(
-        "ISE 3 — PSN Troubleshooting",
+        "ISE · PSN service",
         "ise3-psn",
-        "Per-PSN sessions, authentication volume, errors, throughput, latency, "
-        "resource utilisation, and reporting health.",
-        (
-            (
-                "PSN service",
-                (
-                    sized(
-                        stat_panel(
-                            "Dataset readiness",
-                            "Freshness of deployment, performance, session, "
-                            "reporting, accounting, and error datasets used here. "
-                            "NOT READY means the panels fed by that dataset stay "
-                            "blank.",
-                            [
-                                instant(ready_bool("deployment"), "deployment"),
-                                instant(
-                                    ready_bool("psn_performance"), "performance", "B"
-                                ),
-                                instant(
-                                    ready_bool("active_sessions"), "sessions", "C"
-                                ),
-                                instant(
-                                    ready_bool("radius_reporting"), "RADIUS", "D"
-                                ),
-                                instant(ready_bool("radius_errors"), "errors", "E"),
-                                instant(
-                                    ready_bool("radius_accounting"),
-                                    "accounting",
-                                    "F",
-                                ),
-                            ],
-                            mappings=READINESS,
-                            no_value=NO_DATA_EXPORTER,
-                        ),
-                        5,
-                        24,
-                    ),
-                    sized(
-                        stat_panel(
-                            "Dataset collection age",
-                            "Seconds since the latest successful performance, "
-                            "session, RADIUS, and deployment snapshots used here.",
-                            [
-                                instant(
-                                    "time() - "
-                                    + metric(
-                                        "ise3_dataset_last_success_timestamp",
-                                        'dataset="psn_performance"',
-                                    ),
-                                    "performance",
-                                ),
-                                instant(
-                                    "time() - "
-                                    + metric(
-                                        "ise3_dataset_last_success_timestamp",
-                                        'dataset="active_sessions"',
-                                    ),
-                                    "sessions",
-                                    "B",
-                                ),
-                                instant(
-                                    "time() - "
-                                    + metric(
-                                        "ise3_dataset_last_success_timestamp",
-                                        'dataset="radius_reporting"',
-                                    ),
-                                    "RADIUS",
-                                    "C",
-                                ),
-                                instant(
-                                    "time() - "
-                                    + metric(
-                                        "ise3_dataset_last_success_timestamp",
-                                        'dataset="deployment"',
-                                    ),
-                                    "deployment",
-                                    "D",
-                                ),
-                            ],
-                            unit="s",
-                        ),
-                        5,
-                        24,
-                    ),
-                    sized(
-                        stat_panel(
-                            "Reporting nodes and diagnostic events",
-                            "PSNs represented in performance reporting beside "
-                            "AAA and system diagnostic events in the bounded "
-                            "reporting window.",
-                            [
-                                instant(
-                                    "count("
-                                    + metric(
-                                        "ise3_psn_radius_requests_per_hour",
-                                        'node=~"$node"',
-                                    )
-                                    + ")",
-                                    "reporting nodes",
-                                ),
-                                instant(
-                                    "sum("
-                                    + metric(
-                                        "ise3_psn_diagnostic_events_total"
-                                    )
-                                    + ")",
-                                    "diagnostic events",
-                                    "B",
-                                ),
-                            ],
-                        ),
-                        5,
-                        12,
-                    ),
-                    sized(
-                        stat_panel(
-                            "PSN schema compatibility",
-                            "Missing required columns in core PSN reporting views "
-                            "and in the optional AAA/system diagnostic views. Core "
-                            "must be zero; diagnostic gaps explain reduced work-queue "
-                            "coverage without failing performance collection.",
-                            [
-                                instant(
-                                    "sum(1 - "
-                                    + metric(
-                                        "ise3_dataconnect_schema_column_available",
-                                        'view=~"KEY_PERFORMANCE_METRICS|SYSTEM_SUMMARY",'
-                                        'requirement="required"',
-                                    )
-                                    + ")",
-                                    "core gaps",
-                                ),
-                                instant(
-                                    "sum(1 - "
-                                    + metric(
-                                        "ise3_dataconnect_schema_column_available",
-                                        'view=~"AAA_DIAGNOSTICS_VIEW|'
-                                        'SYSTEM_DIAGNOSTICS_VIEW",'
-                                        'requirement="required"',
-                                    )
-                                    + ")",
-                                    "diagnostic gaps",
-                                    "B",
-                                ),
-                            ],
-                            thresholds=NONZERO_CRITICAL,
-                            # A diagnostic gap narrows coverage, it does not
-                            # fail performance collection.
-                            overrides=(by_ref("B", thresholds=NONZERO_WARNING),),
-                        ),
-                        5,
-                        12,
-                    ),
-                    sized(
-                        ts(
-                            "Active sessions per PSN",
-                            "Current active-session count by serving policy "
-                            "service node from sources that carry a PSN field.",
-                            [
-                                query(
-                                    gate(
-                                        metric(
-                                            "ise3_active_sessions_by_psn",
-                                            'psn=~"$node"',
-                                        ),
-                                        "active_sessions",
-                                    ),
-                                    "{{psn}}",
-                                )
-                            ],
-                        )
-                    ),
-                    sized(
-                        ts(
-                            "Session delta per PSN",
-                            "Change in active sessions over five minutes by PSN, "
-                            "highlighting abrupt load movement.",
-                            [
-                                query(
-                                    "delta("
-                                    + metric(
-                                        "ise3_active_sessions_by_psn",
-                                        'psn=~"$node"',
-                                    )
-                                    + "[5m])",
-                                    "{{psn}}",
-                                )
-                            ],
-                        )
-                    ),
-                    sized(
-                        ts(
-                            "Accounting events per PSN",
-                            "Accounting starts, stops, and other events in the "
-                            "reporting window for each selected PSN.",
-                            [
-                                query(
-                                    gate(
-                                        metric(
-                                            "ise3_radius_accounting_events",
-                                            'dimension="psn",value=~"$node"',
-                                        ),
-                                        "radius_accounting",
-                                    ),
-                                    "{{value}} · {{event_type}}",
-                                )
-                            ],
-                        )
-                    ),
-                    sized(
-                        bar(
-                            "Authentication volume by PSN",
-                            "Passed and failed authentication volume per PSN in "
-                            "the reporting scan window.",
-                            [
-                                instant(
-                                    "sort_desc(sum by (psn,status) "
-                                    "("
-                                    + gate(
-                                        metric(
-                                            "ise3_radius_authentications_by_psn",
-                                            'psn=~"$node"',
-                                        ),
-                                        "radius_reporting",
-                                    )
-                                    + "))",
-                                    "{{psn}} · {{status}}",
-                                )
-                            ],
-                        )
-                    ),
-                    sized(
-                        bar(
-                            "RADIUS errors by PSN",
-                            "Error-view volume per selected PSN in the current "
-                            "reporting window.",
-                            [
-                                instant(
-                                    "sort_desc(sum by (psn) "
-                                    "("
-                                    + gate(
-                                        metric(
-                                            "ise3_radius_errors_by_psn",
-                                            'psn=~"$node"',
-                                        ),
-                                        "radius_errors",
-                                    )
-                                    + "))",
-                                    "{{psn}}",
-                                )
-                            ],
-                        )
-                    ),
-                    sized(
-                        ts(
-                            "RADIUS errors by PSN over time",
-                            "When did this PSN start failing: the same per-PSN "
-                            "error volume as the bar beside it, plotted over "
-                            "time. It separates a PSN that has always been noisy "
-                            "from one that broke at a specific moment.",
-                            [
-                                query(
-                                    "sum by (psn) ("
-                                    + gate(
-                                        metric(
-                                            "ise3_radius_errors_by_psn",
-                                            'psn=~"$node"',
-                                        ),
-                                        "radius_errors",
-                                    )
-                                    + ")",
-                                    "{{psn}}",
-                                )
-                            ],
-                        )
-                    ),
-                    sized(
-                        bar(
-                            "RADIUS error codes",
-                            "ISE message-code distribution for the current error "
-                            "window while troubleshooting the selected PSN scope."
-                            + NAMED_CODES_NOTE,
-                            [
-                                instant(
-                                    "sort_desc("
-                                    + named_codes(
-                                        "sum by (message_code) ("
-                                        + gate(
-                                            metric(
-                                                "ise3_radius_errors_by_message_code"
-                                            ),
-                                            "radius_errors",
-                                        )
-                                        + ")"
-                                    )
-                                    + ")",
-                                    "{{message_code}}",
-                                )
-                            ],
-                        )
-                    ),
-                ),
-            ),
-            (
-                "Throughput and latency",
-                (
-                    sized(
-                        bar(
-                            "RADIUS requests per hour",
-                            "ISE performance-rollup request rate per selected "
-                            "policy service node.",
-                            [
-                                instant(
-                                    "sort_desc("
-                                    + metric(
-                                        "ise3_psn_radius_requests_per_hour",
-                                        'node=~"$node"',
-                                    )
-                                    + ")",
-                                    "{{node}}",
-                                )
-                            ],
-                            unit="reqps",
-                        )
-                    ),
-                    sized(
-                        bar(
-                            "Average RADIUS latency",
-                            "Average request latency from ISE performance rollups "
-                            "for each selected node.",
-                            [
-                                instant(
-                                    "sort_desc("
-                                    + metric(
-                                        "ise3_psn_average_latency_seconds",
-                                        'node=~"$node"',
-                                    )
-                                    + ")",
-                                    "{{node}}",
-                                )
-                            ],
-                            unit="s",
-                        )
-                    ),
-                    sized(
-                        bar(
-                            "Average transactions per second",
-                            "Average TPS reported by ISE for each selected policy "
-                            "service node.",
-                            [
-                                instant(
-                                    "sort_desc("
-                                    + metric(
-                                        "ise3_psn_average_tps",
-                                        'node=~"$node"',
-                                    )
-                                    + ")",
-                                    "{{node}}",
-                                )
-                            ],
-                        )
-                    ),
-                    sized(
-                        bar(
-                            "Trusted authentication latency",
-                            "Authentication-side latency beside usable-sample "
-                            "coverage, which catches missing latency fields.",
-                            [
-                                instant(
-                                    metric(
-                                        "ise3_radius_authentication_latency_seconds",
-                                        'psn=~"$node"',
-                                    ),
-                                    "{{psn}} latency",
-                                ),
-                                instant(
-                                    metric(
-                                        "ise3_radius_authentication_latency_coverage",
-                                        'psn=~"$node"',
-                                    ),
-                                    "{{psn}} coverage",
-                                    "B",
-                                ),
-                            ],
-                            unit="s",
-                            # Coverage is a fraction, not a latency.
-                            overrides=(
-                                by_ref(
-                                    "B",
-                                    unit="percentunit",
-                                    thresholds=COVERAGE,
-                                    minimum=0,
-                                    maximum=1,
-                                ),
-                            ),
-                        )
-                    ),
-                ),
-            ),
-            (
-                "Node resources and reporting",
-                (
-                    sized(
-                        ts(
-                            "Node load",
-                            "Average load reported by ISE for each selected node "
-                            "over the dashboard time range.",
-                            [
-                                query(
-                                    metric(
-                                        "ise3_psn_load_percent",
-                                        'node=~"$node"',
-                                    ),
-                                    "{{node}}",
-                                )
-                            ],
-                            unit="percent",
-                            thresholds=UTILISATION,
-                            minimum=0,
-                            maximum=100,
-                        )
-                    ),
-                    sized(
-                        ts(
-                            "CPU utilisation",
-                            "CPU utilisation reported by ISE for each selected "
-                            "deployment node.",
-                            [
-                                query(
-                                    metric(
-                                        "ise3_node_cpu_utilization_percent",
-                                        'node=~"$node"',
-                                    ),
-                                    "{{node}}",
-                                )
-                            ],
-                            unit="percent",
-                            thresholds=UTILISATION,
-                            minimum=0,
-                            maximum=100,
-                        )
-                    ),
-                    sized(
-                        ts(
-                            "Memory utilisation",
-                            "Memory utilisation reported by ISE for each selected "
-                            "deployment node.",
-                            [
-                                query(
-                                    metric(
-                                        "ise3_node_memory_utilization_percent",
-                                        'node=~"$node"',
-                                    ),
-                                    "{{node}}",
-                                )
-                            ],
-                            unit="percent",
-                            thresholds=UTILISATION,
-                            minimum=0,
-                            maximum=100,
-                        )
-                    ),
-                    sized(
-                        bar(
-                            "Highest disk utilisation",
-                            "Filesystem utilisation by node and mount point, "
-                            "sorted to surface the highest value first.",
-                            [
-                                instant(
-                                    "sort_desc("
-                                    + metric(
-                                        "ise3_node_disk_utilization_percent",
-                                        'node=~"$node"',
-                                    )
-                                    + ")",
-                                    "{{node}} · {{filesystem}}",
-                                )
-                            ],
-                            unit="percent",
-                            thresholds=UTILISATION,
-                            minimum=0,
-                            maximum=100,
-                        )
-                    ),
-                    sized(
-                        ts(
-                            "Reporting logs, noise, and suppression",
-                            "MnT log volume beside noise and suppression rates for "
-                            "each selected node.",
-                            [
-                                query(
-                                    metric(
-                                        "ise3_psn_mnt_logs_per_hour",
-                                        'node=~"$node"',
-                                    ),
-                                    "{{node}} logs",
-                                ),
-                                query(
-                                    metric(
-                                        "ise3_psn_noise_per_hour",
-                                        'node=~"$node"',
-                                    ),
-                                    "{{node}} noise",
-                                    ref="B",
-                                ),
-                                query(
-                                    metric(
-                                        "ise3_psn_suppression_per_hour",
-                                        'node=~"$node"',
-                                    ),
-                                    "{{node}} suppression",
-                                    ref="C",
-                                ),
-                            ],
-                        )
-                    ),
-                    sized(
-                        tbl(
-                            "PSN node state",
-                            "Current deployment state, roles, and services for "
-                            "the selected policy service nodes.",
-                            [
-                                instant(
-                                    metric(
-                                        "ise3_deployment_node_state",
-                                        'node=~"$node",state=~".*"',
-                                    )
-                                    + " == 1",
-                                    "{{node}} · {{roles}} · {{state}}",
-                                )
-                            ],
-                            columns=(None,),
-                        )
-                    ),
-                    sized(
-                        tbl(
-                            "Reporting source freshness",
-                            "Newest-row age and recent-row presence for reporting "
-                            "views that drive PSN troubleshooting.",
-                            [
-                                instant(
-                                    metric(
-                                        "ise3_source_has_recent_rows",
-                                        'view=~"radius_.*|key_performance_metrics|system_summary"',
-                                    ),
-                                    "{{view}} recent",
-                                ),
-                                instant(
-                                    metric(
-                                        "ise3_source_latest_row_age_seconds",
-                                        'view=~"radius_.*|key_performance_metrics|system_summary"',
-                                    ),
-                                    "{{view}} age",
-                                    "B",
-                                ),
-                            ],
-                            columns=("recent", "age s"),
-                            sort=("age s", True),
-                            column_overrides=(
-                                by_column("recent", **BOOLEAN_CELL),
-                                by_column("age s", **SECONDS_CELL),
-                            ),
-                        )
-                    ),
-                    sized(
-                        tbl(
-                            "Diagnostic work queue",
-                            "Worst-first bounded AAA and system diagnostic "
-                            "evidence by PSN, severity, category, and message code.",
-                            [
-                                instant(
-                                    "sort_desc("
-                                    + metric(
-                                        "ise3_psn_diagnostic_events",
-                                        'node=~"$node"',
-                                    )
-                                    + ")",
-                                    "{{node}} · {{source}} · {{severity}} · "
-                                    "{{category}} · {{message_code}}",
-                                )
-                            ],
-                            columns=("events",),
-                        )
-                    ),
-                    sized(
-                        stat_panel(
-                            "Diagnostic coverage",
-                            "Published versus existing diagnostic groups for each "
-                            "optional reporting view.",
-                            [
-                                instant(
-                                    metric(
-                                        "ise3_topk_groups_returned",
-                                        'dataset="psn_performance",breakdown=~".*_diagnostics"',
-                                    ),
-                                    "{{breakdown}} published",
-                                ),
-                                instant(
-                                    metric(
-                                        "ise3_topk_groups_total",
-                                        'dataset="psn_performance",breakdown=~".*_diagnostics"',
-                                    ),
-                                    "{{breakdown}} total",
-                                    "B",
-                                ),
-                            ],
-                        ),
-                        5,
-                        24,
-                    ),
-                ),
-            ),
+        "Tier 2 diagnostic. Are the policy service nodes coping? Service level "
+        "first, then utilisation and saturation per node, then the reporting "
+        "pipeline those nodes feed.",
+        [
+            ("Service level", service),
+            ("Throughput", throughput),
+            ("Utilisation and saturation", saturation),
+            ("Node reporting", reporting, COLLAPSED),
+            ("Reference", closing, COLLAPSED),
+        ],
+        tier=DIAGNOSTIC,
+        variables=(
+            label_variable("node", "PSN", "ise3_psn_radius_requests_per_hour",
+                           "node"),
         ),
-        variables=(node,),
     )
 
 
-def pan_mnt_dashboard():
-    node = label_variable(
-        "node", "PAN or MnT node", "ise3_deployment_node_state", "node"
-    )
-    # A PSN named here is answered on the PSN dashboard, not this one.
-    psn_drilldown = drilldown(
-        "This node on PSN troubleshooting", "ise3-psn", node=by_series("psn")
-    )
+# ---------------------------------------------------------------------------
+# Tier 2 — control plane (PAN and MnT)
+# ---------------------------------------------------------------------------
+
+def control_dashboard():
+    status = [
+        sized(
+            stat_panel(
+                "Nodes not connected",
+                "Deployment nodes in any state other than Connected. A PAN out "
+                "of sync stops configuration reaching the deployment; an MnT "
+                "out of sync stops every reporting panel in this dashboard set "
+                "from advancing.",
+                [instant(NODES_DISCONNECTED)],
+                thresholds=NONZERO_CRITICAL,
+                no_value=NO_DATA_CLEAN,
+            ),
+            STAT_H,
+            SIXTH,
+        ),
+        sized(
+            stat_panel(
+                "PAN high availability",
+                "Whether automatic PAN failover is enabled. Without it, losing "
+                "the primary admin node is a manual promotion under pressure "
+                "rather than an automatic one.",
+                [instant(gate(metric("ise3_deployment_pan_ha_enabled"), "deployment"))],
+                mappings=ENABLED,
+                thresholds=REQUIRED_BOOLEAN,
+                no_value=NO_DATA_STALE,
+                text_mode=BigValueTextMode.VALUE,
+            ),
+            STAT_H,
+            SIXTH,
+        ),
+        sized(
+            stat_panel(
+                "Backup state",
+                "Hours since the last successful configuration backup, and "
+                "whether a backup schedule is configured at all. A daily backup "
+                "that has not run is the earliest visible sign of a stalled "
+                f"PAN, so age goes amber at {BACKUP_STALE_HOURS} hours rather "
+                "than waiting for a failure — and 'not configured' is a "
+                "different problem from 'stale', which is why both are here.",
+                [
+                    instant(gate(metric("ise3_backup_age_hours"), "backup"), "age"),
+                    instant(gate(metric("ise3_backup_configured"), "backup"),
+                            "scheduled", ref="B"),
+                ],
+                unit="h",
+                thresholds=BACKUP_AGE_HOURS,
+                overrides=[by_ref("B", unit="short", mappings=CONFIGURED,
+                                  thresholds=REQUIRED_BOOLEAN)],
+                no_value=NO_DATA_STALE,
+            ),
+            STAT_H,
+            SIXTH,
+        ),
+        sized(
+            stat_panel(
+                "Certificates expired",
+                "Certificates in the deployment's trust and system stores that "
+                "are already past their expiry date. Any number above zero is "
+                "red: an expired EAP or admin certificate breaks "
+                "authentication outright.",
+                [instant(gate(metric("ise3_certificates_expired"), "certificates"))],
+                thresholds=NONZERO_CRITICAL,
+                no_value=NO_DATA_STALE,
+            ),
+            STAT_H,
+            SIXTH,
+        ),
+    ] + trust_pair(("deployment", "certificates", "backup"), span=SIXTH) + [
+        sized(
+            states(
+                "Node connection state",
+                "One lane per deployment node, green while ISE reported it "
+                "Connected. The single most useful panel during a control "
+                "plane incident: it shows exactly when a node left and whether "
+                "it came back.",
+                [query(NODE_CONNECTED, "{{node}}")],
+                mappings=CONNECTED,
+            ),
+            STRIP_H,
+            FULL,
+        ),
+    ]
+
+    detail = [
+        sized(
+            stat_panel(
+                "Certificates expiring soon",
+                "Certificates inside the exporter's warning horizon but not "
+                "yet expired. This is the number that should be worked down to "
+                "zero through change control; the expired count on the strip "
+                "above is what happens when it is not.",
+                [instant(gate(metric("ise3_certificates_expiring_soon"),
+                              "certificates"))],
+                thresholds=NONZERO_WARNING,
+                no_value=NO_DATA_STALE,
+            ),
+            STAT_H,
+            THIRD,
+        ),
+        sized(
+            stat_panel(
+                "Certificate scan coverage",
+                "Nodes the certificate scan read, and nodes it could not "
+                "reach. Certificates on an unreachable node are counted "
+                "nowhere on this page, so a non-zero second value means the "
+                "expiry numbers here are incomplete rather than clean.",
+                [
+                    instant(gate(metric("ise3_certificate_nodes_scanned"),
+                                 "certificates"), "scanned"),
+                    instant(gate(metric("ise3_certificate_nodes_unreachable"),
+                                 "certificates"), "unreachable", ref="B"),
+                ],
+                thresholds=NEUTRAL,
+                overrides=[by_ref("B", thresholds=NONZERO_WARNING)],
+                no_value=NO_DATA_STALE,
+            ),
+            STAT_H,
+            THIRD,
+        ),
+        sized(
+            stat_panel(
+                "Patch level and release support",
+                "The deployment's patch level, and whether the running release "
+                "is one this exporter and Cisco still support. Unsupported "
+                "means schema drift is expected and some panels may quietly "
+                "stop being populated.",
+                [
+                    instant(gate(metric("ise3_patch_level"), "patches"), "patch"),
+                    instant(gate(metric("ise3_version_supported"), "patches"),
+                            "supported", ref="B"),
+                ],
+                thresholds=NEUTRAL,
+                overrides=[by_ref("B", mappings=SUPPORTED,
+                                  thresholds=REQUIRED_BOOLEAN)],
+                no_value=NO_DATA_STALE,
+            ),
+            STAT_H,
+            THIRD,
+        ),
+        sized(
+            tbl(
+                "Node roles and services",
+                "Every node with the personas and services ISE has assigned to "
+                "it. Read it when the deployment is not behaving as designed — "
+                "a service running where it should not be, or missing where it "
+                "should, explains a surprising amount.",
+                [
+                    instant(gate(metric("ise3_deployment_node_service_enabled"),
+                                 "deployment"), ref="A"),
+                ],
+                columns=[None],
+                labels={"node": "Node", "service": "Service"},
+            ),
+            TALL_H,
+            HALF,
+        ),
+        sized(
+            tbl(
+                "Certificate expiry, soonest first",
+                "Every certificate the scan could read, with days remaining. "
+                "Red inside 30 days, amber inside 90 — enough notice to renew "
+                "through change control rather than at 3am. Sorted ascending "
+                "so the next thing to expire is always the first row.",
+                [instant(gate(metric("ise3_certificate_expiry_days"),
+                              "certificates"))],
+                columns=["Days left"],
+                sort=("Days left", False),
+                labels={"node": "Node", "certificate": "Certificate",
+                        "store": "Store", "usage": "Usage"},
+                column_overrides=[
+                    by_column("Days left", thresholds=CERT_RUNWAY_DAYS,
+                              colour_cells=True, width=110),
+                ],
+            ),
+            TALL_H,
+            HALF,
+        ),
+    ]
+
+    resources = [
+        sized(
+            ts(
+                "CPU utilisation",
+                "Per-node CPU across the whole deployment, PAN and MnT "
+                "included. An MnT pinned at high CPU is the usual reason "
+                "reporting data goes stale while ISE itself keeps "
+                "authenticating normally.",
+                [query(gate(metric("ise3_node_cpu_utilization_percent"),
+                            "psn_performance"), "{{node}}")],
+                unit="percent",
+                thresholds=UTILISATION,
+                minimum=0,
+                maximum=100,
+            ),
+            PANEL_H,
+            THIRD,
+        ),
+        sized(
+            ts(
+                "Memory utilisation",
+                "Per-node memory across the deployment. Sustained pressure on "
+                "an admin node shows up as slow configuration changes long "
+                "before it shows up as an outage.",
+                [query(gate(metric("ise3_node_memory_utilization_percent"),
+                            "psn_performance"), "{{node}}")],
+                unit="percent",
+                thresholds=UTILISATION,
+                minimum=0,
+                maximum=100,
+            ),
+            PANEL_H,
+            THIRD,
+        ),
+        sized(
+            ts(
+                "Disk utilisation, worst filesystem per node",
+                "The fullest filesystem on each node. On an MnT this is the "
+                "one to watch: when its log partition fills, ISE purges "
+                "aggressively and the reporting views lose history without any "
+                "error being raised.",
+                [query("max by (instance,node) (" +
+                       gate(metric("ise3_node_disk_utilization_percent"),
+                            "psn_performance") + ")", "{{node}}")],
+                unit="percent",
+                thresholds=UTILISATION,
+                minimum=0,
+                maximum=100,
+            ),
+            PANEL_H,
+            THIRD,
+        ),
+    ]
+
+    mnt = [
+        sized(
+            ts(
+                "End-to-end authentication latency",
+                "Mean and worst-case authentication time reconstructed from "
+                "MnT session detail. This is the number to quote when someone "
+                "says logging in is slow, and the step breakdown below says "
+                "which phase is responsible.",
+                [
+                    query(gate(metric("ise3_session_authentication_latency_seconds",
+                                      'statistic="mean"'), "session_authorization"),
+                          "mean"),
+                    query(gate(metric("ise3_session_authentication_latency_seconds",
+                                      'statistic="max"'), "session_authorization"),
+                          "worst", ref="B"),
+                ],
+                unit="s",
+                thresholds=LATENCY_SECONDS,
+            ),
+            PANEL_H,
+            HALF,
+        ),
+        sized(
+            tbl(
+                "Authentication step latency",
+                "Mean time in each phase of the authentication exchange, with "
+                "how many sessions contributed. A step whose sample count is "
+                "small is not evidence — read the two columns together before "
+                "concluding anything from a slow phase.",
+                [
+                    instant(gate(metric("ise3_session_authentication_step_latency_seconds",
+                                        'statistic="mean"'), "session_authorization"),
+                            ref="A"),
+                    instant(gate(metric("ise3_session_authentication_step_latency_samples"),
+                                 "session_authorization"), ref="B"),
+                ],
+                columns=["Mean", "Samples"],
+                sort=("Mean", True),
+                labels={"step": "Step"},
+                column_overrides=[
+                    by_column("Mean", unit="s", thresholds=LATENCY_SECONDS,
+                              colour_cells=True),
+                ],
+            ),
+            PANEL_H,
+            HALF,
+        ),
+        sized(
+            ts(
+                "MnT detail-cache coverage",
+                "How much of the live session list the exporter has fetched "
+                "per-session detail for. Panels fed from that detail are "
+                "suppressed below 99% so they cannot under-report beside a "
+                "complete neighbour — this panel is where the gap is visible.",
+                [query(metric("ise3_detail_cache_coverage", 'cache="mnt_session_detail"'),
+                       "session detail")],
+                unit="percentunit",
+                thresholds=COVERAGE,
+                minimum=0,
+                maximum=1,
+            ),
+            PANEL_H,
+            HALF,
+        ),
+        sized(
+            tbl(
+                "Backup history",
+                "The status ISE recorded for the last backup attempt, and how "
+                "long ago it succeeded. Read it when the age stat is amber: a "
+                "failed status is a backup target problem, no status at all is "
+                "a scheduler problem on the PAN.",
+                [
+                    instant(f"{gate(metric('ise3_backup_last_status'), 'backup')} == 1",
+                            ref="A"),
+                    instant("time() - (" + gate(
+                        metric("ise3_backup_last_success_timestamp"), "backup") + ")",
+                        ref="B"),
+                ],
+                columns=[None, "Since last success"],
+                labels={"status": "Last status"},
+                column_overrides=[
+                    by_column("Since last success", **SECONDS_CELL),
+                ],
+            ),
+            PANEL_H,
+            HALF,
+        ),
+        sized(
+            tbl(
+                "Control plane collection failures",
+                "The most recent failure recorded for each of the control "
+                "plane datasets, with the reason and the detail the exporter "
+                "captured. Empty is the healthy state; a populated row is the "
+                "actual error text rather than a generic failure count.",
+                [instant(metric("ise3_dataset_last_failure_detail_info",
+                                'dataset=~"deployment|backup|certificates|patches|licensing"'))],
+                columns=[None],
+                labels={"dataset": "Dataset", "provider": "Provider",
+                        "reason": "Reason", "detail": "Detail"},
+            ),
+            PANEL_H,
+            HALF,
+        ),
+    ]
+
+    closing = [sized(about(
+        "answer whether the administration and monitoring plane is healthy — "
+        "the nodes, their certificates, their backups, and the MnT pipeline "
+        "the rest of the set depends on.",
+        [
+            "Read the status strip. Anything red here undermines dashboards "
+            "elsewhere.",
+            "Check the node connection timeline for when a node left.",
+            "Read certificate expiry ascending — the first row is the next "
+            "thing that will break.",
+        ],
+        [
+            "MnT disk or CPU high: reporting data across every dashboard is "
+            "about to go stale.",
+            "Backup stale: check the PAN before assuming it is a backup target "
+            "problem.",
+            "Certificates expired: RADIUS access will already be showing "
+            "certificate failure classes.",
+        ],
+        ["Triage", "RADIUS access", "PSN service", "Capacity"],
+    ), STRIP_H, FULL)]
+
     return assemble(
-        "ISE 3 — PAN and MnT Troubleshooting",
-        "ise3-pan-mnt",
-        "Administrative and monitoring-node state, services, backup, "
-        "certificates, posture cache, node resources, and collector failures.",
-        (
-            (
-                "Deployment and services",
-                (
-                    sized(
-                        stat_panel(
-                            "Core dataset readiness",
-                            "Freshness of deployment, performance, backup, "
-                            "certificates, patches, and current-posture data. NOT "
-                            "READY means the panels fed by that dataset stay blank.",
-                            [
-                                instant(ready_bool("deployment"), "deployment"),
-                                instant(
-                                    ready_bool("psn_performance"), "performance", "B"
-                                ),
-                                instant(ready_bool("backup"), "backup", "C"),
-                                instant(
-                                    ready_bool("certificates"), "certificates", "D"
-                                ),
-                                instant(ready_bool("patches"), "patches", "E"),
-                                instant(
-                                    ready_bool("posture_current"), "posture", "F"
-                                ),
-                            ],
-                            mappings=READINESS,
-                            no_value=NO_DATA_EXPORTER,
-                        ),
-                        5,
-                        24,
-                    ),
-                    sized(
-                        stat_panel(
-                            "Core snapshot age",
-                            "Seconds since the latest successful deployment, "
-                            "performance, and current-posture snapshots.",
-                            [
-                                instant(
-                                    "time() - "
-                                    + metric(
-                                        "ise3_dataset_last_success_timestamp",
-                                        'dataset="deployment"',
-                                    ),
-                                    "deployment",
-                                ),
-                                instant(
-                                    "time() - "
-                                    + metric(
-                                        "ise3_dataset_last_success_timestamp",
-                                        'dataset="psn_performance"',
-                                    ),
-                                    "performance",
-                                    "B",
-                                ),
-                                instant(
-                                    "time() - "
-                                    + metric(
-                                        "ise3_dataset_last_success_timestamp",
-                                        'dataset="posture_current"',
-                                    ),
-                                    "posture",
-                                    "C",
-                                ),
-                            ],
-                            unit="s",
-                        ),
-                        5,
-                        12,
-                    ),
-                    sized(
-                        stat_panel(
-                            "Connected PANs and MnTs",
-                            "Connected administrative and monitoring personas "
-                            "derived from the authoritative deployment snapshot.",
-                            [
-                                instant(
-                                    "count("
-                                    + metric(
-                                        "ise3_deployment_node_state",
-                                        'roles=~".*(Admin|Standalone).*",state="Connected"',
-                                    )
-                                    + " == 1)",
-                                    "PANs",
-                                ),
-                                instant(
-                                    "count("
-                                    + metric(
-                                        "ise3_deployment_node_state",
-                                        'roles=~".*(Monitoring|Standalone).*",state="Connected"',
-                                    )
-                                    + " == 1)",
-                                    "MnTs",
-                                    "B",
-                                ),
-                            ],
-                        ),
-                        5,
-                        12,
-                    ),
-                    sized(
-                        tbl(
-                            "PAN and MnT node state",
-                            "Current state, persona roles, and service list for "
-                            "each selected core ISE node.",
-                            [
-                                instant(
-                                    metric(
-                                        "ise3_deployment_node_state",
-                                        'node=~"$node",state=~".*"',
-                                    )
-                                    + " == 1",
-                                    "{{node}} · {{roles}} · {{state}}",
-                                )
-                            ],
-                            columns=(None,),
-                        )
-                    ),
-                    sized(
-                        tbl(
-                            "Node service assignments",
-                            "Explicit services enabled on each selected "
-                            "administrative or monitoring node.",
-                            [
-                                instant(
-                                    metric(
-                                        "ise3_deployment_node_service_enabled",
-                                        'node=~"$node"',
-                                    ),
-                                    "{{node}} · {{service}}",
-                                )
-                            ],
-                            columns=("enabled",),
-                            column_overrides=(by_column("enabled", **BOOLEAN_CELL),),
-                        )
-                    ),
-                    sized(
-                        stat_panel(
-                            "PAN HA and backup",
-                            "Administrative HA state beside configured backup and "
-                            "latest successful backup age.",
-                            [
-                                instant(
-                                    metric("ise3_deployment_pan_ha_enabled"),
-                                    "PAN HA",
-                                ),
-                                instant(
-                                    metric("ise3_backup_configured"),
-                                    "backup configured",
-                                    "B",
-                                ),
-                                instant(
-                                    metric("ise3_backup_age_hours"),
-                                    "backup age",
-                                    "C",
-                                ),
-                            ],
-                            # Two booleans and an age share one field config.
-                            overrides=(
-                                by_ref("A", mappings=YES_NO),
-                                by_ref(
-                                    "B",
-                                    mappings=CONFIGURED,
-                                    thresholds=REQUIRED_BOOLEAN,
-                                ),
-                                by_ref(
-                                    "C",
-                                    unit="h",
-                                    thresholds=BACKUP_AGE_HOURS,
-                                ),
-                            ),
-                        ),
-                        5,
-                        12,
-                    ),
-                    sized(
-                        stat_panel(
-                            "Patch and certificate findings",
-                            "Patch level, expired certificates, and near-term "
-                            "certificate expiry findings for core nodes.",
-                            [
-                                instant(metric("ise3_patch_level"), "patch"),
-                                instant(
-                                    metric("ise3_certificates_expired"),
-                                    "expired",
-                                    "B",
-                                ),
-                                instant(
-                                    metric("ise3_certificates_expiring_soon"),
-                                    "expiring",
-                                    "C",
-                                ),
-                            ],
-                            overrides=(
-                                by_ref("B", thresholds=NONZERO_CRITICAL),
-                                by_ref("C", thresholds=NONZERO_WARNING),
-                            ),
-                        ),
-                        5,
-                        12,
-                    ),
-                    sized(
-                        tbl(
-                            "Core-node certificate expiry",
-                            "Certificate expiry by selected node, store, usage, "
-                            "and certificate identity.",
-                            [
-                                instant(
-                                    "sort("
-                                    + metric(
-                                        "ise3_certificate_expiry_days",
-                                        'node=~"$node"',
-                                    )
-                                    + ")",
-                                    "{{node}} · {{store}} · {{certificate}}",
-                                )
-                            ],
-                            columns=("days to expiry",),
-                        )
-                    ),
-                ),
+        "ISE · Control plane",
+        "ise3-control",
+        "Tier 2 diagnostic. Is the PAN and MnT control plane healthy? Node "
+        "state, certificates, backup and patching first, then node resources, "
+        "then the MnT collection that feeds every other dashboard.",
+        [
+            ("Control plane status", status),
+            ("Certificates, software, and services", detail),
+            ("Node resources", resources),
+            ("MnT collection", mnt, COLLAPSED),
+            ("Reference", closing, COLLAPSED),
+        ],
+        tier=DIAGNOSTIC,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Tier 2 — endpoints and network devices
+# ---------------------------------------------------------------------------
+
+ENDPOINT_NAD = 'nad=~"$nad"'
+
+
+def endpoints_dashboard():
+    inventory = [
+        sized(
+            stat_panel(
+                "Endpoints",
+                "Total endpoints in the ISE endpoint database. This is the "
+                "inventory count, not the live session count — the difference "
+                "between the two is the estate that is currently switched off.",
+                [instant(gate(metric("ise3_endpoints_total"), "endpoint_inventory"))],
+                thresholds=NEUTRAL,
+                sparkline=True,
+                no_value=NO_DATA_STALE,
             ),
-            (
-                "MnT session and posture coverage",
-                (
-                    sized(
-                        stat_panel(
-                            "Active sessions",
-                            "Current live-session count and distinct endpoints "
-                            "from the selected active provider.",
-                            [
-                                instant(
-                                    f"sum({gate(metric('ise3_active_sessions_total'), 'active_sessions')})",
-                                    "sessions",
-                                ),
-                                instant(
-                                    f"sum({gate(metric('ise3_active_session_endpoints'), 'active_sessions')})",
-                                    "endpoints",
-                                    "B",
-                                ),
-                            ],
-                            no_value=NO_DATA_STALE,
-                        ),
-                        5,
-                        12,
-                    ),
-                    sized(
-                        stat_panel(
-                            "MnT detail cache",
-                            "Coverage and deferred endpoint-detail fetches shared "
-                            "by authorization and current-posture datasets.",
-                            [
-                                instant(
-                                    metric(
-                                        "ise3_detail_cache_coverage",
-                                        'cache="mnt_session_detail"',
-                                    ),
-                                    "coverage",
-                                ),
-                                instant(
-                                    metric(
-                                        "ise3_detail_fetches_deferred",
-                                        'cache="mnt_session_detail"',
-                                    ),
-                                    "deferred",
-                                    "B",
-                                ),
-                            ],
-                        ),
-                        5,
-                        12,
-                    ),
-                    sized(
-                        bar(
-                            "Active posture by ops owner",
-                            "Distinct active endpoints by posture state and the "
-                            "operations owner responsible for their NAD.",
-                            [
-                                instant(
-                                    "sort_desc(sum by (ops_owner,status) "
-                                    f"({gate(metric('ise3_posture_endpoints'), 'posture_current')}))",
-                                    "{{ops_owner}} · {{status}}",
-                                )
-                            ],
-                        )
-                    ),
-                    sized(
-                        bar(
-                            "Active sessions by serving PSN",
-                            "Current active-session distribution across serving "
-                            "policy service nodes.",
-                            [
-                                instant(
-                                    "sort_desc(sum by (psn) "
-                                    f"({gate(metric('ise3_active_sessions_by_psn'), 'active_sessions')}))",
-                                    "{{psn}}",
-                                )
-                            ],
-                            data_links=(psn_drilldown,),
-                        )
-                    ),
-                    sized(
-                        bar(
-                            "Active posture by serving PSN",
-                            "Distinct active endpoints by serving policy service "
-                            "node and current posture state.",
-                            [
-                                instant(
-                                    "sort_desc(sum by (psn,status) ("
-                                    + gate(
-                                        metric(
-                                            "ise3_posture_endpoints_by_psn"
-                                        ),
-                                        "posture_current",
-                                    )
-                                    + "))",
-                                    "{{psn}} · {{status}}",
-                                )
-                            ],
-                            data_links=(psn_drilldown,),
-                        )
-                    ),
-                ),
-            ),
-            (
-                "Node performance and collector diagnostics",
-                (
-                    sized(
-                        ts(
-                            "Node load, CPU, and memory",
-                            "Core-node load, CPU, and memory utilisation over the "
-                            "selected time range.",
-                            [
-                                query(
-                                    metric(
-                                        "ise3_psn_load_percent",
-                                        'node=~"$node"',
-                                    ),
-                                    "{{node}} load",
-                                ),
-                                query(
-                                    metric(
-                                        "ise3_node_cpu_utilization_percent",
-                                        'node=~"$node"',
-                                    ),
-                                    "{{node}} CPU",
-                                    ref="B",
-                                ),
-                                query(
-                                    metric(
-                                        "ise3_node_memory_utilization_percent",
-                                        'node=~"$node"',
-                                    ),
-                                    "{{node}} memory",
-                                    ref="C",
-                                ),
-                            ],
-                            unit="percent",
-                            thresholds=UTILISATION,
-                            minimum=0,
-                            maximum=100,
-                        )
-                    ),
-                    sized(
-                        bar(
-                            "Highest disk utilisation",
-                            "Filesystem utilisation for selected core nodes, "
-                            "sorted to surface capacity risk.",
-                            [
-                                instant(
-                                    "sort_desc("
-                                    + metric(
-                                        "ise3_node_disk_utilization_percent",
-                                        'node=~"$node"',
-                                    )
-                                    + ")",
-                                    "{{node}} · {{filesystem}}",
-                                )
-                            ],
-                            unit="percent",
-                            thresholds=UTILISATION,
-                            minimum=0,
-                            maximum=100,
-                        )
-                    ),
-                    sized(
-                        ts(
-                            "Reporting logs, noise, and suppression",
-                            "MnT log throughput beside noise and suppression for "
-                            "the selected core nodes.",
-                            [
-                                query(
-                                    metric(
-                                        "ise3_psn_mnt_logs_per_hour",
-                                        'node=~"$node"',
-                                    ),
-                                    "{{node}} logs",
-                                ),
-                                query(
-                                    metric(
-                                        "ise3_psn_noise_per_hour",
-                                        'node=~"$node"',
-                                    ),
-                                    "{{node}} noise",
-                                    ref="B",
-                                ),
-                                query(
-                                    metric(
-                                        "ise3_psn_suppression_per_hour",
-                                        'node=~"$node"',
-                                    ),
-                                    "{{node}} suppression",
-                                    ref="C",
-                                ),
-                            ],
-                        )
-                    ),
-                    sized(
-                        tbl(
-                            "PAN and MnT failure work queue",
-                            "Latest bounded failure explanation for deployment, "
-                            "backup, certificate, posture, and performance collectors.",
-                            [
-                                instant(
-                                    metric(
-                                        "ise3_dataset_last_failure_detail_info",
-                                        'dataset=~"deployment|backup|certificates|patches|posture_current|psn_performance"',
-                                    ),
-                                    "{{dataset}} · {{provider}} · {{reason}} · {{detail}}",
-                                )
-                            ],
-                            columns=(None,),
-                        )
-                    ),
-                    sized(
-                        ts(
-                            "ISE API latency",
-                            "Outbound request duration percentiles for PAN and "
-                            "MnT API targets, replacing opaque collector timing.",
-                            [
-                                query(
-                                    "histogram_quantile(0.95, sum by "
-                                    "(le,target,api) (rate("
-                                    + metric(
-                                        "ise3_api_request_duration_seconds_bucket",
-                                        'target=~"pan|mnt"',
-                                    )
-                                    + "[5m])))",
-                                    "{{target}} · {{api}} p95",
-                                )
-                            ],
-                            unit="s",
-                        )
-                    ),
-                    sized(
-                        ts(
-                            "Total authentication latency",
-                            "Mean and maximum total authentication latency from "
-                            "usable current MnT session-detail samples.",
-                            [
-                                query(
-                                    metric(
-                                        "ise3_session_authentication_latency_seconds"
-                                    ),
-                                    "{{statistic}}",
-                                )
-                            ],
-                            unit="s",
-                        )
-                    ),
-                    sized(
-                        bar(
-                            "Authentication step latency",
-                            "Mean and maximum latency by bounded numeric ISE "
-                            "authentication step code.",
-                            [
-                                instant(
-                                    "sort_desc("
-                                    + metric(
-                                        "ise3_session_authentication_step_latency_seconds"
-                                    )
-                                    + ")",
-                                    "step {{step}} · {{statistic}}",
-                                )
-                            ],
-                            unit="s",
-                        )
-                    ),
-                    sized(
-                        bar(
-                            "Authentication step samples",
-                            "Usable MnT session-detail samples behind each "
-                            "authentication-step latency value.",
-                            [
-                                instant(
-                                    "sort_desc("
-                                    + metric(
-                                        "ise3_session_authentication_step_latency_samples"
-                                    )
-                                    + ")",
-                                    "step {{step}}",
-                                )
-                            ],
-                        )
-                    ),
-                    sized(
-                        tbl(
-                            "PAN and MnT diagnostic work queue",
-                            "Bounded AAA and system diagnostics for selected core "
-                            "nodes, retaining source, severity, category, and code.",
-                            [
-                                instant(
-                                    "sort_desc("
-                                    + metric(
-                                        "ise3_psn_diagnostic_events",
-                                        'node=~"$node"',
-                                    )
-                                    + ")",
-                                    "{{node}} · {{source}} · {{severity}} · "
-                                    "{{category}} · {{message_code}}",
-                                )
-                            ],
-                            columns=("events",),
-                        )
-                    ),
-                ),
-            ),
+            STAT_H,
+            FIFTH,
         ),
-        variables=(node,),
-    )
+        sized(
+            stat_panel(
+                "Unprofiled endpoints",
+                "Endpoints ISE has not managed to profile. These fall through "
+                "profile-based authorization rules, so a growing number here "
+                "usually shows up later as unexpected policy matches.",
+                [instant(gate(metric("ise3_endpoints_unprofiled"),
+                              "endpoint_inventory"))],
+                thresholds=NONZERO_WARNING,
+                sparkline=True,
+                no_value=NO_DATA_STALE,
+            ),
+            STAT_H,
+            FIFTH,
+        ),
+        sized(
+            stat_panel(
+                "Network devices",
+                "Network devices configured in ISE. Compare against the silent "
+                "device count below: configured but never authenticating is "
+                "either decommissioned kit or a device that cannot reach ISE.",
+                [instant(gate(metric("ise3_network_devices_total"),
+                              "network_devices"))],
+                thresholds=NEUTRAL,
+                sparkline=True,
+                no_value=NO_DATA_STALE,
+            ),
+            STAT_H,
+            FIFTH,
+        ),
+        sized(
+            stat_panel(
+                "Devices classified",
+                "Share of network devices carrying the location, type and "
+                "owner attributes the rest of this dashboard set groups by. "
+                "Low classification is why breakdowns elsewhere show large "
+                "'unknown' buckets.",
+                [instant(share(
+                    gate(metric("ise3_network_devices_classified"), "network_devices"),
+                    gate(metric("ise3_network_devices_total"), "network_devices")))],
+                unit="percentunit",
+                thresholds=COVERAGE,
+                minimum=0,
+                maximum=1,
+                no_value=NO_DATA_STALE,
+            ),
+            STAT_H,
+            EIGHTH,
+        ),
+    ] + trust_pair(("endpoint_inventory", "network_devices", "nad_health"),
+                   span=EIGHTH)
 
+    growth = [
+        sized(
+            ts(
+                "Inventory over time",
+                "Endpoints and network devices as counted at each collection. "
+                "A step in either is a bulk import, a purge, or a collection "
+                "problem — the change annotations across the top say which of "
+                "those the exporter knows about.",
+                [
+                    query(gate(metric("ise3_endpoints_total"), "endpoint_inventory"),
+                          "endpoints"),
+                    query(gate(metric("ise3_network_devices_total"), "network_devices"),
+                          "network devices", ref="B"),
+                ],
+            ),
+            PANEL_H,
+            HALF,
+        ),
+        sized(
+            ts(
+                "Profiling activity",
+                "Profile change events by action and source. A burst of "
+                "re-profiling is normal after a feed update and suspicious "
+                "otherwise: endpoints changing profile change authorization.",
+                [query(gate(metric("ise3_endpoint_profile_events"), "profile_events"),
+                       "{{action}} · {{source}}")],
+                filled=True,
+            ),
+            PANEL_H,
+            HALF,
+        ),
+    ]
 
-def secureclient_dashboard():
-    owner = label_variable(
-        "ops_owner",
-        "Ops owner",
-        "ise3_posture_endpoints",
-        "ops_owner",
-    )
-    psn_drilldown = drilldown(
-        "This node on PSN troubleshooting", "ise3-psn", node=by_series("psn")
-    )
-    current = metric("ise3_posture_endpoints", 'ops_owner=~"$ops_owner"')
-    compliant = metric(
-        "ise3_posture_endpoints",
-        'ops_owner=~"$ops_owner",status=~"(?i)compliant|passed"',
-    )
-    noncompliant = metric(
-        "ise3_posture_endpoints",
-        'ops_owner=~"$ops_owner",status=~"(?i)non.?compliant|failed|error"',
-    )
-    history = metric("ise3_posture_assessments")
-    history_passed = metric(
-        "ise3_posture_assessments", 'status=~"(?i)compliant|passed"'
-    )
-    history_failed = metric(
-        "ise3_posture_assessments",
-        'status=~"(?i)non.?compliant|failed|error"',
-    )
+    composition = [
+        sized(
+            ranked(
+                "Endpoints by profile",
+                "The complete profile distribution, largest first. This is the "
+                "estate as ISE understands it — worth comparing against what "
+                "the network team believes is deployed.",
+                gate(metric("ise3_endpoints_by_profile"), "endpoint_inventory"),
+                label="profile",
+                label_header="Profile",
+                header="Endpoints",
+            ),
+            PANEL_H,
+            THIRD,
+        ),
+        sized(
+            ranked(
+                "Endpoints by identity group",
+                "Endpoint identity group membership, complete. Groups are what "
+                "most authorization policies actually key on, so an unexpected "
+                "distribution here explains unexpected policy matches.",
+                gate(metric("ise3_endpoints_by_identity_group"), "endpoint_inventory"),
+                label="identity_group",
+                label_header="Identity group",
+                header="Endpoints",
+            ),
+            PANEL_H,
+            THIRD,
+        ),
+        sized(
+            bar(
+                "Endpoint field coverage",
+                "Share of endpoints carrying each operationally useful "
+                "attribute. Bounded between nought and one and only a handful "
+                "of fields, so the bar length is genuinely the message: a short "
+                "bar is a field no policy or report can rely on.",
+                [instant(gate(metric("ise3_endpoint_inventory_field_coverage"),
+                              "endpoint_inventory"), "{{field}}")],
+                unit="percentunit",
+                thresholds=COVERAGE,
+                minimum=0,
+                maximum=1,
+            ),
+            PANEL_H,
+            THIRD,
+        ),
+    ]
+
+    devices = [
+        sized(
+            tbl(
+                "Network device assignments",
+                "Every network device with the type, location and operations "
+                "owner ISE holds for it. The lookup table behind every "
+                "ops-owner and location breakdown in this dashboard set; a "
+                "device missing attributes here is why it appears as 'unknown' "
+                "elsewhere.",
+                [instant(gate(metric("ise3_network_device_assignment", ENDPOINT_NAD),
+                              "network_devices"))],
+                columns=[None],
+                labels={"nad": "Network device", "device_type": "Type",
+                        "location": "Location", "ops_owner": "Operations owner"},
+            ),
+            TALL_H,
+            HALF,
+        ),
+        sized(
+            tbl(
+                "Silent and stale network devices",
+                "Time since each device last authenticated anything, longest "
+                "first. A device at the top of this list is either "
+                "decommissioned, misconfigured, or unable to reach ISE — and "
+                "no other panel will tell you, because a silent device "
+                "produces no errors.",
+                [instant(gate(metric("ise3_nad_last_authentication_age_seconds",
+                                     ENDPOINT_NAD), "nad_health"))],
+                columns=["Silent for"],
+                sort=("Silent for", True),
+                labels={"nad": "Network device"},
+                column_overrides=[
+                    by_column("Silent for", unit="s", width=140),
+                ],
+            ),
+            TALL_H,
+            HALF,
+        ),
+    ]
+
+    composition_devices = [
+        sized(
+            ranked(
+                "Devices by location",
+                "Network devices per location attribute, computed by ISE "
+                "rather than from the exporter's device cache — so unlike the "
+                "assignment table above, this stays populated while that cache "
+                "is still filling.",
+                gate(metric("ise3_network_devices_by_location"), "network_devices"),
+                label="location",
+                label_header="Location",
+                header="Devices",
+            ),
+            PANEL_H,
+            QUARTER,
+        ),
+        sized(
+            ranked(
+                "Devices by type",
+                "Network devices per device-type attribute. Worth checking "
+                "against reality before writing a policy that keys on device "
+                "type: a large 'unknown' bucket means the policy will not "
+                "match what you expect.",
+                gate(metric("ise3_network_devices_by_type"), "network_devices"),
+                label="device_type",
+                label_header="Device type",
+                header="Devices",
+            ),
+            PANEL_H,
+            QUARTER,
+        ),
+        sized(
+            ranked(
+                "Devices by operations owner",
+                "Network devices per operations owner. The lookup behind every "
+                "ops-owner breakdown in this dashboard set — if a team is "
+                "missing here, their devices appear as 'unknown' everywhere "
+                "else.",
+                gate(metric("ise3_network_devices_by_ops_owner"), "network_devices"),
+                label="ops_owner",
+                label_header="Operations owner",
+                header="Devices",
+            ),
+            PANEL_H,
+            QUARTER,
+        ),
+        sized(
+            ranked(
+                "Live sessions by network device",
+                "Where the live sessions actually are. Read against the "
+                "authentication volume table: a device with sessions but no "
+                "recent authentications is holding stale sessions that were "
+                "never torn down.",
+                gate(metric("ise3_active_sessions_by_nad", ENDPOINT_NAD),
+                     "active_sessions"),
+                label="nad",
+                label_header="Network device",
+                header="Sessions",
+            ),
+            PANEL_H,
+            QUARTER,
+        ),
+    ]
+
+    attributes = [
+        sized(
+            ranked(
+                "Endpoints by hardware model",
+                "Manufacturer and model as the live attribute feed reports it. "
+                "Suppressed until the attribute cache is warm, so it cannot "
+                "under-report beside the inventory counts above.",
+                gate(metric("ise3_endpoint_model"), "endpoint_attributes"),
+                label="model",
+                label_header="Model",
+                header="Endpoints",
+            ),
+            PANEL_H,
+            THIRD,
+        ),
+        sized(
+            ranked(
+                "Endpoints by operating system",
+                "Operating system distribution from the live attribute feed. "
+                "Read beside the posture dashboard: an OS with no posture "
+                "coverage is an OS nobody is assessing.",
+                gate(metric("ise3_endpoint_operating_system"), "endpoint_attributes"),
+                label="os",
+                label_header="Operating system",
+                header="Endpoints",
+            ),
+            PANEL_H,
+            THIRD,
+        ),
+        sized(
+            bar(
+                "MDM registration and compliance",
+                "Endpoints split by whether an MDM has them registered and "
+                "whether it considers them compliant. Two bounded categories, "
+                "which is what a bar gauge is for; anything unregistered is "
+                "outside MDM enforcement entirely.",
+                [
+                    instant(gate(metric("ise3_endpoint_mdm_registered"),
+                                 "endpoint_attributes"),
+                            "registered: {{registered}}"),
+                    instant(gate(metric("ise3_endpoint_mdm_compliant"),
+                                 "endpoint_attributes"),
+                            "compliant: {{compliant}}", ref="B"),
+                ],
+                thresholds=NEUTRAL,
+            ),
+            PANEL_H,
+            THIRD,
+        ),
+    ]
+
+    activity = [
+        sized(
+            tbl(
+                "Per-device authentication activity",
+                "Passed and failed authentication counts per network device "
+                "from the NAD health collection, complete and sorted by "
+                "failures. Overlaps deliberately with the RADIUS access work "
+                "queue — this one is the device-owner's view, that one is the "
+                "incident view.",
+                [instant(gate(metric("ise3_nad_authentications",
+                                     f'{ENDPOINT_NAD},status="failed"'),
+                              "nad_health"), ref="A"),
+                 instant(gate(metric("ise3_nad_authentications",
+                                     f'{ENDPOINT_NAD},status="passed"'),
+                              "nad_health"), ref="B")],
+                columns=["Failed", "Passed"],
+                sort=("Failed", True),
+                labels={"nad": "Network device"},
+                column_overrides=[
+                    by_column("Failed", thresholds=NONZERO_WARNING,
+                              colour_cells=True, width=110),
+                ],
+            ),
+            TALL_H,
+            HALF,
+        ),
+        sized(
+            stat_panel(
+                "Silent devices and activity coverage",
+                "How many configured devices have shown no authentication "
+                "activity at all, and what share of devices the activity "
+                "source could account for. Low coverage means the silent count "
+                "beside it is a floor rather than a total.",
+                [
+                    instant(gate(metric("ise3_nad_silent_total"), "nad_health"),
+                            "silent"),
+                    instant(gate(metric("ise3_nad_activity_covered"), "nad_health"),
+                            "covered", ref="B"),
+                ],
+                thresholds=NONZERO_WARNING,
+                overrides=[by_ref("B", unit="percentunit",
+                                  thresholds=COVERAGE)],
+                no_value=NO_DATA_STALE,
+            ),
+            STAT_H,
+            HALF,
+        ),
+        sized(
+            ts(
+                "Network device detail-cache coverage",
+                "How much of the network device list the exporter has fetched "
+                "full detail for. The assignment table above is suppressed "
+                "below 99% coverage, so a dip here explains a table that has "
+                "gone blank.",
+                [query(metric("ise3_detail_cache_coverage",
+                              'cache="ers_network_device"'), "device detail")],
+                unit="percentunit",
+                thresholds=COVERAGE,
+                minimum=0,
+                maximum=1,
+            ),
+            PANEL_H,
+            HALF,
+        ),
+    ]
+
+    closing = [sized(about(
+        "describe what is on the network and what ISE knows about it — the "
+        "inventory view, not the incident view.",
+        [
+            "Read the inventory counts and the classification share.",
+            "Use the composition tables to check the estate matches "
+            "expectation.",
+            "Work the silent-device list: silence produces no errors anywhere "
+            "else, so this is the only panel that surfaces it.",
+        ],
+        [
+            "Low classification: fix the network device attributes in ISE — "
+            "several dashboards group by them.",
+            "Growing unprofiled count: check the profiling feed before "
+            "changing policy.",
+            "Blank attribute panels: the detail cache is still filling, see "
+            "the coverage panel.",
+        ],
+        ["Triage", "RADIUS access", "Posture", "Capacity"],
+    ), STRIP_H, FULL)]
+
     return assemble(
-        "ISE 3 — Secure Client and Posture",
-        "ise3-secureclient",
-        "Current active posture from MnT beside historical Data Connect "
-        "assessments, policy outcomes, client versions, operating systems, and "
-        "detail-cache coverage.",
-        (
-            (
-                "Current active posture",
-                (
-                    sized(
-                        stat_panel(
-                            "Posture dataset readiness",
-                            "Availability and freshness of current MnT posture and "
-                            "historical Data Connect assessment datasets. NOT READY "
-                            "means the panels fed by that dataset stay blank.",
-                            [
-                                instant(ready_bool("posture_current"), "current"),
-                                instant(
-                                    ready_bool("posture_history"), "history", "B"
-                                ),
-                            ],
-                            mappings=READINESS,
-                            no_value=NO_DATA_EXPORTER,
-                        ),
-                        5,
-                        8,
-                    ),
-                    sized(
-                        stat_panel(
-                            "Active compliance share",
-                            "Compliant active endpoints divided by endpoints with "
-                            "a conclusive posture state.",
-                            [
-                                instant(
-                                    f"sum({gate(compliant, 'posture_current')}) / "
-                                    f"clamp_min(sum({gate(compliant, 'posture_current')}) + "
-                                    f"sum({gate(noncompliant, 'posture_current')}), 1)",
-                                    "compliant",
-                                )
-                            ],
-                            unit="percentunit",
-                            thresholds=RATIO_HIGH_IS_GOOD,
-                            minimum=0,
-                            maximum=1,
-                            no_value=NO_DATA_STALE,
-                        ),
-                        5,
-                        8,
-                    ),
-                    sized(
-                        stat_panel(
-                            "Posture snapshot age",
-                            "Seconds since the latest successful current MnT "
-                            "posture and historical Data Connect assessments.",
-                            [
-                                instant(
-                                    "time() - "
-                                    + metric(
-                                        "ise3_dataset_last_success_timestamp",
-                                        'dataset="posture_current"',
-                                    ),
-                                    "current",
-                                ),
-                                instant(
-                                    "time() - "
-                                    + metric(
-                                        "ise3_dataset_last_success_timestamp",
-                                        'dataset="posture_history"',
-                                    ),
-                                    "historical",
-                                    "B",
-                                ),
-                            ],
-                            unit="s",
-                        ),
-                        5,
-                        8,
-                    ),
-                    sized(
-                        stat_panel(
-                            "Active non-compliant endpoints",
-                            "Distinct active endpoints with a failed, error, or "
-                            "non-compliant current posture state.",
-                            [
-                                instant(
-                                    f"sum({gate(noncompliant, 'posture_current')})",
-                                    "non-compliant",
-                                )
-                            ],
-                            thresholds=NONZERO_WARNING,
-                            no_value=NO_DATA_STALE,
-                        ),
-                        5,
-                        8,
-                    ),
-                    sized(
-                        ts(
-                            "Current posture status",
-                            "Distinct active endpoints over time by posture state "
-                            "and operational owner.",
-                            [
-                                query(
-                                    gate(current, "posture_current"),
-                                    "{{ops_owner}} · {{status}}",
-                                )
-                            ],
-                        )
-                    ),
-                    sized(
-                        ts(
-                            "MnT detail coverage",
-                            "Coverage, entries, and deferred work for the shared "
-                            "session-detail cache behind current posture.",
-                            [
-                                query(
-                                    metric(
-                                        "ise3_detail_cache_coverage",
-                                        'cache="mnt_session_detail"',
-                                    ),
-                                    "coverage",
-                                ),
-                                query(
-                                    metric(
-                                        "ise3_detail_cache_entries",
-                                        'cache="mnt_session_detail"',
-                                    ),
-                                    "entries",
-                                    ref="B",
-                                ),
-                                query(
-                                    metric(
-                                        "ise3_detail_fetches_deferred",
-                                        'cache="mnt_session_detail"',
-                                    ),
-                                    "deferred",
-                                    ref="C",
-                                ),
-                            ],
-                        )
-                    ),
-                    sized(
-                        bar(
-                            "MnT source field coverage",
-                            "Fraction of cached active-session detail carrying "
-                            "each posture, client, operating-system, and "
-                            "authentication-latency field.",
-                            [
-                                instant(
-                                    "sort_desc("
-                                    + metric(
-                                        "ise3_session_detail_field_coverage"
-                                    )
-                                    + ")",
-                                    "{{field}}",
-                                )
-                            ],
-                            unit="percentunit",
-                            thresholds=COVERAGE,
-                            minimum=0,
-                            maximum=1,
-                        )
-                    ),
-                    sized(
-                        bar(
-                            "Active Secure Client versions",
-                            "Distinct active endpoints by Secure Client posture "
-                            "agent version from cached MnT detail.",
-                            [
-                                instant(
-                                    "sort_desc(sum by (agent_version) "
-                                    f"({covered(metric('ise3_posture_agent_version_endpoints'), 'posture_current', 'mnt_session_detail')}))",
-                                    "{{agent_version}}",
-                                )
-                            ],
-                        )
-                    ),
-                    sized(
-                        bar(
-                            "Active endpoint operating systems",
-                            "Distinct active posture endpoints grouped by reported "
-                            "operating system.",
-                            [
-                                instant(
-                                    "sort_desc(sum by (os) "
-                                    f"({covered(metric('ise3_posture_endpoints_by_os'), 'posture_current', 'mnt_session_detail')}))",
-                                    "{{os}}",
-                                )
-                            ],
-                        )
-                    ),
-                    sized(
-                        bar(
-                            "Active posture policy outcomes",
-                            "Distinct active endpoints per posture policy and "
-                            "parsed policy result.",
-                            [
-                                instant(
-                                    "sort_desc(sum by (policy,result) "
-                                    f"({covered(metric('ise3_posture_policy_results'), 'posture_current', 'mnt_session_detail')}))",
-                                    "{{policy}} · {{result}}",
-                                )
-                            ],
-                        )
-                    ),
-                    sized(
-                        bar(
-                            "Failed active posture policies",
-                            "Policies currently failing active endpoints, sorted "
-                            "by affected endpoint count.",
-                            [
-                                instant(
-                                    "sort_desc(sum by (policy) "
-                                    "("
-                                    + covered(
-                                        metric(
-                                            "ise3_posture_policy_results",
-                                            'result=~"(?i)fail(ed)?|error"',
-                                        ),
-                                        "posture_current",
-                                        "mnt_session_detail",
-                                    )
-                                    + "))",
-                                    "{{policy}}",
-                                )
-                            ],
-                        )
-                    ),
-                    sized(
-                        bar(
-                            "Active posture by ops owner",
-                            "Current posture state grouped by the operational "
-                            "owner responsible for the endpoint's NAD.",
-                            [
-                                instant(
-                                    "sort_desc(sum by (ops_owner,status) "
-                                    f"({gate(current, 'posture_current')}))",
-                                    "{{ops_owner}} · {{status}}",
-                                )
-                            ],
-                        )
-                    ),
-                    sized(
-                        bar(
-                            "Active endpoints by PSN",
-                            "Distinct current posture endpoints by serving policy "
-                            "service node and posture status.",
-                            [
-                                instant(
-                                    "sort_desc(sum by (psn,status) ("
-                                    + gate(
-                                        metric(
-                                            "ise3_posture_endpoints_by_psn"
-                                        ),
-                                        "posture_current",
-                                    )
-                                    + "))",
-                                    "{{psn}} · {{status}}",
-                                )
-                            ],
-                            data_links=(psn_drilldown,),
-                        )
-                    ),
-                    sized(
-                        bar(
-                            "Active compliance share by ops owner",
-                            "Conclusive compliant share for each operations owner, "
-                            "keeping responsibility attached to the posture result.",
-                            [
-                                instant(
-                                    "sum by (ops_owner) ("
-                                    + gate(compliant, "posture_current")
-                                    + ") / clamp_min(sum by (ops_owner) ("
-                                    + gate(compliant, "posture_current")
-                                    + ") + sum by (ops_owner) ("
-                                    + gate(noncompliant, "posture_current")
-                                    + "), 1)",
-                                    "{{ops_owner}}",
-                                )
-                            ],
-                            unit="percentunit",
-                            thresholds=RATIO_HIGH_IS_GOOD,
-                            minimum=0,
-                            maximum=1,
-                        )
-                    ),
-                    sized(
-                        bar(
-                            "Active non-compliant endpoints by ops owner",
-                            "Current non-compliant endpoint count routed to the "
-                            "operations owner responsible for each NAD.",
-                            [
-                                instant(
-                                    "sort_desc(sum by (ops_owner) ("
-                                    + gate(noncompliant, "posture_current")
-                                    + "))",
-                                    "{{ops_owner}}",
-                                )
-                            ],
-                        )
-                    ),
-                ),
-            ),
-            (
-                "Historical assessments",
-                (
-                    sized(
-                        stat_panel(
-                            "Historical compliance share",
-                            "Compliant endpoints divided by conclusive posture "
-                            "assessments in the reporting window.",
-                            [
-                                instant(
-                                    f"sum({gate(history_passed, 'posture_history')}) / "
-                                    f"clamp_min(sum({gate(history_passed, 'posture_history')}) + "
-                                    f"sum({gate(history_failed, 'posture_history')}), 1)",
-                                    "compliant",
-                                )
-                            ],
-                            unit="percentunit",
-                            thresholds=RATIO_HIGH_IS_GOOD,
-                            minimum=0,
-                            maximum=1,
-                            no_value=NO_DATA_STALE,
-                        ),
-                        5,
-                        12,
-                    ),
-                    sized(
-                        stat_panel(
-                            "Assessed and failed endpoints",
-                            "Distinct assessed endpoints and conclusive failures "
-                            "in the historical reporting window.",
-                            [
-                                instant(
-                                    f"sum({gate(history, 'posture_history')})",
-                                    "assessed",
-                                ),
-                                instant(
-                                    f"sum({gate(history_failed, 'posture_history')})",
-                                    "failed",
-                                    "B",
-                                ),
-                            ],
-                            no_value=NO_DATA_STALE,
-                        ),
-                        5,
-                        12,
-                    ),
-                    sized(
-                        stat_panel(
-                            "Eligible posture coverage",
-                            "Currently eligible endpoints assessed in the reporting "
-                            "window beside those without a recent assessment.",
-                            [
-                                instant(
-                                    metric(
-                                        "ise3_posture_eligible_recently_assessed_total"
-                                    ),
-                                    "recently assessed",
-                                ),
-                                instant(
-                                    metric(
-                                        "ise3_posture_eligible_without_recent_assessment_total"
-                                    ),
-                                    "without recent assessment",
-                                    "B",
-                                ),
-                                instant(
-                                    metric(
-                                        "ise3_posture_eligible_endpoints_total"
-                                    ),
-                                    "eligible",
-                                    "C",
-                                ),
-                            ],
-                            overrides=(by_ref("B", thresholds=NONZERO_WARNING),),
-                        ),
-                        5,
-                        12,
-                    ),
-                    sized(
-                        stat_panel(
-                            "Fleet posture coverage",
-                            "Fraction of currently eligible endpoints with an "
-                            "assessment in the historical reporting window.",
-                            [
-                                instant(
-                                    metric(
-                                        "ise3_posture_eligible_recently_assessed_total"
-                                    )
-                                    + " / clamp_min("
-                                    + metric(
-                                        "ise3_posture_eligible_endpoints_total"
-                                    )
-                                    + ", 1)",
-                                    "coverage",
-                                )
-                            ],
-                            unit="percentunit",
-                            thresholds=COVERAGE,
-                            minimum=0,
-                            maximum=1,
-                        ),
-                        5,
-                        12,
-                    ),
-                    sized(
-                        ts(
-                            "Historical assessment status",
-                            "Distinct endpoints assessed in each posture state "
-                            "over the historical reporting window.",
-                            [
-                                query(
-                                    gate(history, "posture_history"),
-                                    "{{status}}",
-                                )
-                            ],
-                        )
-                    ),
-                    sized(
-                        bar(
-                            "Historical assessments by policy",
-                            "Distinct endpoints per policy and outcome; endpoints "
-                            "are not double-counted across failed conditions.",
-                            [
-                                instant(
-                                    "sort_desc(sum by (policy,status) "
-                                    f"({gate(metric('ise3_posture_assessments_by_policy'), 'posture_history')}))",
-                                    "{{policy}} · {{status}}",
-                                )
-                            ],
-                        )
-                    ),
-                    sized(
-                        tbl(
-                            "Historical failed conditions",
-                            "Distinct endpoints failing each posture condition in "
-                            "the reporting window, sorted by impact.",
-                            [
-                                instant(
-                                    "sort_desc("
-                                    f"{gate(metric('ise3_posture_failed_conditions'), 'posture_history')}"
-                                    ")",
-                                    "{{condition}}",
-                                )
-                            ],
-                            columns=("endpoints",),
-                        )
-                    ),
-                    sized(
-                        bar(
-                            "Historical assessments by client version",
-                            "Distinct assessed endpoints grouped by Secure Client "
-                            "posture agent version.",
-                            [
-                                instant(
-                                    "sort_desc(sum by (agent_version) "
-                                    f"({gate(metric('ise3_posture_assessments_by_agent_version'), 'posture_history')}))",
-                                    "{{agent_version}}",
-                                )
-                            ],
-                        )
-                    ),
-                    sized(
-                        bar(
-                            "Historical assessments by operating system",
-                            "Distinct assessed endpoints grouped by reported "
-                            "operating system.",
-                            [
-                                instant(
-                                    "sort_desc(sum by (os) "
-                                    f"({gate(metric('ise3_posture_assessments_by_os'), 'posture_history')}))",
-                                    "{{os}}",
-                                )
-                            ],
-                        )
-                    ),
-                    sized(
-                        bar(
-                            "Historical assessments by PSN",
-                            "Distinct assessed endpoints grouped by serving PSN "
-                            "and posture outcome.",
-                            [
-                                instant(
-                                    "sort_desc(sum by (psn,status) ("
-                                    + gate(
-                                        metric(
-                                            "ise3_posture_assessments_by_psn"
-                                        ),
-                                        "posture_history",
-                                    )
-                                    + "))",
-                                    "{{psn}} · {{status}}",
-                                )
-                            ],
-                            data_links=(psn_drilldown,),
-                        )
-                    ),
-                    sized(
-                        ts(
-                            "Posture assessment volume per PSN",
-                            "Historical assessment-window volume per PSN and "
-                            "posture state over dashboard time.",
-                            [
-                                query(
-                                    gate(
-                                        metric(
-                                            "ise3_posture_assessments_by_psn"
-                                        ),
-                                        "posture_history",
-                                    ),
-                                    "{{psn}} · {{status}}",
-                                )
-                            ],
-                        )
-                    ),
-                    sized(
-                        tbl(
-                            "Historical posture failure work queue",
-                            "Failed policy and condition evidence for prioritising "
-                            "posture remediation without storing endpoint rows.",
-                            [
-                                # A union, not two targets: a failed policy and
-                                # a failed condition are separate rows of one
-                                # queue. They share no key, so joining them
-                                # would pair unrelated evidence on one row.
-                                instant(
-                                    "sort_desc(("
-                                    + gate(
-                                        metric(
-                                            "ise3_posture_assessments_by_policy",
-                                            'status=~"(?i)non.?compliant|failed|error"',
-                                        ),
-                                        "posture_history",
-                                    )
-                                    + ") or ("
-                                    + gate(
-                                        metric(
-                                            "ise3_posture_failed_conditions"
-                                        ),
-                                        "posture_history",
-                                    )
-                                    + "))",
-                                    "{{policy}} · {{status}} · {{condition}}",
-                                ),
-                            ],
-                            columns=("endpoints",),
-                        )
-                    ),
-                ),
-            ),
+        "ISE · Endpoints and devices",
+        "ise3-endpoints",
+        "Tier 2 diagnostic. What is on the network, and what does ISE know "
+        "about it? Inventory and classification first, then composition, then "
+        "the network devices and their activity.",
+        [
+            ("Inventory", inventory),
+            ("Over time", growth),
+            ("Composition", composition),
+            ("Network devices", devices),
+            ("Device composition", composition_devices, COLLAPSED),
+            ("Live endpoint attributes", attributes, COLLAPSED),
+            ("Device activity", activity, COLLAPSED),
+            ("Reference", closing, COLLAPSED),
+        ],
+        tier=DIAGNOSTIC,
+        variables=(
+            label_variable("nad", "Network device",
+                           "ise3_network_device_assignment", "nad"),
         ),
-        variables=(owner,),
     )
+
+
+# ---------------------------------------------------------------------------
+# Tier 2 — posture
+# ---------------------------------------------------------------------------
+
+POSTURE_COMPLIANT = gate(
+    metric("ise3_posture_endpoints", 'status=~"Compliant|compliant"'),
+    "posture_current")
+POSTURE_ALL = gate(metric("ise3_posture_endpoints"), "posture_current")
+
+
+def posture_dashboard():
+    now = [
+        sized(
+            stat_panel(
+                "Compliant share",
+                "Share of endpoints with a live posture result that ISE "
+                "considers compliant. The headline compliance number — but "
+                "read it beside the assessment coverage stat, because it only "
+                "counts endpoints that were assessed at all.",
+                [instant(share(summed(POSTURE_COMPLIANT), summed(POSTURE_ALL)))],
+                unit="percentunit",
+                thresholds=RATIO_HIGH_IS_GOOD,
+                minimum=0,
+                maximum=1,
+                sparkline=True,
+                no_value=NO_DATA_STALE,
+            ),
+            STAT_H,
+            FIFTH,
+        ),
+        sized(
+            stat_panel(
+                "Non-compliant endpoints",
+                "Endpoints currently connected with a posture status that is "
+                "not compliant. These are the ones sitting in a quarantine or "
+                "remediation authorization profile right now.",
+                [instant(summed(gate(
+                    metric("ise3_posture_endpoints",
+                           'status!~"Compliant|compliant"'), "posture_current")))],
+                thresholds=NONZERO_WARNING,
+                sparkline=True,
+                no_value=NO_DATA_STALE,
+            ),
+            STAT_H,
+            FIFTH,
+        ),
+        sized(
+            stat_panel(
+                "Eligible but unassessed",
+                "Endpoints eligible for posture that have no recent assessment "
+                "at all. The most under-read number in posture reporting: "
+                "these are not compliant and not non-compliant, they are "
+                "invisible, and the compliant share above excludes them.",
+                [instant(gate(metric("ise3_posture_eligible_without_recent_assessment_total"),
+                              "posture_history"))],
+                thresholds=NONZERO_WARNING,
+                sparkline=True,
+                no_value=NO_DATA_STALE,
+            ),
+            STAT_H,
+            FIFTH,
+        ),
+        sized(
+            stat_panel(
+                "Assessment coverage",
+                "Share of posture-eligible endpoints that were actually "
+                "assessed recently. This is the denominator honesty check for "
+                "the compliant share: low coverage makes a high compliance "
+                "figure meaningless.",
+                [instant(share(
+                    gate(metric("ise3_posture_eligible_recently_assessed_total"),
+                         "posture_history"),
+                    gate(metric("ise3_posture_eligible_endpoints_total"),
+                         "posture_history")))],
+                unit="percentunit",
+                thresholds=COVERAGE,
+                minimum=0,
+                maximum=1,
+                no_value=NO_DATA_STALE,
+            ),
+            STAT_H,
+            EIGHTH,
+        ),
+    ] + trust_pair(("posture_current", "posture_history"), span=EIGHTH)
+
+    over_time = [
+        sized(
+            ts(
+                "Posture status over time",
+                "Live posture status of connected endpoints, stacked because "
+                "the statuses together are the whole assessed population. A "
+                "widening non-compliant band without a matching drop in "
+                "compliant usually means new endpoints arrived unassessed.",
+                [query(summed(POSTURE_ALL, by="instance,status"), "{{status}}")],
+                stacked=True,
+                series_colours=OUTCOME_COLOURS,
+            ),
+            PANEL_H,
+            HALF,
+        ),
+        sized(
+            ts(
+                "Assessment volume per PSN",
+                "Posture assessments each PSN performed, split by outcome. "
+                "Uneven distribution is a load-balancing question; a node "
+                "producing only failures is a node whose posture "
+                "configuration or connectivity is broken.",
+                [query(gate(metric("ise3_posture_assessments_by_psn"),
+                            "posture_history"), "{{psn}} · {{status}}")],
+                series_colours=OUTCOME_COLOURS,
+            ),
+            PANEL_H,
+            HALF,
+        ),
+    ]
+
+    where = [
+        sized(
+            ranked(
+                "Non-compliance by owner",
+                "Live posture status grouped by the operations owner attribute "
+                "of the network device the endpoint is attached to. This is "
+                "the panel that turns a compliance number into a list of teams "
+                "to talk to.",
+                summed(gate(metric("ise3_posture_endpoints",
+                                   'status!~"Compliant|compliant"'),
+                            "posture_current"), by="instance,ops_owner"),
+                label="ops_owner",
+                label_header="Operations owner",
+                header="Non-compliant",
+                value_thresholds=NONZERO_WARNING,
+                colour_cells=True,
+            ),
+            PANEL_H,
+            THIRD,
+        ),
+        sized(
+            ranked(
+                "Failing posture policies",
+                "Posture policies with failing results, worst first. A single "
+                "policy dominating usually means the policy is wrong rather "
+                "than the fleet — check what it requires before chasing "
+                "endpoints.",
+                summed(gate(metric("ise3_posture_policy_results",
+                                   'result!~"pass|Passed|passed"'),
+                            "posture_current"), by="instance,policy"),
+                label="policy",
+                label_header="Posture policy",
+                header="Failures",
+                value_thresholds=NONZERO_WARNING,
+                colour_cells=True,
+            ),
+            PANEL_H,
+            THIRD,
+        ),
+        sized(
+            ranked(
+                "Failed conditions",
+                "The individual posture conditions endpoints failed — the "
+                "specific missing patch, absent process, or out-of-date "
+                "definition file. The most directly actionable panel here.",
+                gate(metric("ise3_posture_failed_conditions"), "posture_history"),
+                label="condition",
+                label_header="Condition",
+                header="Endpoints",
+                value_thresholds=NONZERO_WARNING,
+                colour_cells=True,
+            ),
+            PANEL_H,
+            THIRD,
+        ),
+    ]
+
+    population = [
+        sized(
+            ranked(
+                "Secure Client versions",
+                "Agent versions across endpoints with a live posture result. "
+                "Old agents are the usual explanation for a cluster of "
+                "unassessed or failing endpoints in one part of the estate.",
+                gate(metric("ise3_posture_agent_version_endpoints"),
+                     "posture_current"),
+                label="agent_version",
+                label_header="Secure Client version",
+                header="Endpoints",
+            ),
+            PANEL_H,
+            HALF,
+        ),
+        sized(
+            ranked(
+                "Operating systems assessed",
+                "Operating systems among posture-assessed endpoints. Compare "
+                "against the endpoints dashboard's OS breakdown: an OS present "
+                "there and absent here is an OS nobody is posturing.",
+                gate(metric("ise3_posture_endpoints_by_os"), "posture_current"),
+                label="os",
+                label_header="Operating system",
+                header="Endpoints",
+            ),
+            PANEL_H,
+            HALF,
+        ),
+    ]
+
+    history = [
+        sized(
+            stat_panel(
+                "Historical compliance share",
+                "Compliance across the assessment history window rather than "
+                "the live session list. Diverging from the live figure means "
+                "the population that is connected right now is not "
+                "representative of the fleet.",
+                [instant(share(
+                    summed(gate(metric("ise3_posture_assessments",
+                                       'status=~"Compliant|compliant|Pass|passed"'),
+                                "posture_history")),
+                    summed(gate(metric("ise3_posture_assessments"),
+                                "posture_history"))))],
+                unit="percentunit",
+                thresholds=RATIO_HIGH_IS_GOOD,
+                minimum=0,
+                maximum=1,
+                no_value=NO_DATA_STALE,
+            ),
+            STAT_H,
+            THIRD,
+        ),
+        sized(
+            stat_panel(
+                "MnT session field coverage",
+                "Share of MnT session records carrying the posture fields "
+                "these panels read. Low coverage means the live posture "
+                "picture is drawn from a subset of sessions, not all of them.",
+                [instant(f"avg by (instance) ("
+                         f"{gate(metric('ise3_session_detail_field_coverage'), 'posture_current')})")],
+                unit="percentunit",
+                thresholds=COVERAGE,
+                minimum=0,
+                maximum=1,
+                no_value=NO_DATA_STALE,
+            ),
+            STAT_H,
+            THIRD,
+        ),
+        sized(
+            stat_panel(
+                "Eligible endpoints",
+                "How many endpoints are in scope for posture, as the "
+                "assessment history counts them and as the endpoint inventory "
+                "counts them. The denominator behind assessment coverage — the "
+                "two disagreeing means posture scope and inventory scope are "
+                "not the same population.",
+                [
+                    instant(gate(metric("ise3_posture_eligible_endpoints_total"),
+                                 "posture_history"), "eligible"),
+                    instant(gate(metric("ise3_endpoints_posture_applicable",
+                                        'applicable="true"'), "endpoint_inventory"),
+                            "applicable", ref="B"),
+                ],
+                thresholds=NEUTRAL,
+                no_value=NO_DATA_STALE,
+            ),
+            STAT_H,
+            THIRD,
+        ),
+        sized(
+            tbl(
+                "Live posture by PSN",
+                "Current posture status of connected endpoints, per serving "
+                "PSN. A node whose endpoints are disproportionately unknown or "
+                "non-compliant usually has a posture configuration or "
+                "connectivity problem of its own.",
+                [instant(gate(metric("ise3_posture_endpoints_by_psn"),
+                              "posture_current"))],
+                columns=["Endpoints"],
+                sort=("Endpoints", True),
+                labels={"psn": "PSN", "status": "Status"},
+            ),
+            PANEL_H,
+            HALF,
+        ),
+        sized(
+            ts(
+                "Historical assessment outcomes",
+                "Assessment results over the history window, stacked by "
+                "status. The trend view of compliance, as opposed to the live "
+                "snapshot at the top of the page.",
+                [query(summed(gate(metric("ise3_posture_assessments"),
+                                   "posture_history"), by="instance,status"),
+                       "{{status}}")],
+                stacked=True,
+                series_colours=OUTCOME_COLOURS,
+            ),
+            PANEL_H,
+            HALF,
+        ),
+        sized(
+            tbl(
+                "Assessment results by policy",
+                "Historical assessment counts per policy and status. Read it "
+                "when a policy has been changed and you need to see whether "
+                "the change did what was intended.",
+                [instant(gate(metric("ise3_posture_assessments_by_policy"),
+                              "posture_history"))],
+                columns=["Assessments"],
+                sort=("Assessments", True),
+                labels={"policy": "Posture policy", "status": "Status"},
+            ),
+            PANEL_H,
+            HALF,
+        ),
+    ]
+
+    closing = [sized(about(
+        "answer whether the fleet is compliant, and separate 'assessed and "
+        "failing' from 'never assessed at all'.",
+        [
+            "Read compliant share and assessment coverage together — one "
+            "without the other is misleading.",
+            "Read **Eligible but unassessed**: invisible endpoints are the "
+            "real gap.",
+            "Use failed conditions to get to something actionable.",
+        ],
+        [
+            "High compliance, low coverage: the number is not trustworthy; fix "
+            "the agents before reporting it.",
+            "One policy dominating failures: inspect the policy, not the "
+            "endpoints.",
+            "One PSN producing all failures: continue on the PSN service "
+            "dashboard.",
+        ],
+        ["Triage", "Endpoints and devices", "PSN service"],
+    ), STRIP_H, FULL)]
+
+    return assemble(
+        "ISE · Posture",
+        "ise3-posture",
+        "Tier 2 diagnostic. Is the fleet compliant, and is the compliance "
+        "figure trustworthy? Live posture first, then where non-compliance "
+        "sits, then the client population and the assessment history.",
+        [
+            ("Compliance now", now),
+            ("Over time", over_time),
+            ("Where non-compliance sits", where),
+            ("Client population", population),
+            ("Assessment history", history, COLLAPSED),
+            ("Reference", closing, COLLAPSED),
+        ],
+        tier=DIAGNOSTIC,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Tier 2 — device administration
+# ---------------------------------------------------------------------------
+
+TACACS_PASSED = summed(gate(
+    metric("ise3_tacacs_authentications", 'dimension="username",status="passed"'),
+    "tacacs_activity"))
+TACACS_ALL = summed(gate(
+    metric("ise3_tacacs_authentications", 'dimension="username"'),
+    "tacacs_activity"))
 
 
 def tacacs_dashboard():
-    username = label_variable(
-        "username",
-        "Username",
-        "ise3_tacacs_internal_account_enabled",
-        "username",
-    )
-    # A TACACS device is the same NAD the endpoints dashboard classifies; the
-    # activity metrics carry its name in the generic `value` dimension label.
-    device_drilldown = drilldown(
-        "This device on Endpoints and devices",
-        "ise3-endpoints",
-        nad=by_series("value"),
-    )
+    activity = [
+        sized(
+            stat_panel(
+                "Authentication success rate",
+                "Share of TACACS+ device administration logins that succeeded. "
+                "Unlike RADIUS, a low rate here is usually a small number of "
+                "people getting it wrong rather than a systemic fault — read "
+                "the per-account table before escalating.",
+                [instant(share(TACACS_PASSED, TACACS_ALL))],
+                unit="percentunit",
+                thresholds=RATIO_HIGH_IS_GOOD,
+                minimum=0,
+                maximum=1,
+                sparkline=True,
+                no_value=NO_DATA_STALE,
+            ),
+            STAT_H,
+            FIFTH,
+        ),
+        sized(
+            stat_panel(
+                "Authorizations",
+                "TACACS+ authorization decisions in the window. A step change "
+                "without a matching change in authentications means shell "
+                "profiles or command sets changed, not the number of people "
+                "logging in.",
+                [instant(summed(gate(metric("ise3_tacacs_authorizations",
+                                            'dimension="username"'),
+                                     "tacacs_activity")))],
+                thresholds=NEUTRAL,
+                sparkline=True,
+                no_value=NO_DATA_STALE,
+            ),
+            STAT_H,
+            FIFTH,
+        ),
+        sized(
+            stat_panel(
+                "Commands accounted",
+                "Commands recorded by TACACS+ accounting. This is the audit "
+                "trail; a collapse to zero while authentications continue "
+                "means command accounting has been switched off somewhere.",
+                [instant(summed(gate(metric("ise3_tacacs_commands",
+                                            'dimension="username"'),
+                                     "tacacs_activity")))],
+                thresholds=NEUTRAL,
+                sparkline=True,
+                no_value=NO_DATA_STALE,
+            ),
+            STAT_H,
+            FIFTH,
+        ),
+        sized(
+            stat_panel(
+                "Internal accounts",
+                "Internal device-administration accounts configured in ISE, "
+                "and how many showed activity in the window. A large gap "
+                "between the two is the hygiene problem the review queue below "
+                "enumerates.",
+                [
+                    instant(gate(metric("ise3_tacacs_internal_accounts"),
+                                 "tacacs_config"), "configured"),
+                    instant(gate(metric("ise3_tacacs_active_accounts"),
+                                 "tacacs_activity"), "active", ref="B"),
+                ],
+                thresholds=NEUTRAL,
+                no_value=NO_DATA_STALE,
+            ),
+            STAT_H,
+            EIGHTH,
+        ),
+    ] + trust_pair(("tacacs_activity", "tacacs_config"), span=EIGHTH)
+
+    over_time = [
+        sized(
+            ts(
+                "Authentication outcome over time",
+                "TACACS+ logins by outcome, stacked. Repeated failures from "
+                "one account are usually a stale saved credential on a "
+                "jumpbox; failures across many accounts at once are an "
+                "identity-store problem.",
+                [query(summed(gate(metric("ise3_tacacs_authentications",
+                                          'dimension="username"'), "tacacs_activity"),
+                              by="instance,status"), "{{status}}")],
+                stacked=True,
+                series_colours=OUTCOME_COLOURS,
+            ),
+            PANEL_H,
+            HALF,
+        ),
+        sized(
+            ts(
+                "Authorization outcome over time",
+                "Authorization decisions by outcome. Failures here are people "
+                "being refused a command or a shell profile — expected in "
+                "small numbers, worth investigating as a pattern.",
+                [query(summed(gate(metric("ise3_tacacs_authorizations",
+                                          'dimension="username"'), "tacacs_activity"),
+                              by="instance,status"), "{{status}}")],
+                stacked=True,
+                series_colours=OUTCOME_COLOURS,
+            ),
+            PANEL_H,
+            HALF,
+        ),
+    ]
+
+    who = [
+        sized(
+            tbl(
+                "Activity by account",
+                "Every account with device-administration activity in the "
+                "window, passed and failed. Sorted by failures because that is "
+                "what needs attention; the whole list is present, so this "
+                "doubles as the audit answer to 'who logged into the network "
+                "kit'.",
+                [
+                    instant(gate(metric("ise3_tacacs_authentications",
+                                        'dimension="username",status="failed"'),
+                                 "tacacs_activity"), ref="A"),
+                    instant(gate(metric("ise3_tacacs_authentications",
+                                        'dimension="username",status="passed"'),
+                                 "tacacs_activity"), ref="B"),
+                ],
+                columns=["Failed", "Passed"],
+                sort=("Failed", True),
+                labels={"value": "Account"},
+                column_overrides=[
+                    by_column("Failed", thresholds=NONZERO_WARNING,
+                              colour_cells=True, width=110),
+                ],
+            ),
+            TALL_H,
+            HALF,
+        ),
+        sized(
+            tbl(
+                "Activity by device",
+                "Device-administration activity per network device. A device "
+                "with many failures is often one where the shared secret or "
+                "the AAA configuration drifted from the template.",
+                [
+                    instant(gate(metric("ise3_tacacs_authentications",
+                                        'dimension="device",status="failed"'),
+                                 "tacacs_activity"), ref="A"),
+                    instant(gate(metric("ise3_tacacs_authentications",
+                                        'dimension="device",status="passed"'),
+                                 "tacacs_activity"), ref="B"),
+                ],
+                columns=["Failed", "Passed"],
+                sort=("Failed", True),
+                labels={"value": "Network device"},
+                column_overrides=[
+                    by_column("Failed", thresholds=NONZERO_WARNING,
+                              colour_cells=True, width=110),
+                ],
+            ),
+            TALL_H,
+            HALF,
+        ),
+    ]
+
+    hygiene = [
+        sized(
+            tbl(
+                "Account hygiene review queue",
+                "Internal accounts the exporter has flagged as a hygiene risk, "
+                "with the reason. This is a standing review list rather than "
+                "an incident panel — but it is the one thing on this dashboard "
+                "an auditor will ask for.",
+                [instant(gate(metric("ise3_tacacs_internal_account_hygiene_risk"),
+                              "tacacs_config"))],
+                columns=["Flagged"],
+                sort=("Flagged", True),
+                labels={"username": "Account", "risk": "Risk"},
+                column_overrides=[
+                    by_column("Flagged", thresholds=NONZERO_WARNING,
+                              colour_cells=True, width=100),
+                ],
+            ),
+            TALL_H,
+            HALF,
+        ),
+        sized(
+            tbl(
+                "Last evidence of use, per account",
+                "When each account was last seen authenticating or "
+                "authorizing, oldest first. An enabled account with no recent "
+                "evidence is the classic dormant-credential finding, and this "
+                "is where it becomes visible.",
+                [
+                    instant("time() - (" + gate(
+                        metric("ise3_tacacs_account_last_seen_timestamp"),
+                        "tacacs_activity") + ")", ref="A"),
+                    instant(gate(metric("ise3_tacacs_internal_account_enabled"),
+                                 "tacacs_config"), ref="B"),
+                ],
+                columns=["Last seen", "Enabled"],
+                sort=("Last seen", True),
+                labels={"username": "Account", "event_type": "Event"},
+                column_overrides=[
+                    by_column("Last seen", unit="s", width=130),
+                    by_column("Enabled", **BOOLEAN_CELL),
+                ],
+            ),
+            TALL_H,
+            HALF,
+        ),
+    ]
+
+    policy = [
+        sized(
+            tbl(
+                "Policy rule inventory",
+                "Authentication and authorization rule counts per device "
+                "administration policy set. Sudden growth in a rule count is a "
+                "policy change nobody announced; a set with no rules is dead "
+                "configuration.",
+                [instant(gate(metric("ise3_tacacs_policy_rule_count"),
+                              "tacacs_policy_rules"))],
+                columns=["Rules"],
+                sort=("Rules", True),
+                labels={"policy_set": "Policy set", "rule_type": "Rule type"},
+            ),
+            PANEL_H,
+            HALF,
+        ),
+        sized(
+            bar(
+                "Configured device administration objects",
+                "How many of each Device Admin object type exist — shell "
+                "profiles, command sets, policy sets. A bounded handful of "
+                "categories, which is what a bar gauge suits; the shape is the "
+                "size of the configuration surface.",
+                [instant(gate(metric("ise3_tacacs_policy_objects"), "tacacs_config"),
+                         "{{object_type}}")],
+                thresholds=NEUTRAL,
+            ),
+            PANEL_H,
+            HALF,
+        ),
+        sized(
+            stat_panel(
+                "Policy sets and rules",
+                "How many device administration policy sets exist and how many "
+                "rules they contain in total. The size of the configuration "
+                "surface: a rule total that jumps is a policy change nobody "
+                "announced, and the per-set table beside it says where.",
+                [
+                    instant(gate(metric("ise3_tacacs_policy_sets"), "tacacs_config"),
+                            "policy sets"),
+                    instant(summed(gate(metric("ise3_tacacs_policy_rules_total"),
+                                        "tacacs_policy_rules")), "rules", ref="B"),
+                ],
+                thresholds=NEUTRAL,
+                no_value=NO_DATA_STALE,
+            ),
+            STAT_H,
+            HALF,
+        ),
+        sized(
+            ranked(
+                "Command families",
+                "The first word of each accounted command, ranked. Enough to "
+                "see the shape of what engineers are doing without ever "
+                "recording a full command line as a metric label.",
+                gate(metric("ise3_tacacs_commands", 'dimension="command_family"'),
+                     "tacacs_activity"),
+                label="value",
+                label_header="Command family",
+                header="Commands",
+            ),
+            PANEL_H,
+            HALF,
+        ),
+        sized(
+            tbl(
+                "Authorization detail",
+                "Individual authorization decisions with the policy, shell "
+                "profile, command set, account and device involved. The "
+                "forensic view: use it when one row of the summary tables "
+                "above needs explaining.",
+                [instant(gate(metric("ise3_tacacs_authorization_details"),
+                              "tacacs_activity"))],
+                columns=["Decisions"],
+                sort=("Decisions", True),
+                labels={"username": "Account", "device": "Network device",
+                        "policy": "Policy", "shell_profile": "Shell profile",
+                        "command_set": "Command set", "status": "Status"},
+            ),
+            TALL_H,
+            HALF,
+        ),
+    ]
+
+    closing = [sized(about(
+        "show who is administering the network devices, whether they are "
+        "succeeding, and whether the account estate behind it is clean.",
+        [
+            "Read the success rate and the account/active gap.",
+            "Work the per-account and per-device failure columns.",
+            "Review the hygiene queue and the last-seen table on a schedule, "
+            "not only during an incident.",
+        ],
+        [
+            "Failures concentrated on one account: a stale saved credential.",
+            "Failures concentrated on one device: check its AAA configuration "
+            "against the template.",
+            "Command accounting at zero while logins continue: accounting is "
+            "off somewhere, and the audit trail has a hole in it.",
+        ],
+        ["Triage", "Endpoints and devices", "Collection pipeline"],
+    ), STRIP_H, FULL)]
+
     return assemble(
-        "ISE 3 — TACACS Device Administration",
+        "ISE · Device administration",
         "ise3-tacacs",
-        "Internal account hygiene, policy-set inventory, authentication, "
-        "authorization, commands, operational-owner rollups, and bounded-device "
-        "coverage.",
-        (
-            (
-                "Configuration and account health",
-                (
-                    sized(
-                        stat_panel(
-                            "Dataset readiness",
-                            "Freshness of TACACS configuration and historical "
-                            "activity datasets used by this workflow. NOT READY "
-                            "means the panels fed by that dataset stay blank.",
-                            [
-                                instant(
-                                    ready_bool("tacacs_config"), "configuration"
-                                ),
-                                instant(
-                                    ready_bool("tacacs_activity"), "activity", "B"
-                                ),
-                                instant(
-                                    ready_bool("tacacs_policy_rules"),
-                                    "policy rules",
-                                    "C",
-                                ),
-                            ],
-                            mappings=READINESS,
-                            no_value=NO_DATA_EXPORTER,
-                        ),
-                        5,
-                        8,
-                    ),
-                    sized(
-                        stat_panel(
-                            "Collection age",
-                            "Seconds since the latest successful TACACS "
-                            "configuration and historical-activity collections.",
-                            [
-                                instant(
-                                    "time() - "
-                                    + metric(
-                                        "ise3_dataset_last_success_timestamp",
-                                        'dataset="tacacs_config"',
-                                    ),
-                                    "configuration",
-                                ),
-                                instant(
-                                    "time() - "
-                                    + metric(
-                                        "ise3_dataset_last_success_timestamp",
-                                        'dataset="tacacs_activity"',
-                                    ),
-                                    "activity",
-                                    "B",
-                                ),
-                            ],
-                            unit="s",
-                        ),
-                        5,
-                        8,
-                    ),
-                    sized(
-                        stat_panel(
-                            "Internal accounts",
-                            "Configured internal Device Administration accounts "
-                            "beside those whose detail cache is classified.",
-                            [
-                                instant(
-                                    metric("ise3_tacacs_internal_accounts"),
-                                    "accounts",
-                                ),
-                                instant(
-                                    metric(
-                                        "ise3_tacacs_internal_accounts_classified"
-                                    ),
-                                    "classified",
-                                    "B",
-                                ),
-                            ],
-                        ),
-                        5,
-                        8,
-                    ),
-                    sized(
-                        stat_panel(
-                            "Policy sets and active accounts",
-                            "Configured Device Administration policy sets beside "
-                            "distinct accounts with reporting-window activity.",
-                            [
-                                instant(
-                                    metric("ise3_tacacs_policy_sets"),
-                                    "policy sets",
-                                ),
-                                instant(
-                                    metric("ise3_tacacs_active_accounts"),
-                                    "active accounts",
-                                    "B",
-                                ),
-                            ],
-                        ),
-                        5,
-                        8,
-                    ),
-                    sized(
-                        stat_panel(
-                            "Recent TACACS events",
-                            "Authentication, authorization, and command-accounting "
-                            "events retained by the activity reporting window.",
-                            [
-                                instant(
-                                    "sum("
-                                    + metric("ise3_tacacs_authentications")
-                                    + ")",
-                                    "authentications",
-                                ),
-                                instant(
-                                    "sum("
-                                    + metric("ise3_tacacs_authorizations")
-                                    + ")",
-                                    "authorizations",
-                                    "B",
-                                ),
-                                instant(
-                                    "sum(" + metric("ise3_tacacs_commands") + ")",
-                                    "commands",
-                                    "C",
-                                ),
-                            ],
-                        ),
-                        5,
-                        8,
-                    ),
-                    sized(
-                        bar(
-                            "Configured Device Admin objects",
-                            "Complete configured policy-set, command-set, and "
-                            "shell-profile inventories from the PAN OpenAPI.",
-                            [
-                                instant(
-                                    "sort_desc("
-                                    + metric("ise3_tacacs_policy_objects")
-                                    + ")",
-                                    "{{object_type}}",
-                                ),
-                                instant(
-                                    "sort_desc("
-                                    + metric("ise3_tacacs_policy_rules_total")
-                                    + ")",
-                                    "{{rule_type}} rules",
-                                    "B",
-                                ),
-                            ],
-                        )
-                    ),
-                    sized(
-                        tbl(
-                            "Policy rule inventory",
-                            "Authentication and authorization rule counts for "
-                            "each covered Device Administration policy set.",
-                            [
-                                instant(
-                                    "sort_desc("
-                                    + metric(
-                                        "ise3_tacacs_policy_rule_count"
-                                    )
-                                    + ")",
-                                    "{{policy_set}} · {{rule_type}}",
-                                )
-                            ],
-                            columns=("rules",),
-                        )
-                    ),
-                    sized(
-                        tbl(
-                            "Internal account inventory",
-                            "Enabled state for each selected internal Device "
-                            "Administration account.",
-                            [
-                                instant(
-                                    metric(
-                                        "ise3_tacacs_internal_account_enabled",
-                                        'username=~"$username"',
-                                    ),
-                                    "{{username}}",
-                                )
-                            ],
-                            columns=("enabled",),
-                            column_overrides=(by_column("enabled", **BOOLEAN_CELL),),
-                        )
-                    ),
-                    sized(
-                        tbl(
-                            "Account hygiene review queue",
-                            "Named hygiene risks for selected internal accounts; "
-                            "zero-valued risks remain visible for completeness.",
-                            [
-                                instant(
-                                    metric(
-                                        "ise3_tacacs_internal_account_hygiene_risk",
-                                        'username=~"$username"',
-                                    ),
-                                    "{{username}} · {{risk}}",
-                                )
-                            ],
-                            columns=("flagged",),
-                            column_overrides=(
-                                by_column(
-                                    "flagged", mappings=RISK, thresholds=NONZERO_CRITICAL,
-                                    colour_cells=True,
-                                ),
-                            ),
-                        )
-                    ),
-                    sized(
-                        tbl(
-                            "Enabled accounts without window activity",
-                            "Enabled internal accounts absent from TACACS "
-                            "authentication activity in the retained reporting window.",
-                            [
-                                instant(
-                                    metric(
-                                        "ise3_tacacs_internal_account_enabled",
-                                        'username=~"$username"',
-                                    )
-                                    + " == 1 unless on(instance,username) "
-                                    + "label_replace("
-                                    + metric(
-                                        "ise3_tacacs_authentications",
-                                        'dimension="username"',
-                                    )
-                                    + ', "username", "$1", "value", "(.*)")',
-                                    "{{username}}",
-                                )
-                            ],
-                            columns=(None,),
-                        )
-                    ),
-                    sized(
-                        tbl(
-                            "Last TACACS evidence by account",
-                            "Seconds since the newest authentication, "
-                            "authorization, or command-accounting event for each "
-                            "selected account inside the retained reporting window.",
-                            [
-                                instant(
-                                    "time() - "
-                                    + metric(
-                                        "ise3_tacacs_account_last_seen_timestamp",
-                                        'username=~"$username"',
-                                    ),
-                                    "{{username}} · {{event_type}}",
-                                )
-                            ],
-                            columns=("age s",),
-                            column_overrides=(by_column("age s", **SECONDS_CELL),),
-                        )
-                    ),
-                    sized(
-                        ts(
-                            "Account detail-cache coverage",
-                            "Coverage, entries, and deferred work for internal "
-                            "account detail classification.",
-                            [
-                                query(
-                                    metric(
-                                        "ise3_detail_cache_coverage",
-                                        'cache="ers_tacacs_user"',
-                                    ),
-                                    "coverage",
-                                ),
-                                query(
-                                    metric(
-                                        "ise3_detail_cache_entries",
-                                        'cache="ers_tacacs_user"',
-                                    ),
-                                    "entries",
-                                    ref="B",
-                                ),
-                                query(
-                                    metric(
-                                        "ise3_detail_fetches_deferred",
-                                        'cache="ers_tacacs_user"',
-                                    ),
-                                    "deferred",
-                                    ref="C",
-                                ),
-                            ],
-                        )
-                    ),
-                    sized(
-                        ts(
-                            "Policy rule count coverage",
-                            "Coverage, cached policy sets, and deferred work for "
-                            "the converging authentication/authorization rule "
-                            "inventory.",
-                            [
-                                query(
-                                    metric(
-                                        "ise3_detail_cache_coverage",
-                                        'cache="openapi_tacacs_policy_rules"',
-                                    ),
-                                    "coverage",
-                                ),
-                                query(
-                                    metric(
-                                        "ise3_detail_cache_entries",
-                                        'cache="openapi_tacacs_policy_rules"',
-                                    ),
-                                    "cached policy sets",
-                                    ref="B",
-                                ),
-                                query(
-                                    metric(
-                                        "ise3_detail_fetches_deferred",
-                                        'cache="openapi_tacacs_policy_rules"',
-                                    ),
-                                    "deferred",
-                                    ref="C",
-                                ),
-                            ],
-                        )
-                    ),
-                    sized(
-                        ts(
-                            "Policy rule refresh failures",
-                            "Failed policy-rule detail reads by bounded result "
-                            "class, without discarding previously cached counts.",
-                            [
-                                query(
-                                    "sum by (result) (rate("
-                                    + metric(
-                                        "ise3_detail_fetches_total",
-                                        'cache="openapi_tacacs_policy_rules",result=~"failed|empty"',
-                                    )
-                                    + "[15m]))",
-                                    "{{result}}",
-                                )
-                            ],
-                        )
-                    ),
-                ),
-            ),
-            (
-                "Authentication and authorization",
-                (
-                    sized(
-                        bar(
-                            "Authentication by account and result",
-                            "Passed and failed TACACS authentications for selected "
-                            "accounts in the reporting window.",
-                            [
-                                instant(
-                                    "sort_desc("
-                                    + metric(
-                                        "ise3_tacacs_authentications",
-                                        'dimension="username",value=~"$username"',
-                                    )
-                                    + ")",
-                                    "{{value}} · {{status}}",
-                                )
-                            ],
-                        )
-                    ),
-                    sized(
-                        bar(
-                            "Authentication by device and result",
-                            "Worst-first bounded device authentication view; the "
-                            "coverage panel states how much was published.",
-                            [
-                                instant(
-                                    "sort_desc("
-                                    + metric(
-                                        "ise3_tacacs_authentications",
-                                        'dimension="device"',
-                                    )
-                                    + ")",
-                                    "{{value}} · {{status}}",
-                                )
-                            ],
-                            data_links=(device_drilldown,),
-                        )
-                    ),
-                    sized(
-                        bar(
-                            "Authentication by ops owner",
-                            "Complete operational-owner rollup of TACACS "
-                            "authentication outcomes.",
-                            [
-                                instant(
-                                    "sort_desc("
-                                    + metric(
-                                        "ise3_tacacs_authentications",
-                                        'dimension="ops_owner"',
-                                    )
-                                    + ")",
-                                    "{{value}} · {{status}}",
-                                )
-                            ],
-                        )
-                    ),
-                    sized(
-                        bar(
-                            "Authorization by account and result",
-                            "Passed and failed TACACS authorizations for selected "
-                            "accounts in the reporting window.",
-                            [
-                                instant(
-                                    "sort_desc("
-                                    + metric(
-                                        "ise3_tacacs_authorizations",
-                                        'dimension="username",value=~"$username"',
-                                    )
-                                    + ")",
-                                    "{{value}} · {{status}}",
-                                )
-                            ],
-                        )
-                    ),
-                    sized(
-                        bar(
-                            "Authorization by device and result",
-                            "Worst-first bounded device authorization view with "
-                            "explicit published-versus-total coverage.",
-                            [
-                                instant(
-                                    "sort_desc("
-                                    + metric(
-                                        "ise3_tacacs_authorizations",
-                                        'dimension="device"',
-                                    )
-                                    + ")",
-                                    "{{value}} · {{status}}",
-                                )
-                            ],
-                            data_links=(device_drilldown,),
-                        )
-                    ),
-                    sized(
-                        bar(
-                            "Authorization by ops owner",
-                            "Complete operational-owner rollup of TACACS "
-                            "authorization outcomes.",
-                            [
-                                instant(
-                                    "sort_desc("
-                                    + metric(
-                                        "ise3_tacacs_authorizations",
-                                        'dimension="ops_owner"',
-                                    )
-                                    + ")",
-                                    "{{value}} · {{status}}",
-                                )
-                            ],
-                        )
-                    ),
-                    sized(
-                        tbl(
-                            "Authorization policy, profile, command set and account",
-                            "Worst-first bounded authorization evidence retaining "
-                            "the account, device, matched policy, shell profile, "
-                            "command set, and result together.",
-                            [
-                                instant(
-                                    "sort_desc("
-                                    + metric(
-                                        "ise3_tacacs_authorization_details",
-                                        'username=~"$username"',
-                                    )
-                                    + ")",
-                                    "{{username}} · {{device}} · {{policy}} · "
-                                    "{{shell_profile}} · {{command_set}} · {{status}}",
-                                )
-                            ],
-                            columns=("authorizations",),
-                        ),
-                        10,
-                        24,
-                    ),
-                ),
-            ),
-            (
-                "Command accounting and bounds",
-                (
-                    sized(
-                        bar(
-                            "Command families",
-                            "TACACS accounting records grouped by the first "
-                            "command token, never by full operator-entered text.",
-                            [
-                                instant(
-                                    "sort_desc("
-                                    + metric(
-                                        "ise3_tacacs_commands",
-                                        'dimension="command_family"',
-                                    )
-                                    + ")",
-                                    "{{value}}",
-                                )
-                            ],
-                        )
-                    ),
-                    sized(
-                        bar(
-                            "Commands by account",
-                            "TACACS command accounting volume for each selected "
-                            "internal account.",
-                            [
-                                instant(
-                                    "sort_desc("
-                                    + metric(
-                                        "ise3_tacacs_commands",
-                                        'dimension="username",value=~"$username"',
-                                    )
-                                    + ")",
-                                    "{{value}}",
-                                )
-                            ],
-                        )
-                    ),
-                    sized(
-                        bar(
-                            "Commands by device",
-                            "Worst-first bounded device command-accounting view "
-                            "for troubleshooting administrative activity.",
-                            [
-                                instant(
-                                    "sort_desc("
-                                    + metric(
-                                        "ise3_tacacs_commands",
-                                        'dimension="device"',
-                                    )
-                                    + ")",
-                                    "{{value}}",
-                                )
-                            ],
-                            data_links=(device_drilldown,),
-                        )
-                    ),
-                    sized(
-                        bar(
-                            "Commands by ops owner",
-                            "Complete operational-owner rollup of TACACS command "
-                            "accounting activity.",
-                            [
-                                instant(
-                                    "sort_desc("
-                                    + metric(
-                                        "ise3_tacacs_commands",
-                                        'dimension="ops_owner"',
-                                    )
-                                    + ")",
-                                    "{{value}}",
-                                )
-                            ],
-                        )
-                    ),
-                    sized(
-                        tbl(
-                            "Bounded device coverage",
-                            "Published versus existing device groups for TACACS "
-                            "authentication, authorization, and accounting.",
-                            [
-                                instant(
-                                    metric(
-                                        "ise3_topk_groups_returned",
-                                        'dataset="tacacs_activity",breakdown=~".*device"',
-                                    ),
-                                    "{{breakdown}} published",
-                                ),
-                                instant(
-                                    metric(
-                                        "ise3_topk_groups_total",
-                                        'dataset="tacacs_activity",breakdown=~".*device"',
-                                    ),
-                                    "{{breakdown}} total",
-                                    "B",
-                                ),
-                                instant(
-                                    metric(
-                                        "ise3_topk_truncated",
-                                        'dataset="tacacs_activity",breakdown=~".*device"',
-                                    ),
-                                    "{{breakdown}} truncated",
-                                    "C",
-                                ),
-                            ],
-                            columns=("published", "total", "truncated"),
-                            column_overrides=(
-                                by_column(
-                                    "truncated", mappings=TRUNCATED,
-                                    thresholds=NONZERO_WARNING,
-                                    colour_cells=True,
-                                ),
-                            ),
-                        )
-                    ),
-                    sized(
-                        stat_panel(
-                            "NAD directory coverage",
-                            "NAD classification entries available to roll device "
-                            "activity onto operational owners.",
-                            [
-                                instant(
-                                    metric("ise3_nad_directory_entries"),
-                                    "entries",
-                                )
-                            ],
-                        ),
-                        5,
-                        24,
-                    ),
-                ),
-            ),
-        ),
-        variables=(username,),
+        "Tier 2 diagnostic. Who is administering the network devices over "
+        "TACACS+, are they succeeding, and is the account estate behind it "
+        "clean? Activity first, then accounts and devices, then hygiene and "
+        "policy.",
+        [
+            ("Device administration activity", activity),
+            ("Over time", over_time),
+            ("Who and where", who),
+            ("Account hygiene", hygiene),
+            ("Policy and commands", policy, COLLAPSED),
+            ("Reference", closing, COLLAPSED),
+        ],
+        tier=DIAGNOSTIC,
     )
 
 
-def sources_dashboard():
+# ---------------------------------------------------------------------------
+# Tier 3 — collection pipeline
+# ---------------------------------------------------------------------------
+
+def pipeline_dashboard():
+    trust = [
+        sized(
+            stat_panel(
+                "Datasets trustworthy",
+                "How many datasets both collected successfully and are inside "
+                "their freshness window. This is the number that decides "
+                "whether to believe the other nine dashboards.",
+                [instant(f"count by (instance) (({readiness_per_dataset()}) == 1)")],
+                thresholds=NEUTRAL,
+                no_value=NO_DATA_EXPORTER,
+            ),
+            STAT_H,
+            SIXTH,
+        ),
+        sized(
+            stat_panel(
+                "Datasets not collecting",
+                "Datasets that are enabled but currently either failing or "
+                "stale. Every panel fed by one of these is blank or frozen "
+                "somewhere in the set.",
+                [instant(f"count by (instance) (({readiness_per_dataset()}) == 0)")],
+                thresholds=NONZERO_CRITICAL,
+                no_value=NO_DATA_EXPORTER,
+            ),
+            STAT_H,
+            SIXTH,
+        ),
+        sized(
+            stat_panel(
+                "Datasets on a fallback provider",
+                "Datasets being served by something other than their preferred "
+                "source. Not a failure — the exporter is doing its job — but "
+                "the data may be coarser or older than the design intended, "
+                "and the reason table below says why.",
+                [instant(summed(metric("ise3_dataset_provider_degraded")))],
+                thresholds=NONZERO_WARNING,
+                no_value=NO_DATA_EXPORTER,
+            ),
+            STAT_H,
+            SIXTH,
+        ),
+        sized(
+            stat_panel(
+                "Oldest successful collection",
+                "Seconds since the least recently successful dataset last "
+                "landed. The single worst-case staleness anywhere in the "
+                "exporter's view of ISE.",
+                [instant("max by (instance) (time() - (" +
+                         _healthy("ise3_dataset_last_success_timestamp", "",
+                                  "instance,dataset") + "))")],
+                unit="s",
+                thresholds=COLLECTION_AGE,
+                no_value=NO_DATA_EXPORTER,
+            ),
+            STAT_H,
+            SIXTH,
+        ),
+        sized(
+            stat_panel(
+                "Worst consecutive failures",
+                "The longest current run of consecutive failures on any "
+                "dataset. One failure is noise; a run means something is "
+                "broken rather than flaky, and the failure table below has the "
+                "error text.",
+                [instant(f"max by (instance) ({metric('ise3_dataset_consecutive_failures')})")],
+                thresholds=NONZERO_WARNING,
+                no_value=NO_DATA_EXPORTER,
+            ),
+            STAT_H,
+            SIXTH,
+        ),
+        sized(
+            stat_panel(
+                "Exporter build",
+                "Which exporter version is running and which ISE release it "
+                "was built to target. A mismatch between this and the "
+                "appliance's actual release is the first thing to check when "
+                "panels are unexpectedly empty.",
+                [instant(metric("ise3_exporter_build_info"),
+                         "{{version}} → ISE {{target_ise_release}}")],
+                thresholds=NEUTRAL,
+                text_mode=BigValueTextMode.NAME,
+                colour_mode=BigValueColorMode.NONE,
+                no_value=NO_DATA_EXPORTER,
+            ),
+            STAT_H,
+            SIXTH,
+        ),
+        sized(
+            states(
+                "Dataset trustworthiness over time",
+                "One lane per dataset, green while that dataset was both "
+                "collecting and fresh. Every unexplained step, gap or plateau "
+                "on any other dashboard should be checked against this panel "
+                "before it is treated as an ISE event.",
+                [query(readiness_per_dataset(), "{{dataset}}")],
+            ),
+            PANEL_H,
+            FULL,
+        ),
+    ]
+
+    detail = [
+        sized(
+            tbl(
+                "Dataset status",
+                "Every dataset with whether it is up and fresh, how long since "
+                "it last succeeded, how long its collection takes, and when it "
+                "runs next. Read 'Age' against 'Since attempt': the two far "
+                "apart means the dataset is being attempted and failing, the "
+                "two together means it simply has not run.",
+                [
+                    instant(_healthy("ise3_dataset_up", "", "instance,dataset"),
+                            ref="A"),
+                    instant(_healthy("ise3_dataset_fresh", "", "instance,dataset"),
+                            ref="B"),
+                    instant("time() - (" + _healthy(
+                        "ise3_dataset_last_success_timestamp", "",
+                        "instance,dataset") + ")", ref="C"),
+                    instant(f"max by (instance,dataset) ("
+                            f"{metric('ise3_dataset_collection_duration_seconds')})",
+                            ref="D"),
+                    instant(metric("ise3_dataset_interval_seconds"), ref="E"),
+                    instant("time() - (" + _healthy(
+                        "ise3_dataset_last_attempt_timestamp", "",
+                        "instance,dataset") + ")", ref="F"),
+                    instant("(" + _healthy("ise3_dataset_next_run_timestamp", "",
+                                           "instance,dataset") + ") - time()",
+                            ref="G"),
+                ],
+                columns=["Up", "Fresh", "Age", "Duration", "Interval",
+                         "Since attempt", "Next run in"],
+                sort=("Age", True),
+                labels={"dataset": "Dataset"},
+                column_overrides=[
+                    by_column("Up", **BOOLEAN_CELL),
+                    by_column("Fresh", **BOOLEAN_CELL),
+                    by_column("Age", unit="s", thresholds=COLLECTION_AGE,
+                              colour_cells=True),
+                    by_column("Duration", **SECONDS_CELL),
+                    by_column("Interval", **SECONDS_CELL),
+                    by_column("Since attempt", **SECONDS_CELL),
+                    by_column("Next run in", **SECONDS_CELL),
+                ],
+            ),
+            TALL_H,
+            HALF,
+        ),
+        sized(
+            tbl(
+                "Latest failure per dataset",
+                "The most recent failure each dataset recorded, with the "
+                "reason and the detail text the exporter captured from ISE. "
+                "Empty is healthy. This is the panel that turns 'collection "
+                "failed' into something specific enough to act on.",
+                [instant(metric("ise3_dataset_last_failure_detail_info"))],
+                columns=[None],
+                labels={"dataset": "Dataset", "provider": "Provider",
+                        "reason": "Reason", "detail": "Detail"},
+            ),
+            TALL_H,
+            HALF,
+        ),
+        sized(
+            tbl(
+                "Provider selection and fallback reason",
+                "Which provider each dataset is using, whether that is a "
+                "downgrade from the preferred one, and the reason the exporter "
+                "recorded for choosing it. The whole argument for this "
+                "exporter's design is that a source change is visible rather "
+                "than silent — this is where it is visible.",
+                [
+                    instant(f"{metric('ise3_dataset_provider_active')} == 1", ref="A"),
+                    instant(metric("ise3_dataset_provider_degraded"), ref="B"),
+                    instant(metric("ise3_dataset_provider_reason_info"), ref="C"),
+                ],
+                columns=[None, "Degraded", None],
+                labels={"dataset": "Dataset", "provider": "Provider",
+                        "reason": "Reason"},
+                column_overrides=[
+                    by_column("Degraded", mappings=YES_NO,
+                              thresholds=NONZERO_WARNING, colour_cells=True,
+                              width=110),
+                ],
+            ),
+            TALL_H,
+            HALF,
+        ),
+        sized(
+            tbl(
+                "Declared but unusable providers",
+                "Providers configured for a dataset that the exporter could "
+                "not use. Each row is a capability the deployment was "
+                "configured to have and does not — usually a licence, a "
+                "credential, or a schema the appliance does not expose.",
+                [instant(f"{metric('ise3_dataset_provider_available')} == 0")],
+                columns=[None],
+                labels={"dataset": "Dataset", "provider": "Provider"},
+            ),
+            TALL_H,
+            HALF,
+        ),
+    ]
+
+    transports = [
+        sized(
+            ts(
+                "Collection failures by reason",
+                "Failure rate per dataset and reason. The consecutive-failure "
+                "stat above says whether something is broken now; this says "
+                "how often it has been breaking and for which stated reason, "
+                "which is what separates a flaky appliance from a "
+                "misconfiguration.",
+                [query(f"sum by (instance,dataset,reason) (rate("
+                       f"{metric('ise3_dataset_failures_total')}[$__rate_interval]))",
+                       "{{dataset}} · {{reason}}")],
+                legend_placement="right",
+            ),
+            PANEL_H,
+            HALF,
+        ),
+        sized(
+            ts(
+                "Data Connect statements",
+                "Query rate against the Oracle reporting views, split by "
+                "result. Failures here mean the reporting datasets fall back "
+                "or go stale; the schema-gap table below usually explains "
+                "them.",
+                [query(f"sum by (instance,result) (rate("
+                       f"{metric('ise3_dataconnect_queries_total')}[$__rate_interval]))",
+                       "{{result}}")],
+                unit="reqps",
+                series_colours=OUTCOME_COLOURS,
+            ),
+            PANEL_H,
+            HALF,
+        ),
+        sized(
+            ts(
+                "Data Connect statement duration by view",
+                "How long each reporting query is taking. Duration rising "
+                "across all views is the appliance under load; one view rising "
+                "alone is usually that view's data volume growing past what "
+                "the current scan window can handle.",
+                [query(metric("ise3_dataconnect_query_last_duration_seconds"),
+                       "{{view}}")],
+                unit="s",
+            ),
+            PANEL_H,
+            HALF,
+        ),
+        sized(
+            tbl(
+                "Reporting source freshness",
+                "Whether each Data Connect view exists in this appliance's "
+                "schema at all, whether it has rows, whether it has recent "
+                "ones, and how old its newest row is. A view that stops "
+                "advancing makes every panel fed from it silently stale rather "
+                "than obviously broken; a view that does not exist is a "
+                "capability this release does not have.",
+                [
+                    instant(metric("ise3_source_probed"), ref="A"),
+                    instant(metric("ise3_source_has_rows"), ref="B"),
+                    instant(metric("ise3_source_has_recent_rows"), ref="C"),
+                    instant(metric("ise3_source_latest_row_age_seconds"), ref="D"),
+                    instant(metric("ise3_dataconnect_schema_view_available"),
+                            ref="E"),
+                ],
+                columns=["Probed", "Has rows", "Recent", "Newest row age",
+                         "View exists"],
+                sort=("Newest row age", True),
+                labels={"view": "View"},
+                column_overrides=[
+                    by_column("Probed", **BOOLEAN_CELL),
+                    by_column("Has rows", **BOOLEAN_CELL),
+                    by_column("Recent", **BOOLEAN_CELL),
+                    by_column("Newest row age", **SECONDS_CELL),
+                    by_column("View exists", **BOOLEAN_CELL),
+                ],
+            ),
+            TALL_H,
+            HALF,
+        ),
+        sized(
+            tbl(
+                "Schema capability gaps",
+                "Columns this exporter wants that the appliance's Data Connect "
+                "schema does not provide. Each row is a panel somewhere in the "
+                "set that will be empty or coarser than designed, named at the "
+                "column level rather than guessed at.",
+                [instant(f"{metric('ise3_dataconnect_schema_column_available')} == 0")],
+                columns=[None],
+                labels={"view": "View", "column": "Column",
+                        "requirement": "Requirement"},
+            ),
+            TALL_H,
+            HALF,
+        ),
+        sized(
+            ts(
+                "ISE API request and error rate",
+                "REST and OpenAPI traffic the exporter is generating, with the "
+                "error rate beside it. Errors climbing here precede datasets "
+                "falling back to a different provider.",
+                [
+                    query(f"sum by (instance) (rate("
+                          f"{metric('ise3_api_requests_total')}[$__rate_interval]))",
+                          "requests"),
+                    query(f"sum by (instance) (rate("
+                          f"{metric('ise3_api_errors_total')}[$__rate_interval]))",
+                          "errors", ref="B"),
+                ],
+                unit="reqps",
+                series_colours=OUTCOME_COLOURS,
+            ),
+            PANEL_H,
+            HALF,
+        ),
+        sized(
+            ts(
+                "ISE API latency, 95th percentile",
+                "How long the appliance is taking to answer, by API. Rising "
+                "latency here is the earliest warning that collection "
+                "durations and then freshness are about to suffer.",
+                [query("histogram_quantile(0.95, sum by (instance,api,le) (rate("
+                       f"{metric('ise3_api_request_duration_seconds_bucket')}"
+                       "[$__rate_interval])))", "{{api}}")],
+                unit="s",
+                thresholds=LATENCY_SECONDS,
+            ),
+            PANEL_H,
+            HALF,
+        ),
+        sized(
+            tbl(
+                "pxGrid session stream",
+                "Whether the pxGrid stream is connected, how many sessions it "
+                "is tracking, how long since the last frame, and how often it "
+                "has reconnected in this window. A silent but connected stream "
+                "is the failure mode worth catching here; repeated reconnects "
+                "mean it is flapping rather than working.",
+                [
+                    instant(metric("ise3_pxgrid_stream_connected"), ref="A"),
+                    instant(metric("ise3_pxgrid_stream_sessions"), ref="B"),
+                    instant("time() - " +
+                            metric("ise3_pxgrid_stream_last_frame_timestamp"),
+                            ref="C"),
+                    instant(f"sum by (instance) (increase("
+                            f"{metric('ise3_pxgrid_stream_reconnects_total')}[$__range]))",
+                            ref="D"),
+                ],
+                columns=["Connected", "Sessions", "Since last frame",
+                         "Reconnects"],
+                column_overrides=[
+                    by_column("Connected", **BOOLEAN_CELL),
+                    by_column("Since last frame", unit="s",
+                              thresholds=COLLECTION_AGE, colour_cells=True),
+                    by_column("Reconnects", thresholds=NONZERO_WARNING,
+                              colour_cells=True),
+                ],
+            ),
+            PANEL_H,
+            HALF,
+        ),
+    ]
+
+    bounds = [
+        sized(
+            ts(
+                "Detail-cache coverage",
+                "How much of each entity list the exporter has full detail "
+                "for. Panels fed from a cache are suppressed below 99% so they "
+                "cannot under-report beside a complete neighbour — a dip here "
+                "is the explanation for a table that has gone blank.",
+                [query(metric("ise3_detail_cache_coverage"), "{{cache}}")],
+                unit="percentunit",
+                thresholds=COVERAGE,
+                minimum=0,
+                maximum=1,
+            ),
+            PANEL_H,
+            HALF,
+        ),
+        sized(
+            ts(
+                "Detail-cache size",
+                "How many entities each cache is holding. Read beside "
+                "coverage: entries flat while coverage falls means the entity "
+                "list grew and the cache has not caught up yet, which is "
+                "normal after a bulk import and a problem if it persists.",
+                [query(metric("ise3_detail_cache_entries"), "{{cache}}")],
+            ),
+            PANEL_H,
+            HALF,
+        ),
+        sized(
+            tbl(
+                "Bounded breakdown truncation",
+                "Breakdowns where the exporter published fewer groups than ISE "
+                "reported, and by how much. Truncation is a deliberate cost "
+                "control, but it must never be silent: this table is where the "
+                "cost of that bound is stated.",
+                [
+                    instant(metric("ise3_topk_groups_total"), ref="A"),
+                    instant(metric("ise3_topk_groups_returned"), ref="B"),
+                    instant(metric("ise3_topk_truncated"), ref="C"),
+                ],
+                columns=["Groups in ISE", "Published", "Truncated"],
+                sort=("Groups in ISE", True),
+                labels={"dataset": "Dataset", "breakdown": "Breakdown"},
+                column_overrides=[
+                    by_column("Truncated", mappings=TRUNCATED,
+                              thresholds=NONZERO_WARNING, colour_cells=True,
+                              width=120),
+                ],
+            ),
+            TALL_H,
+            HALF,
+        ),
+        sized(
+            ts(
+                "Scheduler lanes",
+                "Per-target queue depth and whether the lane is busy. A queue "
+                "that does not drain means the exporter is asking for more "
+                "than the appliance will answer in the time available, and "
+                "freshness will slip next.",
+                [
+                    query(metric("ise3_lane_queue_depth"), "{{target}} queued"),
+                    query(metric("ise3_lane_busy"), "{{target}} busy", ref="B"),
+                ],
+            ),
+            PANEL_H,
+            HALF,
+        ),
+        sized(
+            ts(
+                "Detail fetch outcomes",
+                "Per-entity detail fetches by result, with how many were "
+                "deferred. Deferrals are the budget working as designed; "
+                "failures are not, and they are what stops a cache reaching "
+                "the coverage floor.",
+                [
+                    query(f"sum by (instance,cache,result) (rate("
+                          f"{metric('ise3_detail_fetches_total')}[$__rate_interval]))",
+                          "{{cache}} · {{result}}"),
+                    query(metric("ise3_detail_fetches_deferred"),
+                          "{{cache}} deferred", ref="B"),
+                ],
+                series_colours=OUTCOME_COLOURS,
+            ),
+            PANEL_H,
+            HALF,
+        ),
+    ]
+
+    completeness = [
+        sized(
+            tbl(
+                "Populated breakdown dimensions",
+                "Which optional breakdown dimensions the appliance's schema "
+                "actually populates. A dimension marked unpopulated is one "
+                "whose panel elsewhere in the set will be empty by design — a "
+                "capability limit stated plainly rather than a graph that "
+                "silently never fills.",
+                [instant(metric("ise3_breakdown_dimension_populated"))],
+                columns=["Populated"],
+                sort=("Populated", False),
+                labels={"dataset": "Dataset", "dimension": "Dimension"},
+                column_overrides=[by_column("Populated", **BOOLEAN_CELL)],
+            ),
+            PANEL_H,
+            HALF,
+        ),
+        sized(
+            tbl(
+                "NAD directory attribution",
+                "How many network devices the directory holds, how many "
+                "activity records it could attribute to one, and how old the "
+                "activity source is. Unattributed activity is why some "
+                "per-device panels have an 'unknown' row.",
+                [
+                    instant(metric("ise3_nad_directory_entries"), ref="A"),
+                    instant(metric("ise3_nad_directory_attributed"), ref="B"),
+                    instant(gate(metric("ise3_nad_activity_source_age_seconds"),
+                                 "nad_health"), ref="C"),
+                ],
+                columns=["Directory entries", "Attributed", "Source age"],
+                labels={"matched": "Matched"},
+                column_overrides=[
+                    by_column("Source age", unit="s",
+                              thresholds=COLLECTION_AGE, colour_cells=True),
+                ],
+            ),
+            PANEL_H,
+            HALF,
+        ),
+        sized(
+            stat_panel(
+                "Latency measurement coverage",
+                "Share of authentications that carried a usable latency "
+                "measurement, and how many samples the reconstructed latency "
+                "figures are drawn from. Every latency panel in the set is "
+                "only as trustworthy as these two numbers.",
+                [
+                    instant(f"avg by (instance) ("
+                            f"{gate(metric('ise3_radius_authentication_latency_coverage'), 'radius_reporting')})",
+                            "coverage"),
+                    instant(gate(metric("ise3_session_authentication_latency_samples"),
+                                 "session_authorization"), "samples", ref="B"),
+                    instant(f"sum by (instance) (increase("
+                            f"{metric('ise3_radius_latency_samples_total')}[$__range]))",
+                            "reporting samples", ref="C"),
+                ],
+                unit="percentunit",
+                thresholds=COVERAGE,
+                overrides=[
+                    by_ref("B", unit="short", thresholds=NEUTRAL),
+                    by_ref("C", unit="short", thresholds=NEUTRAL),
+                ],
+                no_value=NO_DATA_STALE,
+            ),
+            STAT_H,
+            HALF,
+        ),
+        sized(
+            stat_panel(
+                "Attribute and classification coverage",
+                "How many endpoints the live attribute feed published, how "
+                "many internal TACACS accounts could be classified, and how "
+                "much state the exporter is holding on disk. Low publication "
+                "or classification means the corresponding breakdowns are "
+                "drawn from a subset.",
+                [
+                    instant(gate(metric("ise3_endpoint_attributes_published"),
+                                 "endpoint_attributes"), "attributes published"),
+                    instant(gate(metric("ise3_tacacs_internal_accounts_classified"),
+                                 "tacacs_config"), "accounts classified", ref="B"),
+                    instant(metric("ise3_exporter_state_bytes"), "state on disk",
+                            ref="C"),
+                ],
+                thresholds=NEUTRAL,
+                overrides=[by_ref("C", unit="bytes")],
+                no_value=NO_DATA_EXPORTER,
+            ),
+            STAT_H,
+            HALF,
+        ),
+        sized(
+            ts(
+                "Characters replaced in Data Connect results",
+                "Rate at which the exporter had to substitute characters the "
+                "appliance returned in an encoding it declared but did not "
+                "honour. Non-zero is not fatal, but it means some label values "
+                "on the reporting dashboards are approximations of what ISE "
+                "actually holds.",
+                [query(f"sum by (instance,view) (rate("
+                       f"{metric('ise3_dataconnect_replaced_characters_total')}[$__rate_interval]))",
+                       "{{view}}")],
+            ),
+            PANEL_H,
+            FULL,
+        ),
+    ]
+
+    closing = [sized(about(
+        "answer one question — is the exporter's view of ISE current enough to "
+        "believe? Everything here is about the exporter, not about ISE.",
+        [
+            "Read the trust strip and the trustworthiness timeline.",
+            "For anything not trustworthy, read its row in **Dataset status** "
+            "and then **Latest failure**.",
+            "If a dataset is on a fallback provider, read why in the provider "
+            "table before treating the data as wrong.",
+        ],
+        [
+            "Schema gaps: the appliance does not expose what a panel needs — "
+            "that is a capability limit, not a bug.",
+            "Queue depth not draining or API latency rising: the exporter is "
+            "asking for more than ISE will answer — see the Load dashboard.",
+            "Cache coverage low: dependent panels are suppressed on purpose "
+            "and will return on their own.",
+        ],
+        ["Triage", "Exporter load", "Control plane"],
+    ), STRIP_H, FULL)]
+
     return assemble(
-        "ISE Exporter 3 — Sources",
-        "ise3-sources",
-        "Which source supplies each dataset, when it changed, and why. A "
-        "fallback may answer a narrower question than the preferred source.",
-        (
-            (
-                "Active source",
-                (
-                    sized(
-                        tbl(
-                            "Live source per dataset",
-                            "The provider currently supplying each dataset; a "
-                            "missing row means no provider is usable.",
-                            [
-                                instant(
-                                    metric(
-                                        "ise3_dataset_provider_active",
-                                        "",
-                                    )
-                                    + " == 1",
-                                    "{{dataset}} · {{provider}}",
-                                )
-                            ],
-                            columns=(None,),
-                        ),
-                        9,
-                        12,
-                    ),
-                    sized(
-                        ts(
-                            "Datasets not on their preferred source",
-                            "Non-zero means a dataset fell back, making a change "
-                            "in data semantics visible rather than silent.",
-                            [
-                                query(
-                                    f"sum({metric('ise3_dataset_provider_degraded')})",
-                                    "degraded",
-                                ),
-                                query(
-                                    metric(
-                                        "ise3_dataset_provider_degraded",
-                                        "",
-                                    )
-                                    + " == 1",
-                                    "{{dataset}}",
-                                    ref="B",
-                                ),
-                            ],
-                            thresholds=NONZERO_CRITICAL,
-                        ),
-                        9,
-                        12,
-                    ),
-                ),
-            ),
-            (
-                "Why it changed",
-                (
-                    sized(
-                        tbl(
-                            "Reason each fallback engaged",
-                            "Bounded reason recorded when a dataset stepped to a "
-                            "different provider.",
-                            [
-                                instant(
-                                    metric(
-                                        "ise3_dataset_provider_reason_info"
-                                    )
-                                    + " == 1",
-                                    "{{dataset}} · {{provider}} · {{reason}}",
-                                )
-                            ],
-                            columns=(None,),
-                        )
-                    ),
-                    sized(
-                        tbl(
-                            "Declared but unusable sources",
-                            "Configured sources this build cannot run because a "
-                            "target, capability, or reporting view is unavailable.",
-                            [
-                                instant(
-                                    metric(
-                                        "ise3_dataset_provider_available"
-                                    )
-                                    + " == 0",
-                                    "{{dataset}} · {{provider}}",
-                                )
-                            ],
-                            columns=(None,),
-                        )
-                    ),
-                ),
-            ),
-            (
-                "Collection",
-                (
-                    sized(
-                        tbl(
-                            "Dataset health",
-                            "Last-attempt success and freshness for each active "
-                            "dataset provider.",
-                            [
-                                instant(
-                                    metric("ise3_dataset_up"),
-                                    "{{dataset}} · {{provider}} up",
-                                ),
-                                instant(
-                                    metric("ise3_dataset_fresh"),
-                                    "{{dataset}} · {{provider}} fresh",
-                                    "B",
-                                ),
-                            ],
-                            columns=("up", "fresh"),
-                            column_overrides=(
-                                by_column("up", **BOOLEAN_CELL),
-                                by_column("fresh", **BOOLEAN_CELL),
-                            ),
-                        )
-                    ),
-                    sized(
-                        tbl(
-                            "Latest failure per dataset",
-                            "One bounded operator explanation per failing dataset; "
-                            "empty is the healthy state.",
-                            [
-                                instant(
-                                    metric(
-                                        "ise3_dataset_last_failure_detail_info"
-                                    )
-                                    + " == 1",
-                                    "{{dataset}} · {{reason}} · {{detail}}",
-                                )
-                            ],
-                            columns=(None,),
-                        )
-                    ),
-                ),
-            ),
+        "ISE Exporter · Collection pipeline",
+        "ise3-pipeline",
+        "Tier 3. Is the exporter's view of ISE current, and which source is "
+        "serving each dataset? Read this before concluding that anything on "
+        "the ISE dashboards is real.",
+        [
+            ("Is the data current?", trust),
+            ("Per dataset", detail),
+            ("Transports", transports, COLLAPSED),
+            ("Bounds and caches", bounds, COLLAPSED),
+            ("Measurement completeness", completeness, COLLAPSED),
+            ("Reference", closing, COLLAPSED),
+        ],
+        tier=EXPORTER,
+        variables=(
+            label_variable("dataset", "Dataset", "ise3_dataset_enabled", "dataset"),
         ),
-        refresh="1m",
     )
 
+
+# ---------------------------------------------------------------------------
+# Tier 3 — load against ISE
+# ---------------------------------------------------------------------------
 
 def load_dashboard():
-    return assemble(
-        "ISE Exporter 3 — Load and Budget",
-        "ise3-load",
-        "Planned load from provider declarations beside measured requests and "
-        "database time, target ceilings, enforced pacing, and scheduler queues.",
-        (
-            (
-                "Budget",
-                (
-                    sized(
-                        stat_panel(
-                            "Budget used",
-                            "Planned load as a fraction of each declared target "
-                            "ceiling; above one is over budget.",
-                            [
-                                instant(
-                                    metric("ise3_load_budget_utilisation"),
-                                    "{{target}}",
-                                )
-                            ],
-                            unit="percentunit",
-                            thresholds=BUDGET_USED,
-                            minimum=0,
-                        ),
-                        5,
-                        24,
-                    ),
-                    sized(
-                        ts(
-                            "Requests per hour: planned against measured",
-                            "Declared request cost beside the measured rate "
-                            "actually leaving the exporter.",
-                            [
-                                query(
-                                    metric(
-                                        "ise3_load_planned_requests_per_hour"
-                                    ),
-                                    "{{target}} planned",
-                                ),
-                                query(
-                                    "rate("
-                                    + metric(
-                                        "ise3_load_measured_requests_total"
-                                    )
-                                    + "[15m]) * 3600",
-                                    "{{target}} measured",
-                                    ref="B",
-                                ),
-                            ],
-                            unit="reqps",
-                        )
-                    ),
-                    sized(
-                        ts(
-                            "Request ceiling and enforcement",
-                            "Configured request ceiling beside the rate currently "
-                            "enforced by the token bucket.",
-                            [
-                                query(
-                                    metric(
-                                        "ise3_load_budget_requests_per_hour"
-                                    ),
-                                    "{{target}} ceiling",
-                                ),
-                                query(
-                                    metric(
-                                        "ise3_budget_enforced_requests_per_hour"
-                                    ),
-                                    "{{target}} enforced",
-                                    ref="B",
-                                ),
-                            ],
-                        )
-                    ),
-                ),
+    budget = [
+        sized(
+            stat_panel(
+                "Budget used",
+                "Share of the configured request budget the exporter is "
+                "actually consuming. Above 80% there is no headroom for a "
+                "backfill or a manual query; at 100% the scheduler is "
+                "throttling and freshness starts to slip.",
+                [instant(f"max by (instance) ({metric('ise3_load_budget_utilisation')})")],
+                unit="percentunit",
+                thresholds=BUDGET_USED,
+                minimum=0,
+                sparkline=True,
+                no_value=NO_DATA_EXPORTER,
             ),
-            (
-                "Data Connect duty cycle",
-                (
-                    sized(
-                        ts(
-                            "Duty cycle: planned against measured",
-                            "Planned wall-clock share in Oracle beside measured "
-                            "statement time and the enforced ceiling.",
-                            [
-                                query(
-                                    metric(
-                                        "ise3_load_planned_duty_cycle_percent",
-                                        'target="oracle"',
-                                    ),
-                                    "planned",
-                                ),
-                                query(
-                                    "rate("
-                                    + metric(
-                                        "ise3_load_measured_db_seconds_total",
-                                        'target="oracle"',
-                                    )
-                                    + "[15m]) * 100",
-                                    "measured",
-                                    ref="B",
-                                ),
-                                query(
-                                    metric(
-                                        "ise3_dataconnect_effective_duty_cycle_percent"
-                                    ),
-                                    "ceiling",
-                                    ref="C",
-                                ),
-                            ],
-                            unit="percent",
-                        )
-                    ),
-                    sized(
-                        ts(
-                            "Cooldown imposed on reporting datasets",
-                            "Global wait after each statement, which is how the "
-                            "configured duty-cycle budget is enforced.",
-                            [
-                                query(
-                                    metric(
-                                        "ise3_dataconnect_query_cooldown_seconds"
-                                    ),
-                                    "{{view}}",
-                                )
-                            ],
-                            unit="s",
-                        )
-                    ),
-                ),
-            ),
-            (
-                "Statement cost and scheduler",
-                (
-                    sized(
-                        ts(
-                            "Statement duration by view",
-                            "Latest successful statement duration for every "
-                            "reporting view.",
-                            [
-                                query(
-                                    metric(
-                                        "ise3_dataconnect_query_last_duration_seconds",
-                                        'result="success"',
-                                    ),
-                                    "{{view}}",
-                                )
-                            ],
-                            unit="s",
-                        )
-                    ),
-                    sized(
-                        ts(
-                            "Rows returned by view",
-                            "Rows returned by each reporting statement after "
-                            "database-side aggregation.",
-                            [
-                                query(
-                                    metric("ise3_dataconnect_query_rows"),
-                                    "{{view}}",
-                                )
-                            ],
-                        )
-                    ),
-                    sized(
-                        ts(
-                            "Lane queue depth",
-                            "Datasets waiting on each serialized target lane; "
-                            "sustained depth means cadence is not achievable.",
-                            [
-                                query(
-                                    metric("ise3_lane_queue_depth"),
-                                    "{{target}}",
-                                )
-                            ],
-                        )
-                    ),
-                    sized(
-                        ts(
-                            "Collection duration by dataset",
-                            "Latest collection duration by dataset and active "
-                            "provider.",
-                            [
-                                query(
-                                    metric(
-                                        "ise3_dataset_collection_duration_seconds"
-                                    ),
-                                    "{{dataset}} · {{provider}}",
-                                )
-                            ],
-                            unit="s",
-                        )
-                    ),
-                ),
-            ),
+            STAT_H,
+            SIXTH,
         ),
-        refresh="1m",
+        sized(
+            stat_panel(
+                "Measured requests per hour",
+                "What the exporter is really asking ISE for, derived from the "
+                "request counter rather than from the plan. The number to "
+                "quote when someone asks what this exporter costs.",
+                [instant(f"sum by (instance) (rate("
+                         f"{metric('ise3_load_measured_requests_total')}[1h]) * 3600)")],
+                thresholds=NEUTRAL,
+                sparkline=True,
+                no_value=NO_DATA_EXPORTER,
+            ),
+            STAT_H,
+            SIXTH,
+        ),
+        sized(
+            stat_panel(
+                "Declared requests per hour",
+                "What the configuration says the exporter will cost. Read it "
+                "against the measured figure beside it: a declaration that "
+                "does not match reality is the one thing in this design that "
+                "can quietly lie.",
+                [instant(summed(metric("ise3_load_planned_requests_per_hour")))],
+                thresholds=NEUTRAL,
+                no_value=NO_DATA_EXPORTER,
+            ),
+            STAT_H,
+            SIXTH,
+        ),
+        sized(
+            stat_panel(
+                "Data Connect duty cycle",
+                "Share of wall-clock time the exporter's Oracle session is "
+                "actually executing. This is the figure a database "
+                "administrator will care about, and the one the appliance "
+                "enforces against.",
+                [instant(metric("ise3_dataconnect_effective_duty_cycle_percent"))],
+                unit="percent",
+                thresholds=UTILISATION,
+                minimum=0,
+                sparkline=True,
+                no_value=NO_DATA_EXPORTER,
+            ),
+            STAT_H,
+            SIXTH,
+        ),
+        sized(
+            stat_panel(
+                "Throttle wait",
+                "Cumulative seconds the scheduler has spent waiting for budget "
+                "rather than querying. Non-zero means the budget is binding: "
+                "the exporter wanted to collect and was not allowed to.",
+                [instant(f"sum by (instance) (rate("
+                         f"{metric('ise3_budget_wait_seconds_total')}[$__rate_interval]))")],
+                unit="s",
+                thresholds=NONZERO_WARNING,
+                no_value=NO_DATA_EXPORTER,
+            ),
+            STAT_H,
+            SIXTH,
+        ),
+        sized(
+            stat_panel(
+                "Budget warming",
+                "Whether the budget accounting is still filling its first "
+                "window. While this is true the utilisation figures beside it "
+                "are provisional rather than wrong.",
+                [instant(f"max by (instance) ({metric('ise3_budget_warming')})")],
+                mappings=YES_NO,
+                thresholds=NEUTRAL,
+                text_mode=BigValueTextMode.VALUE,
+                no_value=NO_DATA_EXPORTER,
+            ),
+            STAT_H,
+            SIXTH,
+        ),
+    ]
+
+    declared = [
+        sized(
+            ts(
+                "Requests per hour: declared, measured, and enforced",
+                "The plan against reality against the ceiling. Measured "
+                "exceeding declared means a cost declaration is wrong; "
+                "measured touching enforced means the scheduler is being held "
+                "back and collection intervals are effectively longer than "
+                "configured.",
+                [
+                    query(summed(metric("ise3_load_planned_requests_per_hour")),
+                          "declared"),
+                    query(f"sum by (instance) (rate("
+                          f"{metric('ise3_load_measured_requests_total')}[1h]) * 3600)",
+                          "measured", ref="B"),
+                    query(summed(metric("ise3_budget_enforced_requests_per_hour")),
+                          "enforced ceiling", ref="C"),
+                    query(summed(metric("ise3_load_budget_requests_per_hour")),
+                          "configured budget", ref="D"),
+                ],
+            ),
+            PANEL_H,
+            HALF,
+        ),
+        sized(
+            ts(
+                "Duty cycle: declared, measured, and allowed",
+                "Planned Oracle duty cycle against what the session actually "
+                "used, against the ceiling the budget allows. The Data Connect "
+                "equivalent of the request comparison beside it, and the one an "
+                "appliance will enforce hardest.",
+                [
+                    query(summed(metric("ise3_load_planned_duty_cycle_percent")),
+                          "declared"),
+                    query(metric("ise3_dataconnect_effective_duty_cycle_percent"),
+                          "measured", ref="B"),
+                    query(summed(metric("ise3_load_budget_duty_cycle_percent")),
+                          "allowed", ref="C"),
+                ],
+                unit="percent",
+                thresholds=UTILISATION,
+            ),
+            PANEL_H,
+            HALF,
+        ),
+    ]
+
+    where = [
+        sized(
+            tbl(
+                "Statement cost by view",
+                "Duration and row count of the last query against each "
+                "reporting view, most expensive first. The list of candidates "
+                "whenever the duty cycle needs to come down: one view usually "
+                "dominates.",
+                [
+                    instant(f"max by (instance,view) ("
+                            f"{metric('ise3_dataconnect_query_last_duration_seconds')})",
+                            ref="A"),
+                    instant(metric("ise3_dataconnect_query_rows"), ref="B"),
+                    instant(metric("ise3_dataconnect_query_cooldown_seconds"),
+                            ref="C"),
+                ],
+                columns=["Last duration", "Rows", "Cooldown"],
+                sort=("Last duration", True),
+                labels={"view": "View"},
+                column_overrides=[
+                    by_column("Last duration", unit="s", thresholds=LATENCY_SECONDS,
+                              colour_cells=True),
+                    by_column("Cooldown", **SECONDS_CELL),
+                ],
+            ),
+            TALL_H,
+            HALF,
+        ),
+        sized(
+            tbl(
+                "Collection cost by dataset",
+                "How long each dataset takes to collect and how often it runs "
+                "— duration over interval is the share of the schedule that "
+                "dataset consumes. The cheapest saving is usually a long "
+                "dataset on a short interval.",
+                [
+                    instant(f"max by (instance,dataset) ("
+                            f"{metric('ise3_dataset_collection_duration_seconds')})",
+                            ref="A"),
+                    instant(metric("ise3_dataset_interval_seconds"), ref="B"),
+                    instant(metric("ise3_dataset_series"), ref="C"),
+                ],
+                columns=["Duration", "Interval", "Series published"],
+                sort=("Duration", True),
+                labels={"dataset": "Dataset"},
+                column_overrides=[
+                    by_column("Duration", **SECONDS_CELL),
+                    by_column("Interval", **SECONDS_CELL),
+                ],
+            ),
+            TALL_H,
+            HALF,
+        ),
+        sized(
+            ts(
+                "Database time consumed",
+                "Oracle seconds per second the exporter is consuming, against "
+                "the hourly figure the configuration declared. A step in the "
+                "measured line without a configuration change means a view's "
+                "data volume grew.",
+                [
+                    query(f"sum by (instance,target) (rate("
+                          f"{metric('ise3_load_measured_db_seconds_total')}[$__rate_interval]))",
+                          "measured {{target}}"),
+                    query(f"sum by (instance) ("
+                          f"{metric('ise3_load_planned_db_seconds_per_hour')}) / 3600",
+                          "declared", ref="B"),
+                ],
+                filled=True,
+            ),
+            PANEL_H,
+            HALF,
+        ),
+        sized(
+            ts(
+                "Statement duration, 95th percentile",
+                "The distribution behind the last-duration column beside it. A "
+                "p95 well above the typical last duration means one statement "
+                "occasionally runs far longer than it usually does, which is "
+                "what actually breaches a duty cycle.",
+                [query("histogram_quantile(0.95, sum by (instance,view,le) (rate("
+                       f"{metric('ise3_dataconnect_query_duration_seconds_bucket')}"
+                       "[$__rate_interval])))", "{{view}}")],
+                unit="s",
+                legend_placement="right",
+            ),
+            PANEL_H,
+            HALF,
+        ),
+        sized(
+            ts(
+                "Throttling, cooldown, and ad-hoc queries",
+                "Requests the budget refused, the cooldown the exporter "
+                "imposed on reporting queries in response, and any explorer "
+                "queries an operator ran by hand. The last one matters: ad-hoc "
+                "reads come out of the same budget as scheduled collection.",
+                [
+                    query(f"sum by (instance) (rate("
+                          f"{metric('ise3_budget_throttled_total')}[$__rate_interval]))",
+                          "throttled"),
+                    query(f"max by (instance) ("
+                          f"{metric('ise3_dataconnect_query_cooldown_seconds')})",
+                          "peak cooldown", ref="B"),
+                    query(f"sum by (instance,result) (rate("
+                          f"{metric('ise3_dataconnect_explorer_queries_total')}[$__rate_interval]))",
+                          "ad-hoc {{result}}", ref="C"),
+                ],
+            ),
+            PANEL_H,
+            HALF,
+        ),
+    ]
+
+    closing = [sized(about(
+        "hold the exporter's declared cost against its measured cost, so a "
+        "cost declaration cannot quietly become fiction.",
+        [
+            "Read budget used and the declared-against-measured graph.",
+            "If measured exceeds declared, the configuration is under-stating "
+            "cost — fix the declaration or the interval.",
+            "If measured is pinned to the enforced ceiling, collection "
+            "intervals are effectively longer than configured.",
+        ],
+        [
+            "Duty cycle high: find the dominant view in **Statement cost** and "
+            "lengthen its scan window or its interval.",
+            "Throttling non-zero: the exporter is already holding itself back; "
+            "freshness on the pipeline dashboard will show the cost.",
+        ],
+        ["Collection pipeline", "Triage", "Capacity"],
+    ), STRIP_H, FULL)]
+
+    return assemble(
+        "ISE Exporter · Load against ISE",
+        "ise3-load",
+        "Tier 3. What is this exporter costing the appliance, and does the "
+        "measured cost match the declared cost? The panel set that catches a "
+        "cost declaration drifting away from reality.",
+        [
+            ("Budget", budget),
+            ("Declared against measured", declared),
+            ("Where the cost goes", where),
+            ("Reference", closing, COLLAPSED),
+        ],
+        tier=COST,
     )
 
 
+# ---------------------------------------------------------------------------
+# Tier 4 — capacity and growth
+# ---------------------------------------------------------------------------
+
+def capacity_dashboard():
+    licensing = [
+        sized(
+            stat_panel(
+                "Licence tiers out of compliance",
+                "Licence tiers ISE currently reports as non-compliant. Any "
+                "value above zero is a procurement conversation with a "
+                "deadline attached, not an operational one.",
+                [instant(f"count by (instance) "
+                         f"(({gate(metric('ise3_license_compliant'), 'licensing')}) == 0)")],
+                thresholds=NONZERO_CRITICAL,
+                no_value=NO_DATA_CLEAN,
+            ),
+            STAT_H,
+            QUARTER,
+        ),
+        sized(
+            stat_panel(
+                "Endpoints",
+                "Total endpoint inventory over the trend window. The primary "
+                "driver of licence consumption, so its growth rate is the "
+                "input to any capacity forecast.",
+                [instant(gate(metric("ise3_endpoints_total"), "endpoint_inventory"))],
+                thresholds=NEUTRAL,
+                sparkline=True,
+                no_value=NO_DATA_STALE,
+            ),
+            STAT_H,
+            QUARTER,
+        ),
+        sized(
+            stat_panel(
+                "Peak concurrent sessions",
+                "The highest concurrent session count seen across the trend "
+                "window. Sizing is done against the peak, not the average, so "
+                "this is the number that matters for node capacity.",
+                [instant(f"max_over_time(({ACTIVE_SESSIONS})[$__range:])")],
+                thresholds=NEUTRAL,
+                no_value=NO_DATA_STALE,
+            ),
+            STAT_H,
+            QUARTER,
+        ),
+    ] + trust_pair(("licensing", "endpoint_inventory", "certificates"),
+                   span=EIGHTH) + [
+        sized(
+            ts(
+                "Licence consumption by tier",
+                "Consumption against each licence tier over the trend window. "
+                "Read the gradient, not the value: the question this panel "
+                "answers is when a tier runs out, not whether it has.",
+                [query(gate(metric("ise3_license_consumption"), "licensing"),
+                       "{{tier}}")],
+                filled=True,
+            ),
+            PANEL_H,
+            HALF,
+        ),
+        sized(
+            tbl(
+                "Licence state by tier",
+                "Whether each tier is enabled, compliant, and what state ISE "
+                "reports for it. The reference behind the consumption graph "
+                "beside it.",
+                [
+                    instant(gate(metric("ise3_license_enabled"), "licensing"),
+                            ref="A"),
+                    instant(gate(metric("ise3_license_compliant"), "licensing"),
+                            ref="B"),
+                    instant(gate(metric("ise3_license_consumption"), "licensing"),
+                            ref="C"),
+                    instant(f"{gate(metric('ise3_license_compliance_state'), 'licensing')} == 1",
+                            ref="D"),
+                ],
+                columns=["Enabled", "Compliant", "Consumption", None],
+                sort=("Consumption", True),
+                labels={"tier": "Tier", "state": "ISE state"},
+                column_overrides=[
+                    by_column("Enabled", **BOOLEAN_CELL),
+                    by_column("Compliant", **BOOLEAN_CELL),
+                ],
+            ),
+            PANEL_H,
+            HALF,
+        ),
+    ]
+
+    growth = [
+        sized(
+            ts(
+                "Endpoint and device growth",
+                "Inventory over the trend window. A steady gradient is "
+                "planning input; a step is an import or a purge and should be "
+                "explained before it is extrapolated from.",
+                [
+                    query(gate(metric("ise3_endpoints_total"), "endpoint_inventory"),
+                          "endpoints"),
+                    query(gate(metric("ise3_network_devices_total"),
+                               "network_devices"), "network devices", ref="B"),
+                ],
+            ),
+            PANEL_H,
+            THIRD,
+        ),
+        sized(
+            ts(
+                "Concurrent sessions",
+                "Live session count over the trend window. The peaks are what "
+                "PSN sizing is done against; the troughs say how much of the "
+                "estate is genuinely idle overnight.",
+                [query(ACTIVE_SESSIONS, "sessions")],
+                filled=True,
+            ),
+            PANEL_H,
+            THIRD,
+        ),
+        sized(
+            ts(
+                "Node saturation trend",
+                "Peak CPU per node across the trend window. This is the panel "
+                "that says whether a node is trending towards needing help, as "
+                "opposed to the PSN dashboard, which says whether it needs help "
+                "right now.",
+                [query("max by (instance,node) (" +
+                       gate(metric("ise3_node_cpu_utilization_percent"),
+                            "psn_performance") + ")", "{{node}}")],
+                unit="percent",
+                thresholds=UTILISATION,
+                minimum=0,
+                maximum=100,
+            ),
+            PANEL_H,
+            THIRD,
+        ),
+    ]
+
+    runway = [
+        sized(
+            tbl(
+                "Certificate runway",
+                "Every certificate by days remaining, soonest first. Read on a "
+                "monthly cadence rather than during an incident: everything on "
+                "this list is avoidable with notice and unavoidable without "
+                "it.",
+                [instant(gate(metric("ise3_certificate_expiry_days"),
+                              "certificates"))],
+                columns=["Days left"],
+                sort=("Days left", False),
+                labels={"node": "Node", "certificate": "Certificate",
+                        "store": "Store", "usage": "Usage"},
+                column_overrides=[
+                    by_column("Days left", thresholds=CERT_RUNWAY_DAYS,
+                              colour_cells=True, width=110),
+                ],
+            ),
+            TALL_H,
+            HALF,
+        ),
+        sized(
+            tbl(
+                "Software currency",
+                "Installed patches, the deployment's patch level, and whether "
+                "the running release is still supported. Falling behind here "
+                "is what eventually makes the reporting schema drift away from "
+                "what this exporter expects.",
+                [
+                    instant(gate(metric("ise3_patch_installed"), "patches"),
+                            ref="A"),
+                    instant(gate(metric("ise3_version_supported"), "patches"),
+                            ref="B"),
+                ],
+                columns=["Installed", "Release supported"],
+                labels={"patch_number": "Patch", "version": "Release"},
+                column_overrides=[
+                    by_column("Installed", **BOOLEAN_CELL),
+                    by_column("Release supported", mappings=SUPPORTED,
+                              thresholds=REQUIRED_BOOLEAN, colour_cells=True),
+                ],
+            ),
+            TALL_H,
+            HALF,
+        ),
+    ]
+
+    headroom = [
+        sized(
+            ts(
+                "Exporter budget headroom",
+                "Budget utilisation over the trend window. Growth in the "
+                "estate shows up here as a slow climb long before it shows up "
+                "as stale data, which makes this the earliest capacity signal "
+                "the exporter produces.",
+                [query(metric("ise3_load_budget_utilisation"), "{{target}}")],
+                unit="percentunit",
+                thresholds=BUDGET_USED,
+                minimum=0,
+            ),
+            PANEL_H,
+            HALF,
+        ),
+        sized(
+            ts(
+                "Collection duration trend",
+                "How long each dataset takes to collect, over the trend "
+                "window. A duration growing with the estate is the signal to "
+                "lengthen an interval or narrow a scan window before freshness "
+                "starts failing.",
+                [query(f"max by (instance,dataset) ("
+                       f"{metric('ise3_dataset_collection_duration_seconds')})",
+                       "{{dataset}}")],
+                unit="s",
+                legend_placement="right",
+            ),
+            PANEL_H,
+            HALF,
+        ),
+    ]
+
+    closing = [sized(about(
+        "answer where this deployment runs out — of licence, of node capacity, "
+        "of certificate validity, of exporter budget. Read on a monthly "
+        "cadence, never during an incident.",
+        [
+            "Read licence consumption gradients, not values.",
+            "Read the certificate runway top-down and diary the first few "
+            "rows.",
+            "Read node saturation and exporter budget together — they grow "
+            "with the same estate.",
+        ],
+        [
+            "A step rather than a gradient is an event, not growth. Check the "
+            "change annotations before extrapolating.",
+            "Everything here is a planning signal. Nothing here should page "
+            "anyone.",
+        ],
+        ["Triage", "Control plane", "Exporter load"],
+    ), STRIP_H, FULL)]
+
+    return assemble(
+        "ISE · Capacity and growth",
+        "ise3-capacity",
+        "Tier 4. Where does this deployment run out? Thirty-day trends for "
+        "licence, fleet growth, node saturation, certificate runway and "
+        "exporter budget. A planning dashboard, not an operational one.",
+        [
+            ("Licence", licensing),
+            ("Fleet growth", growth),
+            ("Runway", runway),
+            ("Exporter headroom", headroom),
+            ("Reference", closing, COLLAPSED),
+        ],
+        tier=CAPACITY,
+    )
+
+
+# ---------------------------------------------------------------------------
+
 DASHBOARDS = {
-    "ise3-overview": overview_dashboard,
+    "ise3-triage": triage_dashboard,
     "ise3-access": access_dashboard,
-    "ise3-endpoints": endpoints_dashboard,
-    "ise3-health": health_dashboard,
-    "ise3-pan-mnt": pan_mnt_dashboard,
     "ise3-psn": psn_dashboard,
-    "ise3-secureclient": secureclient_dashboard,
+    "ise3-control": control_dashboard,
+    "ise3-endpoints": endpoints_dashboard,
+    "ise3-posture": posture_dashboard,
     "ise3-tacacs": tacacs_dashboard,
-    "ise3-sources": sources_dashboard,
+    "ise3-pipeline": pipeline_dashboard,
     "ise3-load": load_dashboard,
+    "ise3-capacity": capacity_dashboard,
+}
+
+# The tier each dashboard belongs to, asserted by the test suite so the
+# structure cannot quietly collapse back into one undifferentiated pile.
+TIERS = {
+    "triage": ("ise3-triage",),
+    "diagnostic": ("ise3-access", "ise3-psn", "ise3-control", "ise3-endpoints",
+                   "ise3-posture", "ise3-tacacs"),
+    "exporter": ("ise3-pipeline", "ise3-load"),
+    "capacity": ("ise3-capacity",),
 }
 
 
