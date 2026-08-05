@@ -474,7 +474,7 @@
       },
       "gridPos": {
         "h": 8,
-        "w": 12,
+        "w": 8,
         "x": 0,
         "y": 6
       },
@@ -513,6 +513,74 @@
         "type": "prometheus",
         "uid": "${prometheus}"
       },
+      "description": "Change in each PSN's session count over 15m. Flat is the normal state, including at the busiest hour of the day: a PSN that is holding steady under load reads the same here as one holding steady at midnight. A fall on one node matched by a rise on another is load moving between them, which is what a failover, a node restart, or a NAD's RADIUS server order changing looks like from here. A fall with no matching rise is sessions leaving ISE rather than moving inside it \u2014 read it beside the total on Access. Blank for the first 15m after an exporter restart, and for a PSN that has been serving for less than that: there is no earlier count to subtract yet.",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "fillOpacity": 0,
+            "lineWidth": 2,
+            "thresholdsStyle": {
+              "mode": "dashed"
+            }
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": null
+              },
+              {
+                "color": "text",
+                "value": 0
+              }
+            ]
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 6
+      },
+      "options": {
+        "legend": {
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": false
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "asc"
+        }
+      },
+      "repeatDirection": "h",
+      "targets": [
+        {
+          "expr": "(ise3_active_sessions_by_psn - ise3_active_sessions_by_psn offset 15m) and on() (((max(ise3_dataset_up{dataset=\"active_sessions\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"active_sessions\"} == 1))) == 1) and ((max(ise3_dataset_fresh{dataset=\"active_sessions\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"active_sessions\"} == 1))) == 1))",
+          "instant": false,
+          "legendFormat": "{{psn}}",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "title": "Session delta per PSN",
+      "transformations": [],
+      "transparent": false,
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${prometheus}"
+      },
       "description": "Per-node request rate over time. Compare the shape against active sessions: rate rising while sessions stay flat is re-authentication churn, not growth.",
       "fieldConfig": {
         "defaults": {
@@ -526,8 +594,8 @@
       },
       "gridPos": {
         "h": 8,
-        "w": 12,
-        "x": 12,
+        "w": 8,
+        "x": 16,
         "y": 6
       },
       "options": {

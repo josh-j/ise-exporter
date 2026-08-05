@@ -319,6 +319,11 @@ NONZERO_CRITICAL = ((None, "green"), (1, "red"))
 NONZERO_WARNING = ((None, "green"), (1, "orange"))
 REQUIRED_BOOLEAN = ((None, "red"), (1, "green"))
 NEUTRAL = ((None, "text"),)
+# For a quantity that is signed rather than good or bad. Draws the zero line and
+# nothing else: on a delta panel the sign is the whole reading, and red for
+# "lost sessions" would claim a node shedding load is failing when a planned
+# failover looks identical.
+ZERO_REFERENCE = ((None, "text"), (0, "text"))
 UTILISATION = ((None, "green"), (80, "orange"), (90, "red"))
 RATIO_HIGH_IS_GOOD = ((None, "red"), (0.85, "orange"), (0.95, "green"))
 COVERAGE = ((None, "red"), (0.8, "orange"), (0.95, "green"))
@@ -2049,6 +2054,23 @@ def access_dashboard():
 
 PSN_NODE = 'node=~"$node"'
 
+# Session counts are a gauge collected every 300s and then republished on every
+# scrape until the next collection, so a delta window shorter than two cadences
+# measures the scrape repeating itself and reads flat through a real failover.
+# Three cadences, so one skipped collection still leaves two points in the
+# window. Asserted against active_sessions' declared interval in the tests --
+# lengthen it there too if that cadence ever changes.
+SESSION_DELTA_WINDOW = "15m"
+
+# Subtraction rather than delta(). delta() extrapolates its result to the full
+# window, so 2500 sessions moving reads as 2679 and the overshoot drifts as the
+# window slides past the step -- a number wobbling while nothing is happening,
+# on the one panel whose entire content is a number of sessions. Subtracting the
+# earlier sample is exact and still. The cost is that it has nothing to draw
+# until the window has filled, which is stated in the panel description.
+SESSION_DELTA = (f"ise3_active_sessions_by_psn - ise3_active_sessions_by_psn "
+                 f"offset {SESSION_DELTA_WINDOW}")
+
 
 def psn_dashboard():
     service = [
@@ -2129,7 +2151,29 @@ def psn_dashboard():
                        "{{psn}}")],
             ),
             PANEL_H,
-            HALF,
+            THIRD,
+        ),
+        sized(
+            ts(
+                "Session delta per PSN",
+                f"Change in each PSN's session count over "
+                f"{SESSION_DELTA_WINDOW}. Flat is the normal state, including "
+                "at the busiest hour of the day: a PSN that is holding steady "
+                "under load reads the same here as one holding steady at "
+                "midnight. A fall on one node matched by a rise on another is "
+                "load moving between them, which is what a failover, a node "
+                "restart, or a NAD's RADIUS server order changing looks like "
+                "from here. A fall with no matching rise is sessions leaving "
+                "ISE rather than moving inside it — read it beside the total "
+                "on Access. Blank for the first "
+                f"{SESSION_DELTA_WINDOW} after an exporter restart, and for a "
+                "PSN that has been serving for less than that: there is no "
+                "earlier count to subtract yet.",
+                [query(gate(SESSION_DELTA, "active_sessions"), "{{psn}}")],
+                thresholds=ZERO_REFERENCE,
+            ),
+            PANEL_H,
+            THIRD,
         ),
         sized(
             ts(
@@ -2141,7 +2185,7 @@ def psn_dashboard():
                             "psn_performance"), "{{node}}")],
             ),
             PANEL_H,
-            HALF,
+            THIRD,
         ),
     ]
 

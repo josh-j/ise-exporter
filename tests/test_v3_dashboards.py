@@ -584,6 +584,33 @@ def test_no_table_renders_scrape_metadata(filename, dashboard):
             f"{filename}: {panel.get('title')} shows {sorted(missing)}")
 
 
+def test_the_session_delta_window_spans_more_than_one_collection():
+    # delta() over a window shorter than two collection cadences measures the
+    # scrape republishing the previous snapshot, not the fleet moving, so the
+    # panel reads flat straight through a failover -- the one event it exists
+    # to show. This is the reason the window is 15m rather than the 5m the
+    # panel carried in v3's first dashboard set.
+    from ise_exporter3.datasets import REGISTRY
+
+    dataset = next(entry for entry in REGISTRY.values()
+                   if entry.name == "active_sessions")
+    window = _builder().SESSION_DELTA_WINDOW
+    assert window.endswith("m"), f"window {window} is not in minutes"
+    seconds = int(window[:-1]) * 60
+    assert seconds >= 2 * dataset.default_interval, (
+        f"the session delta window is {seconds}s but active_sessions collects "
+        f"every {dataset.default_interval}s; a delta needs two collections")
+
+
+def test_the_psn_dashboard_shows_where_sessions_moved_to():
+    # The level alone cannot distinguish a node shedding load from the fleet
+    # shrinking; that is what the delta is for, and it was lost once already
+    # when the set was reorganised by question rather than by data source.
+    body = (DASHBOARDS / "ise3-psn.json").read_text()
+    assert "ise3_active_sessions_by_psn" in body
+    assert "ise3_active_sessions_by_psn offset " in body
+
+
 def test_the_pipeline_dashboard_answers_which_provider_is_live():
     # The whole argument of v3 is that a source change is visible. If these
     # queries disappear, that claim stops being true on the operator's screen.
