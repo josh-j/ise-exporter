@@ -252,7 +252,7 @@ Every provider also declares how much of the fleet it measures — `complete`,
 ## Operator surface
 
 `/metrics` on port 9618 for Prometheus — gzipped when the client offers it,
-which it always does, taking a ~6.4 MiB scrape to well under a megabyte on the
+which it always does, taking a ~13.5 MiB scrape to well under a megabyte on the
 wire — and a read-only operator API bound to localhost on 9619:
 
 ```
@@ -364,6 +364,120 @@ the metric registry — and the design itself is contract-tested too: tier time
 horizons, a visible-panel ceiling, the data-trust pair on every ISE dashboard,
 and the absence of silently truncated panels are all assertions rather than
 conventions. See `dashboards3/README.md` for the capability map.
+
+## Prometheus and Grafana settings
+
+Collection is decoupled from scraping. `/metrics` renders the last published
+snapshot and never reaches ISE, so **the scrape rate costs the appliance
+nothing** — it decides only the resolution Prometheus stores. The fastest
+dataset cadence is 300s and most are 21600s, so scraping faster than 60s buys
+no information; scraping slower than 120s puts a 300s dataset inside one
+missed scrape of Prometheus's 5-minute staleness cliff.
+
+Measured by `tools/simulate_scale3.py` at the declared production scale (5k
+NADs, 90k endpoints, 60k sessions): **112k series, 13.5 MiB rendered in ~0.4s,
+649 KiB gzipped on the wire.**
+
+```yaml
+global:
+  scrape_interval: 60s
+  evaluation_interval: 60s
+
+scrape_configs:
+  - job_name: ise-exporter3
+    scrape_interval: 60s        # keep equal to [exporter] scrape_interval
+    scrape_timeout: 15s         # ~0.4s measured; the headroom is for the host, not the render
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["ise-exporter-host:9618"]
+        labels:
+          deployment: hq        # optional; `instance` is what the dashboards scope by
+    sample_limit: 200000        # trips on a cardinality accident, not on the declared scale
+```
+
+Four things are worth getting right, and one is worth not doing:
+
+- **`instance` is the deployment boundary.** Every dashboard scopes by it
+  (`label_values(ise3_dataset_enabled, instance)`), so one exporter is one ISE
+  deployment. Relabel it to something an operator recognises if `host:port`
+  is not, but do not drop or collapse it across deployments.
+- **Retention must cover the longest window.** `ise3-capacity` opens on 30
+  days, so `--storage.tsdb.retention.time=90d` leaves room to look back past it.
+- **Leave `honor_timestamps` alone.** The exporter publishes no timestamps, so
+  the scrape time is the sample time and a 6h dataset republishes its last
+  value on every scrape instead of gapping. That is what makes
+  `ise3_dataset_last_success_timestamp` readable as an age.
+- **Compression is negotiated, not assumed.** Prometheus offers gzip by
+  default and gets it; a scraper configured with `enable_compression: false`
+  takes the full 13.5 MiB.
+- **Do not trim with `metric_relabel_configs`.** Dropping `ise3_radius_*` at
+  scrape saves Prometheus disk and still pays the entire ISE collection cost.
+  Disable the dataset in `[datasets]` instead — it is the only lever that
+  removes both, and `plan` will show you the budget it gave back.
+
+### Alerting
+
+```yaml
+groups:
+  - name: ise-exporter3
+    rules:
+      - alert: IseExporterDown
+        expr: up{job="ise-exporter3"} == 0
+        for: 5m
+      - alert: IseDatasetFailing
+        expr: ise3_dataset_up == 0
+        for: 15m
+      - alert: IseDatasetStale
+        expr: ise3_dataset_fresh == 0
+        for: 15m
+      - alert: IseProviderDegraded
+        expr: ise3_dataset_provider_degraded == 1
+        for: 1h
+      - alert: IseBudgetNearCeiling
+        expr: ise3_load_budget_utilisation > 0.9
+        for: 30m
+```
+
+`ise3_dataset_fresh` already means "within two cadences", so it scales itself:
+a 6h dataset is not called stale on a 5-minute rule and a 5-minute one is not
+given six hours of grace. The `for:` clause is covering the restart window,
+nothing else. Do not write a per-dataset
+`time() - ise3_dataset_last_success_timestamp > N` rule — `N` is
+`ise3_dataset_interval_seconds`, and the exporter has already applied it.
+
+### Grafana
+
+The dashboards carry a `${prometheus}` datasource variable rather than a
+hardcoded uid, so provisioning is free to name the datasource anything; what
+matters is `timeInterval`, because `$__rate_interval` is derived from it and
+every rate panel in `ise3-pipeline` and `ise3-load` depends on it:
+
+```yaml
+apiVersion: 1
+datasources:
+  - name: Prometheus
+    type: prometheus
+    url: http://prometheus:9090
+    isDefault: true
+    jsonData:
+      timeInterval: 60s                    # must equal the scrape interval
+      httpMethod: POST
+      queryTimeout: 60s
+      incrementalQuerying: true            # ise3-capacity re-queries 30d every 30m
+      incrementalQueryOverlapWindow: 10m
+```
+
+```ini
+# grafana.ini
+[dashboards]
+min_refresh_interval = 1m
+```
+
+Each tier already declares its own window and refresh — triage 3h/1m,
+diagnostic 6h/5m, exporter 6h/1m, capacity 30d/30m — chosen against the
+cadence of the data behind it. `min_refresh_interval` exists to stop someone
+pinning a 5s refresh on a panel whose underlying value moves every five
+minutes: it costs Prometheus sixty queries to redraw the same number.
 
 ## Simulating production scale
 
