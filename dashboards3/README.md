@@ -124,8 +124,12 @@ providers:
       path: /var/lib/grafana/dashboards/ise-exporter3
 ```
 
-Every dashboard is deployment-aware through the Prometheus `instance` label and
-keeps the selected deployment while navigating through the shared dashboard menu.
+One exporter serves one ISE deployment, so no dashboard carries a deployment
+variable: `instance` cannot vary within a set of panels fed by one exporter, and
+a selector that filters nothing is a control that lies about being one. Point a
+second deployment at a second scrape job and a second Grafana folder. Drill-down
+links carry the time range and whatever entity was clicked, which is the whole
+of the context there is to keep.
 
 ## Adding a panel
 

@@ -7,7 +7,7 @@
           "uid": "${prometheus}"
         },
         "enable": true,
-        "expr": "changes(ise3_dataset_provider_active{instance=~\"$deployment\"}[5m]) > 0",
+        "expr": "changes(ise3_dataset_provider_active[5m]) > 0",
         "hide": false,
         "iconColor": "purple",
         "name": "Provider changed",
@@ -21,7 +21,7 @@
           "uid": "${prometheus}"
         },
         "enable": true,
-        "expr": "max by (instance,node) (changes(ise3_deployment_node_state{instance=~\"$deployment\"}[10m])) > 0",
+        "expr": "max by (node) (changes(ise3_deployment_node_state[10m])) > 0",
         "hide": false,
         "iconColor": "orange",
         "name": "Node state changed",
@@ -35,7 +35,7 @@
           "uid": "${prometheus}"
         },
         "enable": true,
-        "expr": "ise3_exporter_build_info{instance=~\"$deployment\"} unless (ise3_exporter_build_info{instance=~\"$deployment\"} offset 5m)",
+        "expr": "ise3_exporter_build_info unless (ise3_exporter_build_info offset 5m)",
         "hide": false,
         "iconColor": "blue",
         "name": "Exporter build changed",
@@ -130,7 +130,7 @@
       "repeatDirection": "h",
       "targets": [
         {
-          "expr": "(sum by (instance) ((ise3_posture_endpoints{instance=~\"$deployment\",status=~\"Compliant|compliant\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"posture_current\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"posture_current\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"posture_current\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"posture_current\"} == 1))) == 1)))) / clamp_min((sum by (instance) ((ise3_posture_endpoints{instance=~\"$deployment\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"posture_current\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"posture_current\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"posture_current\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"posture_current\"} == 1))) == 1)))), 1)",
+          "expr": "(sum((ise3_posture_endpoints{status=~\"Compliant|compliant\"}) and on() (((max(ise3_dataset_up{dataset=\"posture_current\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"posture_current\"} == 1))) == 1) and ((max(ise3_dataset_fresh{dataset=\"posture_current\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"posture_current\"} == 1))) == 1)))) / clamp_min((sum((ise3_posture_endpoints) and on() (((max(ise3_dataset_up{dataset=\"posture_current\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"posture_current\"} == 1))) == 1) and ((max(ise3_dataset_fresh{dataset=\"posture_current\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"posture_current\"} == 1))) == 1)))), 1)",
           "instant": true,
           "legendFormat": "",
           "range": false,
@@ -187,7 +187,7 @@
       "repeatDirection": "h",
       "targets": [
         {
-          "expr": "sum by (instance) ((ise3_posture_endpoints{instance=~\"$deployment\",status!~\"Compliant|compliant\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"posture_current\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"posture_current\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"posture_current\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"posture_current\"} == 1))) == 1)))",
+          "expr": "sum((ise3_posture_endpoints{status!~\"Compliant|compliant\"}) and on() (((max(ise3_dataset_up{dataset=\"posture_current\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"posture_current\"} == 1))) == 1) and ((max(ise3_dataset_fresh{dataset=\"posture_current\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"posture_current\"} == 1))) == 1)))",
           "instant": true,
           "legendFormat": "",
           "range": false,
@@ -244,7 +244,7 @@
       "repeatDirection": "h",
       "targets": [
         {
-          "expr": "(ise3_posture_eligible_without_recent_assessment_total{instance=~\"$deployment\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"posture_history\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"posture_history\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"posture_history\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"posture_history\"} == 1))) == 1))",
+          "expr": "(ise3_posture_eligible_without_recent_assessment_total) and on() (((max(ise3_dataset_up{dataset=\"posture_history\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"posture_history\"} == 1))) == 1) and ((max(ise3_dataset_fresh{dataset=\"posture_history\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"posture_history\"} == 1))) == 1))",
           "instant": true,
           "legendFormat": "",
           "range": false,
@@ -307,7 +307,7 @@
       "repeatDirection": "h",
       "targets": [
         {
-          "expr": "((ise3_posture_eligible_recently_assessed_total{instance=~\"$deployment\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"posture_history\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"posture_history\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"posture_history\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"posture_history\"} == 1))) == 1))) / clamp_min(((ise3_posture_eligible_endpoints_total{instance=~\"$deployment\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"posture_history\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"posture_history\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"posture_history\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"posture_history\"} == 1))) == 1))), 1)",
+          "expr": "((ise3_posture_eligible_recently_assessed_total) and on() (((max(ise3_dataset_up{dataset=\"posture_history\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"posture_history\"} == 1))) == 1) and ((max(ise3_dataset_fresh{dataset=\"posture_history\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"posture_history\"} == 1))) == 1))) / clamp_min(((ise3_posture_eligible_endpoints_total) and on() (((max(ise3_dataset_up{dataset=\"posture_history\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"posture_history\"} == 1))) == 1) and ((max(ise3_dataset_fresh{dataset=\"posture_history\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"posture_history\"} == 1))) == 1))), 1)",
           "instant": true,
           "legendFormat": "",
           "range": false,
@@ -331,7 +331,7 @@
             {
               "targetBlank": false,
               "title": "Why \u2014 collection pipeline",
-              "url": "/d/ise3-pipeline?${__url_time_range}&${deployment:queryparam}"
+              "url": "/d/ise3-pipeline?${__url_time_range}"
             }
           ],
           "max": 1,
@@ -373,7 +373,7 @@
       "repeatDirection": "h",
       "targets": [
         {
-          "expr": "avg by (instance) (((max by (instance,dataset) (ise3_dataset_up{instance=~\"$deployment\",dataset=~\"posture_current|posture_history\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=~\"posture_current|posture_history\"} == 1))) == bool 1) * ((max by (instance,dataset) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=~\"posture_current|posture_history\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=~\"posture_current|posture_history\"} == 1))) == bool 1))",
+          "expr": "avg(((max by (dataset) (ise3_dataset_up{dataset=~\"posture_current|posture_history\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=~\"posture_current|posture_history\"} == 1))) == bool 1) * ((max by (dataset) (ise3_dataset_fresh{dataset=~\"posture_current|posture_history\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=~\"posture_current|posture_history\"} == 1))) == bool 1))",
           "instant": true,
           "legendFormat": "",
           "range": false,
@@ -397,7 +397,7 @@
             {
               "targetBlank": false,
               "title": "Why \u2014 collection pipeline",
-              "url": "/d/ise3-pipeline?${__url_time_range}&${deployment:queryparam}"
+              "url": "/d/ise3-pipeline?${__url_time_range}"
             }
           ],
           "noValue": "no data \u2014 exporter absent?",
@@ -441,7 +441,7 @@
       "repeatDirection": "h",
       "targets": [
         {
-          "expr": "max by (instance) (time() - (max by (instance,dataset) (ise3_dataset_last_success_timestamp{instance=~\"$deployment\",dataset=~\"posture_current|posture_history\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=~\"posture_current|posture_history\"} == 1))))",
+          "expr": "max(time() - (max by (dataset) (ise3_dataset_last_success_timestamp{dataset=~\"posture_current|posture_history\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=~\"posture_current|posture_history\"} == 1))))",
           "instant": true,
           "legendFormat": "",
           "range": false,
@@ -556,7 +556,7 @@
       "repeatDirection": "h",
       "targets": [
         {
-          "expr": "sum by (instance,status) ((ise3_posture_endpoints{instance=~\"$deployment\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"posture_current\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"posture_current\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"posture_current\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"posture_current\"} == 1))) == 1)))",
+          "expr": "sum by (status) ((ise3_posture_endpoints) and on() (((max(ise3_dataset_up{dataset=\"posture_current\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"posture_current\"} == 1))) == 1) and ((max(ise3_dataset_fresh{dataset=\"posture_current\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"posture_current\"} == 1))) == 1)))",
           "instant": false,
           "legendFormat": "{{status}}",
           "range": true,
@@ -654,7 +654,7 @@
       "repeatDirection": "h",
       "targets": [
         {
-          "expr": "(ise3_posture_assessments_by_psn{instance=~\"$deployment\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"posture_history\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"posture_history\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"posture_history\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"posture_history\"} == 1))) == 1))",
+          "expr": "(ise3_posture_assessments_by_psn) and on() (((max(ise3_dataset_up{dataset=\"posture_history\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"posture_history\"} == 1))) == 1) and ((max(ise3_dataset_fresh{dataset=\"posture_history\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"posture_history\"} == 1))) == 1))",
           "instant": false,
           "legendFormat": "{{psn}} \u00b7 {{status}}",
           "range": true,
@@ -735,7 +735,7 @@
       "repeatDirection": "h",
       "targets": [
         {
-          "expr": "sum by (instance,ops_owner) ((ise3_posture_endpoints{instance=~\"$deployment\",status!~\"Compliant|compliant\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"posture_current\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"posture_current\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"posture_current\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"posture_current\"} == 1))) == 1)))",
+          "expr": "sum by (ops_owner) ((ise3_posture_endpoints{status!~\"Compliant|compliant\"}) and on() (((max(ise3_dataset_up{dataset=\"posture_current\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"posture_current\"} == 1))) == 1) and ((max(ise3_dataset_fresh{dataset=\"posture_current\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"posture_current\"} == 1))) == 1)))",
           "format": "table",
           "instant": true,
           "legendFormat": "",
@@ -752,7 +752,8 @@
               "names": [
                 "Time",
                 "__name__",
-                "job"
+                "job",
+                "instance"
               ]
             }
           }
@@ -837,7 +838,7 @@
       "repeatDirection": "h",
       "targets": [
         {
-          "expr": "sum by (instance,policy) ((ise3_posture_failing_policies{instance=~\"$deployment\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"posture_history\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"posture_history\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"posture_history\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"posture_history\"} == 1))) == 1))) or sum by (instance,policy) ((ise3_posture_policy_results{instance=~\"$deployment\",result!~\"pass|Passed|passed\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"posture_current\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"posture_current\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"posture_current\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"posture_current\"} == 1))) == 1)))",
+          "expr": "sum by (policy) ((ise3_posture_failing_policies) and on() (((max(ise3_dataset_up{dataset=\"posture_history\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"posture_history\"} == 1))) == 1) and ((max(ise3_dataset_fresh{dataset=\"posture_history\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"posture_history\"} == 1))) == 1))) or sum by (policy) ((ise3_posture_policy_results{result!~\"pass|Passed|passed\"}) and on() (((max(ise3_dataset_up{dataset=\"posture_current\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"posture_current\"} == 1))) == 1) and ((max(ise3_dataset_fresh{dataset=\"posture_current\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"posture_current\"} == 1))) == 1)))",
           "format": "table",
           "instant": true,
           "legendFormat": "",
@@ -854,7 +855,8 @@
               "names": [
                 "Time",
                 "__name__",
-                "job"
+                "job",
+                "instance"
               ]
             }
           }
@@ -939,7 +941,7 @@
       "repeatDirection": "h",
       "targets": [
         {
-          "expr": "(ise3_posture_failed_conditions{instance=~\"$deployment\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"posture_history\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"posture_history\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"posture_history\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"posture_history\"} == 1))) == 1))",
+          "expr": "(ise3_posture_failed_conditions) and on() (((max(ise3_dataset_up{dataset=\"posture_history\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"posture_history\"} == 1))) == 1) and ((max(ise3_dataset_fresh{dataset=\"posture_history\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"posture_history\"} == 1))) == 1))",
           "format": "table",
           "instant": true,
           "legendFormat": "",
@@ -956,7 +958,8 @@
               "names": [
                 "Time",
                 "__name__",
-                "job"
+                "job",
+                "instance"
               ]
             }
           }
@@ -1019,7 +1022,7 @@
       "repeatDirection": "h",
       "targets": [
         {
-          "expr": "(ise3_posture_requirement_results{instance=~\"$deployment\",result!~\"Passed|passed|pass\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"posture_current\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"posture_current\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"posture_current\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"posture_current\"} == 1))) == 1))",
+          "expr": "(ise3_posture_requirement_results{result!~\"Passed|passed|pass\"}) and on() (((max(ise3_dataset_up{dataset=\"posture_current\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"posture_current\"} == 1))) == 1) and ((max(ise3_dataset_fresh{dataset=\"posture_current\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"posture_current\"} == 1))) == 1))",
           "format": "table",
           "instant": true,
           "legendFormat": "",
@@ -1036,7 +1039,8 @@
               "names": [
                 "Time",
                 "__name__",
-                "job"
+                "job",
+                "instance"
               ]
             }
           }
@@ -1113,7 +1117,7 @@
       "repeatDirection": "h",
       "targets": [
         {
-          "expr": "(ise3_posture_agent_version_endpoints{instance=~\"$deployment\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"posture_current\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"posture_current\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"posture_current\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"posture_current\"} == 1))) == 1))",
+          "expr": "(ise3_posture_agent_version_endpoints) and on() (((max(ise3_dataset_up{dataset=\"posture_current\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"posture_current\"} == 1))) == 1) and ((max(ise3_dataset_fresh{dataset=\"posture_current\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"posture_current\"} == 1))) == 1))",
           "format": "table",
           "instant": true,
           "legendFormat": "",
@@ -1130,7 +1134,8 @@
               "names": [
                 "Time",
                 "__name__",
-                "job"
+                "job",
+                "instance"
               ]
             }
           }
@@ -1192,7 +1197,7 @@
       "repeatDirection": "h",
       "targets": [
         {
-          "expr": "(ise3_posture_endpoints_by_os{instance=~\"$deployment\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"posture_current\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"posture_current\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"posture_current\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"posture_current\"} == 1))) == 1))",
+          "expr": "(ise3_posture_endpoints_by_os) and on() (((max(ise3_dataset_up{dataset=\"posture_current\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"posture_current\"} == 1))) == 1) and ((max(ise3_dataset_fresh{dataset=\"posture_current\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"posture_current\"} == 1))) == 1))",
           "format": "table",
           "instant": true,
           "legendFormat": "",
@@ -1209,7 +1214,8 @@
               "names": [
                 "Time",
                 "__name__",
-                "job"
+                "job",
+                "instance"
               ]
             }
           }
@@ -1299,7 +1305,7 @@
           "repeatDirection": "h",
           "targets": [
             {
-              "expr": "(sum by (instance) ((ise3_posture_assessments{instance=~\"$deployment\",status=~\"Compliant|compliant|Pass|passed\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"posture_history\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"posture_history\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"posture_history\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"posture_history\"} == 1))) == 1)))) / clamp_min((sum by (instance) ((ise3_posture_assessments{instance=~\"$deployment\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"posture_history\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"posture_history\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"posture_history\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"posture_history\"} == 1))) == 1)))), 1)",
+              "expr": "(sum((ise3_posture_assessments{status=~\"Compliant|compliant|Pass|passed\"}) and on() (((max(ise3_dataset_up{dataset=\"posture_history\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"posture_history\"} == 1))) == 1) and ((max(ise3_dataset_fresh{dataset=\"posture_history\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"posture_history\"} == 1))) == 1)))) / clamp_min((sum((ise3_posture_assessments) and on() (((max(ise3_dataset_up{dataset=\"posture_history\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"posture_history\"} == 1))) == 1) and ((max(ise3_dataset_fresh{dataset=\"posture_history\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"posture_history\"} == 1))) == 1)))), 1)",
               "instant": true,
               "legendFormat": "",
               "range": false,
@@ -1362,7 +1368,7 @@
           "repeatDirection": "h",
           "targets": [
             {
-              "expr": "avg by (instance) ((ise3_session_detail_field_coverage{instance=~\"$deployment\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"posture_current\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"posture_current\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"posture_current\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"posture_current\"} == 1))) == 1)))",
+              "expr": "avg((ise3_session_detail_field_coverage) and on() (((max(ise3_dataset_up{dataset=\"posture_current\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"posture_current\"} == 1))) == 1) and ((max(ise3_dataset_fresh{dataset=\"posture_current\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"posture_current\"} == 1))) == 1)))",
               "instant": true,
               "legendFormat": "",
               "range": false,
@@ -1415,14 +1421,14 @@
           "repeatDirection": "h",
           "targets": [
             {
-              "expr": "(ise3_posture_eligible_endpoints_total{instance=~\"$deployment\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"posture_history\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"posture_history\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"posture_history\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"posture_history\"} == 1))) == 1))",
+              "expr": "(ise3_posture_eligible_endpoints_total) and on() (((max(ise3_dataset_up{dataset=\"posture_history\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"posture_history\"} == 1))) == 1) and ((max(ise3_dataset_fresh{dataset=\"posture_history\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"posture_history\"} == 1))) == 1))",
               "instant": true,
               "legendFormat": "eligible",
               "range": false,
               "refId": "A"
             },
             {
-              "expr": "(ise3_endpoints_posture_applicable{instance=~\"$deployment\",applicable=\"yes\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"endpoint_inventory\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"endpoint_inventory\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"endpoint_inventory\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"endpoint_inventory\"} == 1))) == 1))",
+              "expr": "(ise3_endpoints_posture_applicable{applicable=\"yes\"}) and on() (((max(ise3_dataset_up{dataset=\"endpoint_inventory\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"endpoint_inventory\"} == 1))) == 1) and ((max(ise3_dataset_fresh{dataset=\"endpoint_inventory\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"endpoint_inventory\"} == 1))) == 1))",
               "instant": true,
               "legendFormat": "applicable",
               "range": false,
@@ -1454,7 +1460,7 @@
           "repeatDirection": "h",
           "targets": [
             {
-              "expr": "(ise3_posture_endpoints_by_psn{instance=~\"$deployment\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"posture_current\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"posture_current\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"posture_current\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"posture_current\"} == 1))) == 1))",
+              "expr": "(ise3_posture_endpoints_by_psn) and on() (((max(ise3_dataset_up{dataset=\"posture_current\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"posture_current\"} == 1))) == 1) and ((max(ise3_dataset_fresh{dataset=\"posture_current\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"posture_current\"} == 1))) == 1))",
               "format": "table",
               "instant": true,
               "legendFormat": "",
@@ -1471,7 +1477,8 @@
                   "names": [
                     "Time",
                     "__name__",
-                    "job"
+                    "job",
+                    "instance"
                   ]
                 }
               }
@@ -1591,7 +1598,7 @@
           "repeatDirection": "h",
           "targets": [
             {
-              "expr": "sum by (instance,status) ((ise3_posture_assessments{instance=~\"$deployment\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"posture_history\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"posture_history\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"posture_history\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"posture_history\"} == 1))) == 1)))",
+              "expr": "sum by (status) ((ise3_posture_assessments) and on() (((max(ise3_dataset_up{dataset=\"posture_history\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"posture_history\"} == 1))) == 1) and ((max(ise3_dataset_fresh{dataset=\"posture_history\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"posture_history\"} == 1))) == 1)))",
               "instant": false,
               "legendFormat": "{{status}}",
               "range": true,
@@ -1623,7 +1630,7 @@
           "repeatDirection": "h",
           "targets": [
             {
-              "expr": "(ise3_posture_assessments_by_policy{instance=~\"$deployment\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"posture_history\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"posture_history\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"posture_history\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"posture_history\"} == 1))) == 1))",
+              "expr": "(ise3_posture_assessments_by_policy) and on() (((max(ise3_dataset_up{dataset=\"posture_history\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"posture_history\"} == 1))) == 1) and ((max(ise3_dataset_fresh{dataset=\"posture_history\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"posture_history\"} == 1))) == 1))",
               "format": "table",
               "instant": true,
               "legendFormat": "",
@@ -1640,7 +1647,8 @@
                   "names": [
                     "Time",
                     "__name__",
-                    "job"
+                    "job",
+                    "instance"
                   ]
                 }
               }
@@ -1737,25 +1745,6 @@
         "query": "prometheus",
         "skipUrlSync": false,
         "type": "datasource"
-      },
-      {
-        "allValue": ".*",
-        "auto": false,
-        "auto_count": 30,
-        "auto_min": "10s",
-        "datasource": {
-          "type": "prometheus",
-          "uid": "${prometheus}"
-        },
-        "hide": 0,
-        "id": "00000000-0000-0000-0000-000000000000",
-        "includeAll": true,
-        "label": "Deployment",
-        "multi": true,
-        "name": "deployment",
-        "query": "label_values(ise3_dataset_enabled, instance)",
-        "skipUrlSync": false,
-        "type": "query"
       }
     ]
   },

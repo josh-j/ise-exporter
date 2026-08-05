@@ -7,7 +7,7 @@
           "uid": "${prometheus}"
         },
         "enable": true,
-        "expr": "changes(ise3_dataset_provider_active{instance=~\"$deployment\"}[5m]) > 0",
+        "expr": "changes(ise3_dataset_provider_active[5m]) > 0",
         "hide": false,
         "iconColor": "purple",
         "name": "Provider changed",
@@ -21,7 +21,7 @@
           "uid": "${prometheus}"
         },
         "enable": true,
-        "expr": "max by (instance,node) (changes(ise3_deployment_node_state{instance=~\"$deployment\"}[10m])) > 0",
+        "expr": "max by (node) (changes(ise3_deployment_node_state[10m])) > 0",
         "hide": false,
         "iconColor": "orange",
         "name": "Node state changed",
@@ -35,7 +35,7 @@
           "uid": "${prometheus}"
         },
         "enable": true,
-        "expr": "ise3_exporter_build_info{instance=~\"$deployment\"} unless (ise3_exporter_build_info{instance=~\"$deployment\"} offset 5m)",
+        "expr": "ise3_exporter_build_info unless (ise3_exporter_build_info offset 5m)",
         "hide": false,
         "iconColor": "blue",
         "name": "Exporter build changed",
@@ -130,7 +130,7 @@
       "repeatDirection": "h",
       "targets": [
         {
-          "expr": "(sum by (instance) ((ise3_tacacs_authentications{instance=~\"$deployment\",dimension=\"username\",status=\"passed\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"tacacs_activity\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"tacacs_activity\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"tacacs_activity\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"tacacs_activity\"} == 1))) == 1)))) / clamp_min((sum by (instance) ((ise3_tacacs_authentications{instance=~\"$deployment\",dimension=\"username\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"tacacs_activity\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"tacacs_activity\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"tacacs_activity\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"tacacs_activity\"} == 1))) == 1)))), 1)",
+          "expr": "(sum((ise3_tacacs_authentications{dimension=\"username\",status=\"passed\"}) and on() (((max(ise3_dataset_up{dataset=\"tacacs_activity\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"tacacs_activity\"} == 1))) == 1) and ((max(ise3_dataset_fresh{dataset=\"tacacs_activity\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"tacacs_activity\"} == 1))) == 1)))) / clamp_min((sum((ise3_tacacs_authentications{dimension=\"username\"}) and on() (((max(ise3_dataset_up{dataset=\"tacacs_activity\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"tacacs_activity\"} == 1))) == 1) and ((max(ise3_dataset_fresh{dataset=\"tacacs_activity\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"tacacs_activity\"} == 1))) == 1)))), 1)",
           "instant": true,
           "legendFormat": "",
           "range": false,
@@ -183,7 +183,7 @@
       "repeatDirection": "h",
       "targets": [
         {
-          "expr": "sum by (instance) ((ise3_tacacs_authorizations{instance=~\"$deployment\",dimension=\"username\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"tacacs_activity\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"tacacs_activity\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"tacacs_activity\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"tacacs_activity\"} == 1))) == 1)))",
+          "expr": "sum((ise3_tacacs_authorizations{dimension=\"username\"}) and on() (((max(ise3_dataset_up{dataset=\"tacacs_activity\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"tacacs_activity\"} == 1))) == 1) and ((max(ise3_dataset_fresh{dataset=\"tacacs_activity\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"tacacs_activity\"} == 1))) == 1)))",
           "instant": true,
           "legendFormat": "",
           "range": false,
@@ -236,7 +236,7 @@
       "repeatDirection": "h",
       "targets": [
         {
-          "expr": "sum by (instance) ((ise3_tacacs_commands{instance=~\"$deployment\",dimension=\"username\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"tacacs_activity\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"tacacs_activity\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"tacacs_activity\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"tacacs_activity\"} == 1))) == 1)))",
+          "expr": "sum((ise3_tacacs_commands{dimension=\"username\"}) and on() (((max(ise3_dataset_up{dataset=\"tacacs_activity\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"tacacs_activity\"} == 1))) == 1) and ((max(ise3_dataset_fresh{dataset=\"tacacs_activity\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"tacacs_activity\"} == 1))) == 1)))",
           "instant": true,
           "legendFormat": "",
           "range": false,
@@ -289,14 +289,14 @@
       "repeatDirection": "h",
       "targets": [
         {
-          "expr": "(ise3_tacacs_internal_accounts{instance=~\"$deployment\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"tacacs_config\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"tacacs_config\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"tacacs_config\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"tacacs_config\"} == 1))) == 1))",
+          "expr": "(ise3_tacacs_internal_accounts) and on() (((max(ise3_dataset_up{dataset=\"tacacs_config\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"tacacs_config\"} == 1))) == 1) and ((max(ise3_dataset_fresh{dataset=\"tacacs_config\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"tacacs_config\"} == 1))) == 1))",
           "instant": true,
           "legendFormat": "configured",
           "range": false,
           "refId": "A"
         },
         {
-          "expr": "(ise3_tacacs_active_accounts{instance=~\"$deployment\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"tacacs_activity\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"tacacs_activity\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"tacacs_activity\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"tacacs_activity\"} == 1))) == 1))",
+          "expr": "(ise3_tacacs_active_accounts) and on() (((max(ise3_dataset_up{dataset=\"tacacs_activity\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"tacacs_activity\"} == 1))) == 1) and ((max(ise3_dataset_fresh{dataset=\"tacacs_activity\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"tacacs_activity\"} == 1))) == 1))",
           "instant": true,
           "legendFormat": "active",
           "range": false,
@@ -320,7 +320,7 @@
             {
               "targetBlank": false,
               "title": "Why \u2014 collection pipeline",
-              "url": "/d/ise3-pipeline?${__url_time_range}&${deployment:queryparam}"
+              "url": "/d/ise3-pipeline?${__url_time_range}"
             }
           ],
           "max": 1,
@@ -362,7 +362,7 @@
       "repeatDirection": "h",
       "targets": [
         {
-          "expr": "avg by (instance) (((max by (instance,dataset) (ise3_dataset_up{instance=~\"$deployment\",dataset=~\"tacacs_activity|tacacs_config\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=~\"tacacs_activity|tacacs_config\"} == 1))) == bool 1) * ((max by (instance,dataset) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=~\"tacacs_activity|tacacs_config\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=~\"tacacs_activity|tacacs_config\"} == 1))) == bool 1))",
+          "expr": "avg(((max by (dataset) (ise3_dataset_up{dataset=~\"tacacs_activity|tacacs_config\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=~\"tacacs_activity|tacacs_config\"} == 1))) == bool 1) * ((max by (dataset) (ise3_dataset_fresh{dataset=~\"tacacs_activity|tacacs_config\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=~\"tacacs_activity|tacacs_config\"} == 1))) == bool 1))",
           "instant": true,
           "legendFormat": "",
           "range": false,
@@ -386,7 +386,7 @@
             {
               "targetBlank": false,
               "title": "Why \u2014 collection pipeline",
-              "url": "/d/ise3-pipeline?${__url_time_range}&${deployment:queryparam}"
+              "url": "/d/ise3-pipeline?${__url_time_range}"
             }
           ],
           "noValue": "no data \u2014 exporter absent?",
@@ -430,7 +430,7 @@
       "repeatDirection": "h",
       "targets": [
         {
-          "expr": "max by (instance) (time() - (max by (instance,dataset) (ise3_dataset_last_success_timestamp{instance=~\"$deployment\",dataset=~\"tacacs_activity|tacacs_config\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=~\"tacacs_activity|tacacs_config\"} == 1))))",
+          "expr": "max(time() - (max by (dataset) (ise3_dataset_last_success_timestamp{dataset=~\"tacacs_activity|tacacs_config\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=~\"tacacs_activity|tacacs_config\"} == 1))))",
           "instant": true,
           "legendFormat": "",
           "range": false,
@@ -545,7 +545,7 @@
       "repeatDirection": "h",
       "targets": [
         {
-          "expr": "sum by (instance,status) ((ise3_tacacs_authentications{instance=~\"$deployment\",dimension=\"username\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"tacacs_activity\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"tacacs_activity\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"tacacs_activity\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"tacacs_activity\"} == 1))) == 1)))",
+          "expr": "sum by (status) ((ise3_tacacs_authentications{dimension=\"username\"}) and on() (((max(ise3_dataset_up{dataset=\"tacacs_activity\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"tacacs_activity\"} == 1))) == 1) and ((max(ise3_dataset_fresh{dataset=\"tacacs_activity\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"tacacs_activity\"} == 1))) == 1)))",
           "instant": false,
           "legendFormat": "{{status}}",
           "range": true,
@@ -647,7 +647,7 @@
       "repeatDirection": "h",
       "targets": [
         {
-          "expr": "sum by (instance,status) ((ise3_tacacs_authorizations{instance=~\"$deployment\",dimension=\"username\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"tacacs_activity\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"tacacs_activity\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"tacacs_activity\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"tacacs_activity\"} == 1))) == 1)))",
+          "expr": "sum by (status) ((ise3_tacacs_authorizations{dimension=\"username\"}) and on() (((max(ise3_dataset_up{dataset=\"tacacs_activity\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"tacacs_activity\"} == 1))) == 1) and ((max(ise3_dataset_fresh{dataset=\"tacacs_activity\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"tacacs_activity\"} == 1))) == 1)))",
           "instant": false,
           "legendFormat": "{{status}}",
           "range": true,
@@ -728,7 +728,7 @@
       "repeatDirection": "h",
       "targets": [
         {
-          "expr": "(ise3_tacacs_authentications{instance=~\"$deployment\",dimension=\"username\",status=\"failed\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"tacacs_activity\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"tacacs_activity\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"tacacs_activity\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"tacacs_activity\"} == 1))) == 1))",
+          "expr": "(ise3_tacacs_authentications{dimension=\"username\",status=\"failed\"}) and on() (((max(ise3_dataset_up{dataset=\"tacacs_activity\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"tacacs_activity\"} == 1))) == 1) and ((max(ise3_dataset_fresh{dataset=\"tacacs_activity\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"tacacs_activity\"} == 1))) == 1))",
           "format": "table",
           "instant": true,
           "legendFormat": "",
@@ -736,7 +736,7 @@
           "refId": "A"
         },
         {
-          "expr": "(ise3_tacacs_authentications{instance=~\"$deployment\",dimension=\"username\",status=\"passed\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"tacacs_activity\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"tacacs_activity\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"tacacs_activity\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"tacacs_activity\"} == 1))) == 1))",
+          "expr": "(ise3_tacacs_authentications{dimension=\"username\",status=\"passed\"}) and on() (((max(ise3_dataset_up{dataset=\"tacacs_activity\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"tacacs_activity\"} == 1))) == 1) and ((max(ise3_dataset_fresh{dataset=\"tacacs_activity\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"tacacs_activity\"} == 1))) == 1))",
           "format": "table",
           "instant": true,
           "legendFormat": "",
@@ -753,7 +753,8 @@
               "names": [
                 "Time",
                 "__name__",
-                "job"
+                "job",
+                "instance"
               ]
             }
           }
@@ -843,7 +844,7 @@
       "repeatDirection": "h",
       "targets": [
         {
-          "expr": "(ise3_tacacs_authentications{instance=~\"$deployment\",dimension=\"device\",status=\"failed\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"tacacs_activity\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"tacacs_activity\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"tacacs_activity\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"tacacs_activity\"} == 1))) == 1))",
+          "expr": "(ise3_tacacs_authentications{dimension=\"device\",status=\"failed\"}) and on() (((max(ise3_dataset_up{dataset=\"tacacs_activity\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"tacacs_activity\"} == 1))) == 1) and ((max(ise3_dataset_fresh{dataset=\"tacacs_activity\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"tacacs_activity\"} == 1))) == 1))",
           "format": "table",
           "instant": true,
           "legendFormat": "",
@@ -851,7 +852,7 @@
           "refId": "A"
         },
         {
-          "expr": "(ise3_tacacs_authentications{instance=~\"$deployment\",dimension=\"device\",status=\"passed\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"tacacs_activity\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"tacacs_activity\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"tacacs_activity\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"tacacs_activity\"} == 1))) == 1))",
+          "expr": "(ise3_tacacs_authentications{dimension=\"device\",status=\"passed\"}) and on() (((max(ise3_dataset_up{dataset=\"tacacs_activity\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"tacacs_activity\"} == 1))) == 1) and ((max(ise3_dataset_fresh{dataset=\"tacacs_activity\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"tacacs_activity\"} == 1))) == 1))",
           "format": "table",
           "instant": true,
           "legendFormat": "",
@@ -868,7 +869,8 @@
               "names": [
                 "Time",
                 "__name__",
-                "job"
+                "job",
+                "instance"
               ]
             }
           }
@@ -971,7 +973,7 @@
       "repeatDirection": "h",
       "targets": [
         {
-          "expr": "(ise3_tacacs_internal_account_hygiene_risk{instance=~\"$deployment\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"tacacs_config\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"tacacs_config\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"tacacs_config\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"tacacs_config\"} == 1))) == 1))",
+          "expr": "(ise3_tacacs_internal_account_hygiene_risk) and on() (((max(ise3_dataset_up{dataset=\"tacacs_config\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"tacacs_config\"} == 1))) == 1) and ((max(ise3_dataset_fresh{dataset=\"tacacs_config\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"tacacs_config\"} == 1))) == 1))",
           "format": "table",
           "instant": true,
           "legendFormat": "",
@@ -988,7 +990,8 @@
               "names": [
                 "Time",
                 "__name__",
-                "job"
+                "job",
+                "instance"
               ]
             }
           }
@@ -1106,7 +1109,7 @@
       "repeatDirection": "h",
       "targets": [
         {
-          "expr": "time() - ((ise3_tacacs_account_last_seen_timestamp{instance=~\"$deployment\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"tacacs_activity\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"tacacs_activity\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"tacacs_activity\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"tacacs_activity\"} == 1))) == 1)))",
+          "expr": "time() - ((ise3_tacacs_account_last_seen_timestamp) and on() (((max(ise3_dataset_up{dataset=\"tacacs_activity\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"tacacs_activity\"} == 1))) == 1) and ((max(ise3_dataset_fresh{dataset=\"tacacs_activity\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"tacacs_activity\"} == 1))) == 1)))",
           "format": "table",
           "instant": true,
           "legendFormat": "",
@@ -1114,7 +1117,7 @@
           "refId": "A"
         },
         {
-          "expr": "(ise3_tacacs_internal_account_enabled{instance=~\"$deployment\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"tacacs_config\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"tacacs_config\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"tacacs_config\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"tacacs_config\"} == 1))) == 1))",
+          "expr": "(ise3_tacacs_internal_account_enabled) and on() (((max(ise3_dataset_up{dataset=\"tacacs_config\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"tacacs_config\"} == 1))) == 1) and ((max(ise3_dataset_fresh{dataset=\"tacacs_config\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"tacacs_config\"} == 1))) == 1))",
           "format": "table",
           "instant": true,
           "legendFormat": "",
@@ -1131,7 +1134,8 @@
               "names": [
                 "Time",
                 "__name__",
-                "job"
+                "job",
+                "instance"
               ]
             }
           }
@@ -1196,7 +1200,7 @@
           "repeatDirection": "h",
           "targets": [
             {
-              "expr": "(ise3_tacacs_policy_rule_count{instance=~\"$deployment\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"tacacs_policy_rules\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"tacacs_policy_rules\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"tacacs_policy_rules\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"tacacs_policy_rules\"} == 1))) == 1))",
+              "expr": "(ise3_tacacs_policy_rule_count) and on() (((max(ise3_dataset_up{dataset=\"tacacs_policy_rules\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"tacacs_policy_rules\"} == 1))) == 1) and ((max(ise3_dataset_fresh{dataset=\"tacacs_policy_rules\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"tacacs_policy_rules\"} == 1))) == 1))",
               "format": "table",
               "instant": true,
               "legendFormat": "",
@@ -1213,7 +1217,8 @@
                   "names": [
                     "Time",
                     "__name__",
-                    "job"
+                    "job",
+                    "instance"
                   ]
                 }
               }
@@ -1284,7 +1289,7 @@
           "repeatDirection": "h",
           "targets": [
             {
-              "expr": "(ise3_tacacs_policy_objects{instance=~\"$deployment\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"tacacs_config\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"tacacs_config\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"tacacs_config\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"tacacs_config\"} == 1))) == 1))",
+              "expr": "(ise3_tacacs_policy_objects) and on() (((max(ise3_dataset_up{dataset=\"tacacs_config\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"tacacs_config\"} == 1))) == 1) and ((max(ise3_dataset_fresh{dataset=\"tacacs_config\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"tacacs_config\"} == 1))) == 1))",
               "instant": true,
               "legendFormat": "{{object_type}}",
               "range": false,
@@ -1337,14 +1342,14 @@
           "repeatDirection": "h",
           "targets": [
             {
-              "expr": "(ise3_tacacs_policy_sets{instance=~\"$deployment\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"tacacs_config\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"tacacs_config\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"tacacs_config\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"tacacs_config\"} == 1))) == 1))",
+              "expr": "(ise3_tacacs_policy_sets) and on() (((max(ise3_dataset_up{dataset=\"tacacs_config\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"tacacs_config\"} == 1))) == 1) and ((max(ise3_dataset_fresh{dataset=\"tacacs_config\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"tacacs_config\"} == 1))) == 1))",
               "instant": true,
               "legendFormat": "policy sets",
               "range": false,
               "refId": "A"
             },
             {
-              "expr": "sum by (instance) ((ise3_tacacs_policy_rules_total{instance=~\"$deployment\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"tacacs_policy_rules\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"tacacs_policy_rules\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"tacacs_policy_rules\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"tacacs_policy_rules\"} == 1))) == 1)))",
+              "expr": "sum((ise3_tacacs_policy_rules_total) and on() (((max(ise3_dataset_up{dataset=\"tacacs_policy_rules\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"tacacs_policy_rules\"} == 1))) == 1) and ((max(ise3_dataset_fresh{dataset=\"tacacs_policy_rules\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"tacacs_policy_rules\"} == 1))) == 1)))",
               "instant": true,
               "legendFormat": "rules",
               "range": false,
@@ -1389,7 +1394,7 @@
           "repeatDirection": "h",
           "targets": [
             {
-              "expr": "(ise3_tacacs_commands{instance=~\"$deployment\",dimension=\"command_family\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"tacacs_activity\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"tacacs_activity\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"tacacs_activity\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"tacacs_activity\"} == 1))) == 1))",
+              "expr": "(ise3_tacacs_commands{dimension=\"command_family\"}) and on() (((max(ise3_dataset_up{dataset=\"tacacs_activity\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"tacacs_activity\"} == 1))) == 1) and ((max(ise3_dataset_fresh{dataset=\"tacacs_activity\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"tacacs_activity\"} == 1))) == 1))",
               "format": "table",
               "instant": true,
               "legendFormat": "",
@@ -1406,7 +1411,8 @@
                   "names": [
                     "Time",
                     "__name__",
-                    "job"
+                    "job",
+                    "instance"
                   ]
                 }
               }
@@ -1455,7 +1461,7 @@
           "repeatDirection": "h",
           "targets": [
             {
-              "expr": "(ise3_tacacs_authorization_details{instance=~\"$deployment\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"tacacs_activity\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"tacacs_activity\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"tacacs_activity\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"tacacs_activity\"} == 1))) == 1))",
+              "expr": "(ise3_tacacs_authorization_details) and on() (((max(ise3_dataset_up{dataset=\"tacacs_activity\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"tacacs_activity\"} == 1))) == 1) and ((max(ise3_dataset_fresh{dataset=\"tacacs_activity\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"tacacs_activity\"} == 1))) == 1))",
               "format": "table",
               "instant": true,
               "legendFormat": "",
@@ -1472,7 +1478,8 @@
                   "names": [
                     "Time",
                     "__name__",
-                    "job"
+                    "job",
+                    "instance"
                   ]
                 }
               }
@@ -1573,25 +1580,6 @@
         "query": "prometheus",
         "skipUrlSync": false,
         "type": "datasource"
-      },
-      {
-        "allValue": ".*",
-        "auto": false,
-        "auto_count": 30,
-        "auto_min": "10s",
-        "datasource": {
-          "type": "prometheus",
-          "uid": "${prometheus}"
-        },
-        "hide": 0,
-        "id": "00000000-0000-0000-0000-000000000000",
-        "includeAll": true,
-        "label": "Deployment",
-        "multi": true,
-        "name": "deployment",
-        "query": "label_values(ise3_dataset_enabled, instance)",
-        "skipUrlSync": false,
-        "type": "query"
       }
     ]
   },

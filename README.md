@@ -359,8 +359,8 @@ than by data source, following `DASHBOARD_DESIGN_PRINCIPLES.md`:
 | Capacity | `ise3-capacity` — 30-day trends for licence, growth, and runway |
 
 Triage is the only one to open first; every panel on it links down into the
-dashboard that explains it. Each is deployment-aware and contract-tested against
-the metric registry — and the design itself is contract-tested too: tier time
+dashboard that explains it. Each is contract-tested against the metric
+registry — and the design itself is contract-tested too: tier time
 horizons, a visible-panel ceiling, the data-trust pair on every ISE dashboard,
 and the absence of silently truncated panels are all assertions rather than
 conventions. See `dashboards3/README.md` for the capability map.
@@ -390,17 +390,17 @@ scrape_configs:
     metrics_path: /metrics
     static_configs:
       - targets: ["ise-exporter-host:9618"]
-        labels:
-          deployment: hq        # optional; `instance` is what the dashboards scope by
     sample_limit: 200000        # trips on a cardinality accident, not on the declared scale
 ```
 
-Four things are worth getting right, and one is worth not doing:
+Three things are worth getting right, and one is worth not doing:
 
-- **`instance` is the deployment boundary.** Every dashboard scopes by it
-  (`label_values(ise3_dataset_enabled, instance)`), so one exporter is one ISE
-  deployment. Relabel it to something an operator recognises if `host:port`
-  is not, but do not drop or collapse it across deployments.
+- **One exporter is one ISE deployment**, and the dashboards assume it. They
+  carry no deployment variable and no `instance` grouping, because within one
+  exporter that label cannot vary — it would filter nothing, split nothing,
+  and render as the same string on every row of every table. A second ISE
+  deployment is a second `job_name` here and a second Grafana folder, not a
+  picker.
 - **Retention must cover the longest window.** `ise3-capacity` opens on 30
   days, so `--storage.tsdb.retention.time=90d` leaves room to look back past it.
 - **Leave `honor_timestamps` alone.** The exporter publishes no timestamps, so

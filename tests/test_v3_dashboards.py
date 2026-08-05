@@ -553,15 +553,35 @@ def test_each_dashboard_still_answers_its_question(filename, required):
 
 
 @pytest.mark.parametrize("filename", CAPABILITY_CONTRACTS)
-def test_every_dashboard_is_deployment_aware(filename):
+def test_no_dashboard_carries_a_deployment_dimension(filename):
+    # One exporter serves one ISE deployment, so `instance` cannot vary within a
+    # dashboard: as a selector it filters nothing, as a grouping key it splits
+    # nothing, and as a variable it is a one-option picker. It came back once as
+    # a `by (instance,...)` on a new panel copied from an old one, which is why
+    # this is asserted rather than left to review.
     dashboard = _dashboard(filename)
     variables = {item["name"] for item in dashboard["templating"]["list"]}
-    assert "deployment" in variables
-    expressions = " ".join(
-        target.get("expr", "")
-        for panel, target in _targets(dashboard)
-    )
-    assert 'instance=~"$deployment"' in expressions
+    assert "deployment" not in variables
+    for panel, target in _targets(dashboard):
+        expr = target.get("expr", "")
+        assert "instance" not in expr, f"{filename}: {panel.get('title')}: {expr}"
+
+
+@pytest.mark.parametrize("filename,dashboard", _dashboards())
+def test_no_table_renders_scrape_metadata(filename, dashboard):
+    # `instance` and `job` name the exporter that answered. That is the same
+    # exporter on every row, so the column is width spent saying nothing.
+    for panel in _panels(dashboard):
+        if panel.get("type") != "table":
+            continue
+        excluded = set()
+        for transformation in panel.get("transformations", []):
+            if transformation["id"] == "filterFieldsByName":
+                excluded |= set(
+                    transformation["options"].get("exclude", {}).get("names", []))
+        missing = {"instance", "job", "__name__"} - excluded
+        assert not missing, (
+            f"{filename}: {panel.get('title')} shows {sorted(missing)}")
 
 
 def test_the_pipeline_dashboard_answers_which_provider_is_live():

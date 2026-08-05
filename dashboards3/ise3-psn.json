@@ -7,7 +7,7 @@
           "uid": "${prometheus}"
         },
         "enable": true,
-        "expr": "changes(ise3_dataset_provider_active{instance=~\"$deployment\"}[5m]) > 0",
+        "expr": "changes(ise3_dataset_provider_active[5m]) > 0",
         "hide": false,
         "iconColor": "purple",
         "name": "Provider changed",
@@ -21,7 +21,7 @@
           "uid": "${prometheus}"
         },
         "enable": true,
-        "expr": "max by (instance,node) (changes(ise3_deployment_node_state{instance=~\"$deployment\"}[10m])) > 0",
+        "expr": "max by (node) (changes(ise3_deployment_node_state[10m])) > 0",
         "hide": false,
         "iconColor": "orange",
         "name": "Node state changed",
@@ -35,7 +35,7 @@
           "uid": "${prometheus}"
         },
         "enable": true,
-        "expr": "ise3_exporter_build_info{instance=~\"$deployment\"} unless (ise3_exporter_build_info{instance=~\"$deployment\"} offset 5m)",
+        "expr": "ise3_exporter_build_info unless (ise3_exporter_build_info offset 5m)",
         "hide": false,
         "iconColor": "blue",
         "name": "Exporter build changed",
@@ -130,7 +130,7 @@
       "repeatDirection": "h",
       "targets": [
         {
-          "expr": "max by (instance) ((ise3_psn_load_percent{instance=~\"$deployment\",node=~\"$node\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"psn_performance\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"psn_performance\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"psn_performance\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"psn_performance\"} == 1))) == 1)))",
+          "expr": "max((ise3_psn_load_percent{node=~\"$node\"}) and on() (((max(ise3_dataset_up{dataset=\"psn_performance\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"psn_performance\"} == 1))) == 1) and ((max(ise3_dataset_fresh{dataset=\"psn_performance\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"psn_performance\"} == 1))) == 1)))",
           "instant": true,
           "legendFormat": "",
           "range": false,
@@ -191,7 +191,7 @@
       "repeatDirection": "h",
       "targets": [
         {
-          "expr": "max by (instance) ((ise3_psn_average_latency_seconds{instance=~\"$deployment\",node=~\"$node\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"psn_performance\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"psn_performance\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"psn_performance\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"psn_performance\"} == 1))) == 1)))",
+          "expr": "max((ise3_psn_average_latency_seconds{node=~\"$node\"}) and on() (((max(ise3_dataset_up{dataset=\"psn_performance\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"psn_performance\"} == 1))) == 1) and ((max(ise3_dataset_fresh{dataset=\"psn_performance\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"psn_performance\"} == 1))) == 1)))",
           "instant": true,
           "legendFormat": "",
           "range": false,
@@ -244,7 +244,7 @@
       "repeatDirection": "h",
       "targets": [
         {
-          "expr": "sum by (instance) ((ise3_psn_radius_requests_per_hour{instance=~\"$deployment\",node=~\"$node\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"psn_performance\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"psn_performance\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"psn_performance\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"psn_performance\"} == 1))) == 1)))",
+          "expr": "sum((ise3_psn_radius_requests_per_hour{node=~\"$node\"}) and on() (((max(ise3_dataset_up{dataset=\"psn_performance\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"psn_performance\"} == 1))) == 1) and ((max(ise3_dataset_fresh{dataset=\"psn_performance\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"psn_performance\"} == 1))) == 1)))",
           "instant": true,
           "legendFormat": "",
           "range": false,
@@ -297,7 +297,7 @@
       "repeatDirection": "h",
       "targets": [
         {
-          "expr": "sum by (instance) ((ise3_psn_diagnostic_events_total{instance=~\"$deployment\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"psn_performance\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"psn_performance\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"psn_performance\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"psn_performance\"} == 1))) == 1)))",
+          "expr": "sum((ise3_psn_diagnostic_events_total) and on() (((max(ise3_dataset_up{dataset=\"psn_performance\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"psn_performance\"} == 1))) == 1) and ((max(ise3_dataset_fresh{dataset=\"psn_performance\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"psn_performance\"} == 1))) == 1)))",
           "instant": true,
           "legendFormat": "",
           "range": false,
@@ -321,7 +321,7 @@
             {
               "targetBlank": false,
               "title": "Why \u2014 collection pipeline",
-              "url": "/d/ise3-pipeline?${__url_time_range}&${deployment:queryparam}"
+              "url": "/d/ise3-pipeline?${__url_time_range}"
             }
           ],
           "max": 1,
@@ -363,7 +363,7 @@
       "repeatDirection": "h",
       "targets": [
         {
-          "expr": "avg by (instance) (((max by (instance,dataset) (ise3_dataset_up{instance=~\"$deployment\",dataset=~\"psn_performance|active_sessions\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=~\"psn_performance|active_sessions\"} == 1))) == bool 1) * ((max by (instance,dataset) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=~\"psn_performance|active_sessions\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=~\"psn_performance|active_sessions\"} == 1))) == bool 1))",
+          "expr": "avg(((max by (dataset) (ise3_dataset_up{dataset=~\"psn_performance|active_sessions\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=~\"psn_performance|active_sessions\"} == 1))) == bool 1) * ((max by (dataset) (ise3_dataset_fresh{dataset=~\"psn_performance|active_sessions\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=~\"psn_performance|active_sessions\"} == 1))) == bool 1))",
           "instant": true,
           "legendFormat": "",
           "range": false,
@@ -387,7 +387,7 @@
             {
               "targetBlank": false,
               "title": "Why \u2014 collection pipeline",
-              "url": "/d/ise3-pipeline?${__url_time_range}&${deployment:queryparam}"
+              "url": "/d/ise3-pipeline?${__url_time_range}"
             }
           ],
           "noValue": "no data \u2014 exporter absent?",
@@ -431,7 +431,7 @@
       "repeatDirection": "h",
       "targets": [
         {
-          "expr": "max by (instance) (time() - (max by (instance,dataset) (ise3_dataset_last_success_timestamp{instance=~\"$deployment\",dataset=~\"psn_performance|active_sessions\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=~\"psn_performance|active_sessions\"} == 1))))",
+          "expr": "max(time() - (max by (dataset) (ise3_dataset_last_success_timestamp{dataset=~\"psn_performance|active_sessions\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=~\"psn_performance|active_sessions\"} == 1))))",
           "instant": true,
           "legendFormat": "",
           "range": false,
@@ -496,7 +496,7 @@
       "repeatDirection": "h",
       "targets": [
         {
-          "expr": "(ise3_active_sessions_by_psn{instance=~\"$deployment\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"active_sessions\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"active_sessions\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"active_sessions\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"active_sessions\"} == 1))) == 1))",
+          "expr": "(ise3_active_sessions_by_psn) and on() (((max(ise3_dataset_up{dataset=\"active_sessions\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"active_sessions\"} == 1))) == 1) and ((max(ise3_dataset_fresh{dataset=\"active_sessions\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"active_sessions\"} == 1))) == 1))",
           "instant": false,
           "legendFormat": "{{psn}}",
           "range": true,
@@ -548,7 +548,7 @@
       "repeatDirection": "h",
       "targets": [
         {
-          "expr": "(ise3_psn_radius_requests_per_hour{instance=~\"$deployment\",node=~\"$node\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"psn_performance\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"psn_performance\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"psn_performance\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"psn_performance\"} == 1))) == 1))",
+          "expr": "(ise3_psn_radius_requests_per_hour{node=~\"$node\"}) and on() (((max(ise3_dataset_up{dataset=\"psn_performance\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"psn_performance\"} == 1))) == 1) and ((max(ise3_dataset_fresh{dataset=\"psn_performance\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"psn_performance\"} == 1))) == 1))",
           "instant": false,
           "legendFormat": "{{node}}",
           "range": true,
@@ -635,7 +635,7 @@
       "repeatDirection": "h",
       "targets": [
         {
-          "expr": "(ise3_node_cpu_utilization_percent{instance=~\"$deployment\",node=~\"$node\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"psn_performance\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"psn_performance\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"psn_performance\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"psn_performance\"} == 1))) == 1))",
+          "expr": "(ise3_node_cpu_utilization_percent{node=~\"$node\"}) and on() (((max(ise3_dataset_up{dataset=\"psn_performance\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"psn_performance\"} == 1))) == 1) and ((max(ise3_dataset_fresh{dataset=\"psn_performance\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"psn_performance\"} == 1))) == 1))",
           "instant": false,
           "legendFormat": "{{node}}",
           "range": true,
@@ -709,7 +709,7 @@
       "repeatDirection": "h",
       "targets": [
         {
-          "expr": "(ise3_node_memory_utilization_percent{instance=~\"$deployment\",node=~\"$node\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"psn_performance\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"psn_performance\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"psn_performance\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"psn_performance\"} == 1))) == 1))",
+          "expr": "(ise3_node_memory_utilization_percent{node=~\"$node\"}) and on() (((max(ise3_dataset_up{dataset=\"psn_performance\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"psn_performance\"} == 1))) == 1) and ((max(ise3_dataset_fresh{dataset=\"psn_performance\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"psn_performance\"} == 1))) == 1))",
           "instant": false,
           "legendFormat": "{{node}}",
           "range": true,
@@ -783,7 +783,7 @@
       "repeatDirection": "h",
       "targets": [
         {
-          "expr": "max by (instance,node) ((ise3_node_disk_utilization_percent{instance=~\"$deployment\",node=~\"$node\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"psn_performance\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"psn_performance\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"psn_performance\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"psn_performance\"} == 1))) == 1)))",
+          "expr": "max by (node) ((ise3_node_disk_utilization_percent{node=~\"$node\"}) and on() (((max(ise3_dataset_up{dataset=\"psn_performance\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"psn_performance\"} == 1))) == 1) and ((max(ise3_dataset_fresh{dataset=\"psn_performance\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"psn_performance\"} == 1))) == 1)))",
           "instant": false,
           "legendFormat": "{{node}}",
           "range": true,
@@ -855,7 +855,7 @@
       "repeatDirection": "h",
       "targets": [
         {
-          "expr": "(ise3_psn_average_latency_seconds{instance=~\"$deployment\",node=~\"$node\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"psn_performance\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"psn_performance\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"psn_performance\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"psn_performance\"} == 1))) == 1))",
+          "expr": "(ise3_psn_average_latency_seconds{node=~\"$node\"}) and on() (((max(ise3_dataset_up{dataset=\"psn_performance\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"psn_performance\"} == 1))) == 1) and ((max(ise3_dataset_fresh{dataset=\"psn_performance\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"psn_performance\"} == 1))) == 1))",
           "instant": false,
           "legendFormat": "{{node}}",
           "range": true,
@@ -953,7 +953,7 @@
       "repeatDirection": "h",
       "targets": [
         {
-          "expr": "(ise3_radius_errors_by_psn{instance=~\"$deployment\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"radius_errors\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"radius_errors\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"radius_errors\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"radius_errors\"} == 1))) == 1))",
+          "expr": "(ise3_radius_errors_by_psn) and on() (((max(ise3_dataset_up{dataset=\"radius_errors\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"radius_errors\"} == 1))) == 1) and ((max(ise3_dataset_fresh{dataset=\"radius_errors\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"radius_errors\"} == 1))) == 1))",
           "instant": false,
           "legendFormat": "{{psn}}",
           "range": true,
@@ -1045,7 +1045,7 @@
           "repeatDirection": "h",
           "targets": [
             {
-              "expr": "sum by (instance,node) ((ise3_deployment_node_state{instance=~\"$deployment\",state=\"Connected\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"deployment\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"deployment\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"deployment\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"deployment\"} == 1))) == 1)))",
+              "expr": "sum by (node) ((ise3_deployment_node_state{state=\"Connected\"}) and on() (((max(ise3_dataset_up{dataset=\"deployment\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"deployment\"} == 1))) == 1) and ((max(ise3_dataset_fresh{dataset=\"deployment\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"deployment\"} == 1))) == 1)))",
               "instant": false,
               "legendFormat": "{{node}}",
               "range": true,
@@ -1097,21 +1097,21 @@
           "repeatDirection": "h",
           "targets": [
             {
-              "expr": "(ise3_psn_mnt_logs_per_hour{instance=~\"$deployment\",node=~\"$node\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"psn_performance\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"psn_performance\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"psn_performance\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"psn_performance\"} == 1))) == 1))",
+              "expr": "(ise3_psn_mnt_logs_per_hour{node=~\"$node\"}) and on() (((max(ise3_dataset_up{dataset=\"psn_performance\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"psn_performance\"} == 1))) == 1) and ((max(ise3_dataset_fresh{dataset=\"psn_performance\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"psn_performance\"} == 1))) == 1))",
               "instant": false,
               "legendFormat": "{{node}} logs",
               "range": true,
               "refId": "A"
             },
             {
-              "expr": "(ise3_psn_noise_per_hour{instance=~\"$deployment\",node=~\"$node\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"psn_performance\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"psn_performance\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"psn_performance\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"psn_performance\"} == 1))) == 1))",
+              "expr": "(ise3_psn_noise_per_hour{node=~\"$node\"}) and on() (((max(ise3_dataset_up{dataset=\"psn_performance\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"psn_performance\"} == 1))) == 1) and ((max(ise3_dataset_fresh{dataset=\"psn_performance\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"psn_performance\"} == 1))) == 1))",
               "instant": false,
               "legendFormat": "{{node}} noise",
               "range": true,
               "refId": "B"
             },
             {
-              "expr": "(ise3_psn_suppression_per_hour{instance=~\"$deployment\",node=~\"$node\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"psn_performance\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"psn_performance\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"psn_performance\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"psn_performance\"} == 1))) == 1))",
+              "expr": "(ise3_psn_suppression_per_hour{node=~\"$node\"}) and on() (((max(ise3_dataset_up{dataset=\"psn_performance\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"psn_performance\"} == 1))) == 1) and ((max(ise3_dataset_fresh{dataset=\"psn_performance\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"psn_performance\"} == 1))) == 1))",
               "instant": false,
               "legendFormat": "{{node}} suppressed",
               "range": true,
@@ -1179,7 +1179,7 @@
           "repeatDirection": "h",
           "targets": [
             {
-              "expr": "(ise3_psn_diagnostic_events{instance=~\"$deployment\",node=~\"$node\"}) and on(instance) (((max by (instance) (ise3_dataset_up{instance=~\"$deployment\",dataset=\"psn_performance\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"psn_performance\"} == 1))) == 1) and ((max by (instance) (ise3_dataset_fresh{instance=~\"$deployment\",dataset=\"psn_performance\"} and on(instance,dataset,provider) (ise3_dataset_provider_active{instance=~\"$deployment\",dataset=\"psn_performance\"} == 1))) == 1))",
+              "expr": "(ise3_psn_diagnostic_events{node=~\"$node\"}) and on() (((max(ise3_dataset_up{dataset=\"psn_performance\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"psn_performance\"} == 1))) == 1) and ((max(ise3_dataset_fresh{dataset=\"psn_performance\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"psn_performance\"} == 1))) == 1))",
               "format": "table",
               "instant": true,
               "legendFormat": "",
@@ -1196,7 +1196,8 @@
                   "names": [
                     "Time",
                     "__name__",
-                    "job"
+                    "job",
+                    "instance"
                   ]
                 }
               }
@@ -1313,7 +1314,7 @@
           "repeatDirection": "h",
           "targets": [
             {
-              "expr": "ise3_source_latest_row_age_seconds{instance=~\"$deployment\"}",
+              "expr": "ise3_source_latest_row_age_seconds",
               "format": "table",
               "instant": true,
               "legendFormat": "",
@@ -1321,7 +1322,7 @@
               "refId": "A"
             },
             {
-              "expr": "ise3_source_has_recent_rows{instance=~\"$deployment\"}",
+              "expr": "ise3_source_has_recent_rows",
               "format": "table",
               "instant": true,
               "legendFormat": "",
@@ -1338,7 +1339,8 @@
                   "names": [
                     "Time",
                     "__name__",
-                    "job"
+                    "job",
+                    "instance"
                   ]
                 }
               }
@@ -1452,29 +1454,10 @@
         "hide": 0,
         "id": "00000000-0000-0000-0000-000000000000",
         "includeAll": true,
-        "label": "Deployment",
-        "multi": true,
-        "name": "deployment",
-        "query": "label_values(ise3_dataset_enabled, instance)",
-        "skipUrlSync": false,
-        "type": "query"
-      },
-      {
-        "allValue": ".*",
-        "auto": false,
-        "auto_count": 30,
-        "auto_min": "10s",
-        "datasource": {
-          "type": "prometheus",
-          "uid": "${prometheus}"
-        },
-        "hide": 0,
-        "id": "00000000-0000-0000-0000-000000000000",
-        "includeAll": true,
         "label": "PSN",
         "multi": true,
         "name": "node",
-        "query": "label_values(ise3_psn_radius_requests_per_hour{instance=~\"$deployment\"}, node)",
+        "query": "label_values(ise3_psn_radius_requests_per_hour, node)",
         "skipUrlSync": false,
         "type": "query"
       }

@@ -125,14 +125,22 @@ def instant(expr, legend="", ref="A"):
 
 
 def metric(name, selectors=""):
-    """Select one exporter metric inside the chosen deployment(s)."""
-    labels = 'instance=~"$deployment"'
-    if selectors:
-        labels += f",{selectors}"
-    return f"{name}{{{labels}}}"
+    """Select one exporter metric.
+
+    One exporter serves one ISE deployment, so there is no deployment dimension
+    to select on here: a second deployment is a second Prometheus job, not a
+    label to filter. Everything below therefore aggregates without `instance`,
+    and tables drop it as scrape metadata -- see NOISE_COLUMNS.
+    """
+    return f"{name}{{{selectors}}}" if selectors else name
 
 
-def _healthy(name, selectors, by):
+def _aggregate(operator, by, expr):
+    """`op(expr)` or `op by (labels) (expr)`, with no empty `by ()` to explain."""
+    return f"{operator} by ({by}) ({expr})" if by else f"{operator}({expr})"
+
+
+def _healthy(name, selectors, by=""):
     """One dataset-health metric, restricted to the provider actually serving.
 
     A dataset publishes health per candidate provider. Only the active one is
@@ -141,14 +149,13 @@ def _healthy(name, selectors, by):
     """
     health = metric(name, selectors)
     active = metric("ise3_dataset_provider_active", selectors)
-    return (
-        f"max by ({by}) ({health} and on(instance,dataset,provider) "
-        f"({active} == 1))"
-    )
+    return _aggregate(
+        "max", by,
+        f"{health} and on(dataset,provider) ({active} == 1)")
 
 
 def active_health(name, dataset):
-    return _healthy(name, f'dataset="{dataset}"', "instance")
+    return _healthy(name, f'dataset="{dataset}"')
 
 
 def ready(dataset):
@@ -165,7 +172,7 @@ def ready_bool(dataset):
     ready() filters with `== 1`, so an unready dataset returns no series and a
     stat renders "No data" rather than a failure. This form always returns a
     value. It must never be used by gate(): a 0-valued series still matches
-    `and on(instance)`, which would silently stop stale data being hidden.
+    `and on()`, which would silently stop stale data being hidden.
     """
     return (
         f"(({active_health('ise3_dataset_up', dataset)}) == bool 1) * "
@@ -181,8 +188,8 @@ def readiness_per_dataset(selectors=""):
     trustworthy, which is the first thing anyone asks about a graph with a step
     in it.
     """
-    up = _healthy("ise3_dataset_up", selectors, "instance,dataset")
-    fresh = _healthy("ise3_dataset_fresh", selectors, "instance,dataset")
+    up = _healthy("ise3_dataset_up", selectors, "dataset")
+    fresh = _healthy("ise3_dataset_fresh", selectors, "dataset")
     return f"(({up}) == bool 1) * (({fresh}) == bool 1)"
 
 
@@ -192,9 +199,7 @@ def _dataset_selector(datasets):
 
 def ready_share(datasets):
     """The fraction of one dashboard's own datasets that are trustworthy."""
-    return (
-        f"avg by (instance) ({readiness_per_dataset(_dataset_selector(datasets))})"
-    )
+    return f"avg({readiness_per_dataset(_dataset_selector(datasets))})"
 
 
 def oldest_collection(datasets):
@@ -202,14 +207,18 @@ def oldest_collection(datasets):
     stamps = _healthy(
         "ise3_dataset_last_success_timestamp",
         _dataset_selector(datasets),
-        "instance,dataset",
+        "dataset",
     )
-    return f"max by (instance) (time() - ({stamps}))"
+    return f"max(time() - ({stamps}))"
 
 
 def gate(expr, dataset):
-    """Drop stale data instead of showing it as current."""
-    return f"({expr}) and on(instance) ({ready(dataset)})"
+    """Drop stale data instead of showing it as current.
+
+    `on()` rather than `on(instance)`: readiness aggregates to a single
+    unlabelled series, so the join key is deliberately empty.
+    """
+    return f"({expr}) and on() ({ready(dataset)})"
 
 
 # A converging cache is not a failure, so `ready` stays 1 while it fills. Panels
@@ -222,10 +231,10 @@ DETAIL_COVERAGE_FLOOR = 0.99
 
 def covered(expr, dataset, cache):
     """Drop a detail-fed panel while its cache is still filling."""
+    coverage = metric("ise3_detail_cache_coverage", f'cache="{cache}"')
     return (
-        f"({gate(expr, dataset)}) and on(instance) "
-        f"((max by (instance) (ise3_detail_cache_coverage{{instance=~\"$deployment\","
-        f"cache=\"{cache}\"}})) >= {DETAIL_COVERAGE_FLOOR})"
+        f"({gate(expr, dataset)}) and on() "
+        f"((max({coverage})) >= {DETAIL_COVERAGE_FLOOR})"
     )
 
 
@@ -234,8 +243,8 @@ def share(numerator, denominator):
     return f"({numerator}) / clamp_min(({denominator}), 1)"
 
 
-def summed(expr, by="instance"):
-    return f"sum by ({by}) ({expr})"
+def summed(expr, by=""):
+    return _aggregate("sum", by, expr)
 
 
 # ISE message codes seen in the RADIUS error view, worded from Cisco's
@@ -407,12 +416,10 @@ class _DataLink:
 def drilldown(title, uid, **variables):
     """A link into another dashboard that carries the current context.
 
-    `${__url_time_range}` reproduces the window being looked at, and the
-    `:queryparam` format expands the multi-value deployment variable into one
-    `var-deployment=` pair per selected deployment rather than one comma-joined
-    value, which Grafana would read as a single deployment name.
+    `${__url_time_range}` reproduces the window being looked at; the rest of
+    the context is whatever variables the caller names.
     """
-    parameters = ["${__url_time_range}", "${deployment:queryparam}"]
+    parameters = ["${__url_time_range}"]
     parameters += [f"var-{name}={value}" for name, value in variables.items()]
     return _DataLink(title, f"/d/{uid}?" + "&".join(parameters))
 
@@ -530,19 +537,6 @@ def datasource_variable():
     )
 
 
-def deployment_variable():
-    """Scrape instance is the deployment boundary every dashboard is scoped by."""
-    return (
-        db.QueryVariable("deployment")
-        .label("Deployment")
-        .datasource(DATASOURCE)
-        .query("label_values(ise3_dataset_enabled, instance)")
-        .include_all(True)
-        .all_value(".*")
-        .multi(True)
-    )
-
-
 def label_variable(name, label, source_metric, source_label, selectors=""):
     return (
         db.QueryVariable(name)
@@ -613,7 +607,7 @@ def change_annotations():
             # unaggregated changes() fires twice for a single transition, and
             # again whenever the roles or services labels churn.
             "Node state changed",
-            "max by (instance,node) (changes("
+            "max by (node) (changes("
             f"{metric('ise3_deployment_node_state')}[10m])) > 0",
             title="Node state changed: {{node}}",
             body="{{node}} changed deployment state",
@@ -680,10 +674,11 @@ def ts(title, description, targets, *, unit="short", stacked=False,
     )
 
 
-# Prometheus table format emits these beside the label columns. `instance` is
-# deliberately not here: it is the deployment boundary every dashboard is scoped
-# by, so on a multi-deployment selection it is the first thing to read.
-NOISE_COLUMNS = ("Time", "__name__", "job")
+# Prometheus table format emits these beside the label columns. All four are
+# scrape metadata rather than anything ISE said: `instance` and `job` name the
+# exporter that answered, which is the same exporter on every row of every
+# table here, and a column that cannot vary is width spent saying nothing.
+NOISE_COLUMNS = ("Time", "__name__", "job", "instance")
 
 # Targets are declared in refId order everywhere in this file, as query() and
 # instant() default to "A" and each extra target names the next letter.
@@ -947,7 +942,6 @@ def base(title, uid, description, *, tier, variables=()):
         .editable()
         .link(navigation)
         .with_variable(datasource_variable())
-        .with_variable(deployment_variable())
     )
     for change in change_annotations():
         dashboard = dashboard.annotation(change)
@@ -1040,7 +1034,7 @@ ACTIVE_SESSIONS = summed(
     gate(metric("ise3_active_sessions_total"), "active_sessions"))
 
 NODES_DISCONNECTED = (
-    "count by (instance) ((" +
+    "count((" +
     gate(metric("ise3_deployment_node_state", 'state!="Connected"'),
          "deployment") +
     ") == 1)"
@@ -1048,7 +1042,7 @@ NODES_DISCONNECTED = (
 
 NODE_CONNECTED = summed(
     gate(metric("ise3_deployment_node_state", 'state="Connected"'), "deployment"),
-    by="instance,node",
+    by="node",
 )
 
 
@@ -1064,11 +1058,11 @@ def triage_dashboard():
     attention_needed = " or ".join((
         attention(
             "Datasets not collecting",
-            f"count by (instance) (({readiness_per_dataset()}) == 0)",
+            f"count(({readiness_per_dataset()}) == 0)",
         ),
         attention(
             "Datasets on a fallback provider",
-            "count by (instance) "
+            "count"
             f"({metric('ise3_dataset_provider_degraded')} > 0)",
         ),
         attention(
@@ -1077,47 +1071,47 @@ def triage_dashboard():
         ),
         attention(
             "Certificates already expired",
-            "sum by (instance) "
+            "sum"
             f"(({gate(metric('ise3_certificates_expired'), 'certificates')}) > 0)",
         ),
         attention(
             "ISE nodes unreachable for the certificate scan",
-            "sum by (instance) ((" +
+            "sum((" +
             gate(metric("ise3_certificate_nodes_unreachable"), "certificates") +
             ") > 0)",
         ),
         attention(
             f"Deployments whose backup is older than {BACKUP_STALE_HOURS} hours",
-            "count by (instance) "
+            "count"
             f"(({gate(metric('ise3_backup_age_hours'), 'backup')}) "
             f"> {BACKUP_STALE_HOURS})",
         ),
         attention(
             "Licence tiers out of compliance",
-            "count by (instance) "
+            "count"
             f"(({gate(metric('ise3_license_compliant'), 'licensing')}) == 0)",
         ),
         attention(
             "PSNs above 90% CPU",
-            "count by (instance) "
+            "count"
             f"(({gate(metric('ise3_node_cpu_utilization_percent'), 'psn_performance')})"
             " > 90)",
         ),
         attention(
             "Network devices with failing authentications",
-            "count by (instance) "
+            "count"
             f"(({gate(metric('ise3_radius_errors_by_nad'), 'radius_errors')}) > 0)",
         ),
         attention(
             "Endpoints failing posture",
-            "sum by (instance) ((" +
+            "sum((" +
             gate(metric("ise3_posture_endpoints", 'status!~"Compliant|compliant"'),
                  "posture_current") +
             ") > 0)",
         ),
         attention(
             "TACACS accounts flagged for hygiene review",
-            "count by (instance) "
+            "count"
             f"(({gate(metric('ise3_tacacs_internal_account_hygiene_risk'), 'tacacs_config')})"
             " > 0)",
         ),
@@ -1641,7 +1635,7 @@ def access_dashboard():
                 "estate actually runs before changing a policy that assumes "
                 "otherwise.",
                 summed(gate(metric("ise3_radius_authentications_by_method"),
-                            "radius_reporting"), by="instance,method"),
+                            "radius_reporting"), by="method"),
                 label="method",
                 label_header="Method",
                 header="Authentications",
@@ -1656,7 +1650,7 @@ def access_dashboard():
                 "protocol is being retired: this is the panel that proves "
                 "whether anything still uses it.",
                 summed(gate(metric("ise3_radius_authentications_by_protocol"),
-                            "radius_reporting"), by="instance,protocol"),
+                            "radius_reporting"), by="protocol"),
                 label="protocol",
                 label_header="Protocol",
                 header="Authentications",
@@ -1672,7 +1666,7 @@ def access_dashboard():
                 "one above it; either way it is worth knowing before an audit "
                 "asks.",
                 summed(gate(metric("ise3_radius_authentications_by_policy"),
-                            "radius_reporting"), by="instance,policy"),
+                            "radius_reporting"), by="policy"),
                 label="policy",
                 label_header="Authorization policy",
                 header="Authentications",
@@ -1689,7 +1683,7 @@ def access_dashboard():
                 "network-device configuration problem.",
                 [query(summed(gate(metric("ise3_radius_authentications_by_psn",
                                           ACCESS_PSN), "radius_reporting"),
-                              by="instance,psn"),
+                              by="psn"),
                        "{{psn}}")],
             ),
             PANEL_H,
@@ -1703,7 +1697,7 @@ def access_dashboard():
                 "busy and broken, a device high only here is just busy.",
                 summed(gate(metric("ise3_radius_authentications_by_nad",
                                    ACCESS_NAD), "radius_reporting"),
-                       by="instance,nad"),
+                       by="nad"),
                 label="nad",
                 label_header="Network device",
                 header="Authentications",
@@ -1723,7 +1717,7 @@ def access_dashboard():
                 "history, so it answers 'who is affected right now'.",
                 summed(gate(metric("ise3_session_status_endpoints"),
                             "session_authorization"),
-                       by="instance,ops_owner,status"),
+                       by="ops_owner,status"),
                 label="ops_owner",
                 label_header="Operations owner",
                 header="Endpoints",
@@ -1740,7 +1734,7 @@ def access_dashboard():
                 "error codes above.",
                 summed(gate(metric("ise3_session_failure_reason_endpoints"),
                             "session_authorization"),
-                       by="instance,reason_code"),
+                       by="reason_code"),
                 label="reason_code",
                 label_header="Reason code",
                 header="Endpoints",
@@ -1758,7 +1752,7 @@ def access_dashboard():
                 "usually a missing attribute or a broken downloadable ACL.",
                 summed(gate(metric("ise3_session_failed_authz_profile_endpoints"),
                             "session_authorization"),
-                       by="instance,authz_profile"),
+                       by="authz_profile"),
                 label="authz_profile",
                 label_header="Authorization profile",
                 header="Endpoints",
@@ -1776,7 +1770,7 @@ def access_dashboard():
                 "the policy line responsible.",
                 summed(gate(metric("ise3_session_failed_authz_rule_endpoints"),
                             "session_authorization"),
-                       by="instance,authz_rule"),
+                       by="authz_rule"),
                 label="authz_rule",
                 label_header="Authorization rule",
                 header="Endpoints",
@@ -1794,7 +1788,7 @@ def access_dashboard():
                 "the policy tree.",
                 summed(gate(metric("ise3_session_failed_policy_set_endpoints"),
                             "session_authorization"),
-                       by="instance,policy_set"),
+                       by="policy_set"),
                 label="policy_set",
                 label_header="Policy set",
                 header="Endpoints",
@@ -1814,7 +1808,7 @@ def access_dashboard():
                 "intended.",
                 summed(gate(metric("ise3_session_authz_profile_endpoints"),
                             "session_authorization"),
-                       by="instance,authz_profile"),
+                       by="authz_profile"),
                 label="authz_profile",
                 label_header="Authorization profile",
                 header="Endpoints",
@@ -1831,7 +1825,7 @@ def access_dashboard():
                 "matching.",
                 summed(gate(metric("ise3_session_authz_rule_endpoints"),
                             "session_authorization"),
-                       by="instance,authz_rule"),
+                       by="authz_rule"),
                 label="authz_rule",
                 label_header="Authorization rule",
                 header="Endpoints",
@@ -1848,7 +1842,7 @@ def access_dashboard():
                 "wrong for reasons no individual rule accounts for.",
                 summed(gate(metric("ise3_session_policy_set_endpoints"),
                             "session_authorization"),
-                       by="instance,policy_set"),
+                       by="policy_set"),
                 label="policy_set",
                 label_header="Policy set",
                 header="Endpoints",
@@ -1865,7 +1859,7 @@ def access_dashboard():
                 "to the historical method breakdown.",
                 summed(gate(metric("ise3_session_auth_method_endpoints"),
                             "session_authorization"),
-                       by="instance,method"),
+                       by="method"),
                 label="method",
                 label_header="Method",
                 header="Endpoints",
@@ -1978,7 +1972,7 @@ def access_dashboard():
                 "from authentication.",
                 [query(summed(gate(metric("ise3_radius_accounting_events",
                                           'dimension="psn"'), "radius_accounting"),
-                              by="instance,value,event_type"),
+                              by="value,event_type"),
                        "{{value}} · {{event_type}}")],
             ),
             PANEL_H,
@@ -1993,7 +1987,7 @@ def access_dashboard():
                 "sending interim updates too aggressively.",
                 summed(gate(metric("ise3_radius_accounting_events",
                                    'dimension="nad"'), "radius_accounting"),
-                       by="instance,value"),
+                       by="value"),
                 label="value",
                 label_header="Network device",
                 header="Records",
@@ -2065,7 +2059,7 @@ def psn_dashboard():
                 "the saturation signal of USE for this service. Amber at 80%, "
                 "red at 90%: past that, latency rises before throughput falls, "
                 "so this leads the symptom.",
-                [instant(f"max by (instance) ("
+                [instant(f"max("
                          f"{gate(metric('ise3_psn_load_percent', PSN_NODE), 'psn_performance')})")],
                 unit="percent",
                 thresholds=UTILISATION,
@@ -2083,7 +2077,7 @@ def psn_dashboard():
                 "Slowest average RADIUS latency across the selected PSNs. A "
                 "single slow node is that node's resources or identity-store "
                 "path; all of them slow together is the identity store itself.",
-                [instant(f"max by (instance) ("
+                [instant(f"max("
                          f"{gate(metric('ise3_psn_average_latency_seconds', PSN_NODE), 'psn_performance')})")],
                 unit="s",
                 thresholds=LATENCY_SECONDS,
@@ -2190,7 +2184,7 @@ def psn_dashboard():
                 "The fullest filesystem on each node. ISE degrades badly when "
                 "a node runs out of disk — logging stops first, then services "
                 "— so this is a saturation signal worth watching ahead of CPU.",
-                [query(f"max by (instance,node) ("
+                [query(f"max by (node) ("
                        f"{gate(metric('ise3_node_disk_utilization_percent', PSN_NODE), 'psn_performance')})",
                        "{{node}}")],
                 unit="percent",
@@ -2577,7 +2571,7 @@ def control_dashboard():
                 "one to watch: when its log partition fills, ISE purges "
                 "aggressively and the reporting views lose history without any "
                 "error being raised.",
-                [query("max by (instance,node) (" +
+                [query("max by (node) (" +
                        gate(metric("ise3_node_disk_utilization_percent"),
                             "psn_performance") + ")", "{{node}}")],
                 unit="percent",
@@ -3249,7 +3243,7 @@ def posture_dashboard():
                 "the statuses together are the whole assessed population. A "
                 "widening non-compliant band without a matching drop in "
                 "compliant usually means new endpoints arrived unassessed.",
-                [query(summed(POSTURE_ALL, by="instance,status"), "{{status}}")],
+                [query(summed(POSTURE_ALL, by="status"), "{{status}}")],
                 stacked=True,
                 series_colours=OUTCOME_COLOURS,
             ),
@@ -3282,7 +3276,7 @@ def posture_dashboard():
                 "to talk to.",
                 summed(gate(metric("ise3_posture_endpoints",
                                    'status!~"Compliant|compliant"'),
-                            "posture_current"), by="instance,ops_owner"),
+                            "posture_current"), by="ops_owner"),
                 label="ops_owner",
                 label_header="Operations owner",
                 header="Non-compliant",
@@ -3302,11 +3296,11 @@ def posture_dashboard():
                 "the per-policy verdict as its own column; the live MnT "
                 "breakdown is the fallback where that view is unavailable.",
                 (summed(gate(metric("ise3_posture_failing_policies"),
-                             "posture_history"), by="instance,policy")
+                             "posture_history"), by="policy")
                  + " or "
                  + summed(gate(metric("ise3_posture_policy_results",
                                       'result!~"pass|Passed|passed"'),
-                               "posture_current"), by="instance,policy")),
+                               "posture_current"), by="policy")),
                 label="policy",
                 label_header="Posture policy",
                 header="Failures",
@@ -3416,7 +3410,7 @@ def posture_dashboard():
                 "Share of MnT session records carrying the posture fields "
                 "these panels read. Low coverage means the live posture "
                 "picture is drawn from a subset of sessions, not all of them.",
-                [instant(f"avg by (instance) ("
+                [instant(f"avg("
                          f"{gate(metric('ise3_session_detail_field_coverage'), 'posture_current')})")],
                 unit="percentunit",
                 thresholds=COVERAGE,
@@ -3471,7 +3465,7 @@ def posture_dashboard():
                 "status. The trend view of compliance, as opposed to the live "
                 "snapshot at the top of the page.",
                 [query(summed(gate(metric("ise3_posture_assessments"),
-                                   "posture_history"), by="instance,status"),
+                                   "posture_history"), by="status"),
                        "{{status}}")],
                 stacked=True,
                 series_colours=OUTCOME_COLOURS,
@@ -3631,7 +3625,7 @@ def tacacs_dashboard():
                 "identity-store problem.",
                 [query(summed(gate(metric("ise3_tacacs_authentications",
                                           'dimension="username"'), "tacacs_activity"),
-                              by="instance,status"), "{{status}}")],
+                              by="status"), "{{status}}")],
                 stacked=True,
                 series_colours=OUTCOME_COLOURS,
             ),
@@ -3646,7 +3640,7 @@ def tacacs_dashboard():
                 "small numbers, worth investigating as a pattern.",
                 [query(summed(gate(metric("ise3_tacacs_authorizations",
                                           'dimension="username"'), "tacacs_activity"),
-                              by="instance,status"), "{{status}}")],
+                              by="status"), "{{status}}")],
                 stacked=True,
                 series_colours=OUTCOME_COLOURS,
             ),
@@ -3893,7 +3887,7 @@ def pipeline_dashboard():
                 "How many datasets both collected successfully and are inside "
                 "their freshness window. This is the number that decides "
                 "whether to believe the other nine dashboards.",
-                [instant(f"count by (instance) (({readiness_per_dataset()}) == 1)")],
+                [instant(f"count(({readiness_per_dataset()}) == 1)")],
                 thresholds=NEUTRAL,
                 no_value=NO_DATA_EXPORTER,
             ),
@@ -3906,7 +3900,7 @@ def pipeline_dashboard():
                 "Datasets that are enabled but currently either failing or "
                 "stale. Every panel fed by one of these is blank or frozen "
                 "somewhere in the set.",
-                [instant(f"count by (instance) (({readiness_per_dataset()}) == 0)")],
+                [instant(f"count(({readiness_per_dataset()}) == 0)")],
                 thresholds=NONZERO_CRITICAL,
                 no_value=NO_DATA_EXPORTER,
             ),
@@ -3933,9 +3927,9 @@ def pipeline_dashboard():
                 "Seconds since the least recently successful dataset last "
                 "landed. The single worst-case staleness anywhere in the "
                 "exporter's view of ISE.",
-                [instant("max by (instance) (time() - (" +
+                [instant("max(time() - (" +
                          _healthy("ise3_dataset_last_success_timestamp", "",
-                                  "instance,dataset") + "))")],
+                                  "dataset") + "))")],
                 unit="s",
                 thresholds=COLLECTION_AGE,
                 no_value=NO_DATA_EXPORTER,
@@ -3950,7 +3944,7 @@ def pipeline_dashboard():
                 "dataset. One failure is noise; a run means something is "
                 "broken rather than flaky, and the failure table below has the "
                 "error text.",
-                [instant(f"max by (instance) ({metric('ise3_dataset_consecutive_failures')})")],
+                [instant(f"max({metric('ise3_dataset_consecutive_failures')})")],
                 thresholds=NONZERO_WARNING,
                 no_value=NO_DATA_EXPORTER,
             ),
@@ -3998,22 +3992,22 @@ def pipeline_dashboard():
                 "apart means the dataset is being attempted and failing, the "
                 "two together means it simply has not run.",
                 [
-                    instant(_healthy("ise3_dataset_up", "", "instance,dataset"),
+                    instant(_healthy("ise3_dataset_up", "", "dataset"),
                             ref="A"),
-                    instant(_healthy("ise3_dataset_fresh", "", "instance,dataset"),
+                    instant(_healthy("ise3_dataset_fresh", "", "dataset"),
                             ref="B"),
                     instant("time() - (" + _healthy(
                         "ise3_dataset_last_success_timestamp", "",
-                        "instance,dataset") + ")", ref="C"),
-                    instant(f"max by (instance,dataset) ("
+                        "dataset") + ")", ref="C"),
+                    instant(f"max by (dataset) ("
                             f"{metric('ise3_dataset_collection_duration_seconds')})",
                             ref="D"),
                     instant(metric("ise3_dataset_interval_seconds"), ref="E"),
                     instant("time() - (" + _healthy(
                         "ise3_dataset_last_attempt_timestamp", "",
-                        "instance,dataset") + ")", ref="F"),
+                        "dataset") + ")", ref="F"),
                     instant("(" + _healthy("ise3_dataset_next_run_timestamp", "",
-                                           "instance,dataset") + ") - time()",
+                                           "dataset") + ") - time()",
                             ref="G"),
                 ],
                 columns=["Up", "Fresh", "Age", "Duration", "Interval",
@@ -4099,7 +4093,7 @@ def pipeline_dashboard():
                 "how often it has been breaking and for which stated reason, "
                 "which is what separates a flaky appliance from a "
                 "misconfiguration.",
-                [query(f"sum by (instance,dataset,reason) (rate("
+                [query(f"sum by (dataset,reason) (rate("
                        f"{metric('ise3_dataset_failures_total')}[$__rate_interval]))",
                        "{{dataset}} · {{reason}}")],
                 legend_placement="right",
@@ -4114,7 +4108,7 @@ def pipeline_dashboard():
                 "result. Failures here mean the reporting datasets fall back "
                 "or go stale; the schema-gap table below usually explains "
                 "them.",
-                [query(f"sum by (instance,result) (rate("
+                [query(f"sum by (result) (rate("
                        f"{metric('ise3_dataconnect_queries_total')}[$__rate_interval]))",
                        "{{result}}")],
                 unit="reqps",
@@ -4191,10 +4185,10 @@ def pipeline_dashboard():
                 "error rate beside it. Errors climbing here precede datasets "
                 "falling back to a different provider.",
                 [
-                    query(f"sum by (instance) (rate("
+                    query(f"sum(rate("
                           f"{metric('ise3_api_requests_total')}[$__rate_interval]))",
                           "requests"),
-                    query(f"sum by (instance) (rate("
+                    query(f"sum(rate("
                           f"{metric('ise3_api_errors_total')}[$__rate_interval]))",
                           "errors", ref="B"),
                 ],
@@ -4210,7 +4204,7 @@ def pipeline_dashboard():
                 "How long the appliance is taking to answer, by API. Rising "
                 "latency here is the earliest warning that collection "
                 "durations and then freshness are about to suffer.",
-                [query("histogram_quantile(0.95, sum by (instance,api,le) (rate("
+                [query("histogram_quantile(0.95, sum by (api,le) (rate("
                        f"{metric('ise3_api_request_duration_seconds_bucket')}"
                        "[$__rate_interval])))", "{{api}}")],
                 unit="s",
@@ -4233,7 +4227,7 @@ def pipeline_dashboard():
                     instant("time() - " +
                             metric("ise3_pxgrid_stream_last_frame_timestamp"),
                             ref="C"),
-                    instant(f"sum by (instance) (increase("
+                    instant(f"sum(increase("
                             f"{metric('ise3_pxgrid_stream_reconnects_total')}[$__range]))",
                             ref="D"),
                 ],
@@ -4328,7 +4322,7 @@ def pipeline_dashboard():
                 "failures are not, and they are what stops a cache reaching "
                 "the coverage floor.",
                 [
-                    query(f"sum by (instance,cache,result) (rate("
+                    query(f"sum by (cache,result) (rate("
                           f"{metric('ise3_detail_fetches_total')}[$__rate_interval]))",
                           "{{cache}} · {{result}}"),
                     query(metric("ise3_detail_fetches_deferred"),
@@ -4390,12 +4384,12 @@ def pipeline_dashboard():
                 "figures are drawn from. Every latency panel in the set is "
                 "only as trustworthy as these two numbers.",
                 [
-                    instant(f"avg by (instance) ("
+                    instant(f"avg("
                             f"{gate(metric('ise3_radius_authentication_latency_coverage'), 'radius_reporting')})",
                             "coverage"),
                     instant(gate(metric("ise3_session_authentication_latency_samples"),
                                  "session_authorization"), "samples", ref="B"),
-                    instant(f"sum by (instance) (increase("
+                    instant(f"sum(increase("
                             f"{metric('ise3_radius_latency_samples_total')}[$__range]))",
                             "reporting samples", ref="C"),
                 ],
@@ -4441,7 +4435,7 @@ def pipeline_dashboard():
                 "honour. Non-zero is not fatal, but it means some label values "
                 "on the reporting dashboards are approximations of what ISE "
                 "actually holds.",
-                [query(f"sum by (instance,view) (rate("
+                [query(f"sum by (view) (rate("
                        f"{metric('ise3_dataconnect_replaced_characters_total')}[$__rate_interval]))",
                        "{{view}}")],
             ),
@@ -4505,7 +4499,7 @@ def load_dashboard():
                 "actually consuming. Above 80% there is no headroom for a "
                 "backfill or a manual query; at 100% the scheduler is "
                 "throttling and freshness starts to slip.",
-                [instant(f"max by (instance) ({metric('ise3_load_budget_utilisation')})")],
+                [instant(f"max({metric('ise3_load_budget_utilisation')})")],
                 unit="percentunit",
                 thresholds=BUDGET_USED,
                 minimum=0,
@@ -4521,7 +4515,7 @@ def load_dashboard():
                 "What the exporter is really asking ISE for, derived from the "
                 "request counter rather than from the plan. The number to "
                 "quote when someone asks what this exporter costs.",
-                [instant(f"sum by (instance) (rate("
+                [instant(f"sum(rate("
                          f"{metric('ise3_load_measured_requests_total')}[1h]) * 3600)")],
                 thresholds=NEUTRAL,
                 sparkline=True,
@@ -4567,7 +4561,7 @@ def load_dashboard():
                 "Cumulative seconds the scheduler has spent waiting for budget "
                 "rather than querying. Non-zero means the budget is binding: "
                 "the exporter wanted to collect and was not allowed to.",
-                [instant(f"sum by (instance) (rate("
+                [instant(f"sum(rate("
                          f"{metric('ise3_budget_wait_seconds_total')}[$__rate_interval]))")],
                 unit="s",
                 thresholds=NONZERO_WARNING,
@@ -4582,7 +4576,7 @@ def load_dashboard():
                 "Whether the budget accounting is still filling its first "
                 "window. While this is true the utilisation figures beside it "
                 "are provisional rather than wrong.",
-                [instant(f"max by (instance) ({metric('ise3_budget_warming')})")],
+                [instant(f"max({metric('ise3_budget_warming')})")],
                 mappings=YES_NO,
                 thresholds=NEUTRAL,
                 text_mode=BigValueTextMode.VALUE,
@@ -4605,7 +4599,7 @@ def load_dashboard():
                 [
                     query(summed(metric("ise3_load_planned_requests_per_hour")),
                           "declared"),
-                    query(f"sum by (instance) (rate("
+                    query(f"sum(rate("
                           f"{metric('ise3_load_measured_requests_total')}[1h]) * 3600)",
                           "measured", ref="B"),
                     query(summed(metric("ise3_budget_enforced_requests_per_hour")),
@@ -4649,7 +4643,7 @@ def load_dashboard():
                 "whenever the duty cycle needs to come down: one view usually "
                 "dominates.",
                 [
-                    instant(f"max by (instance,view) ("
+                    instant(f"max by (view) ("
                             f"{metric('ise3_dataconnect_query_last_duration_seconds')})",
                             ref="A"),
                     instant(metric("ise3_dataconnect_query_rows"), ref="B"),
@@ -4676,7 +4670,7 @@ def load_dashboard():
                 "dataset consumes. The cheapest saving is usually a long "
                 "dataset on a short interval.",
                 [
-                    instant(f"max by (instance,dataset) ("
+                    instant(f"max by (dataset) ("
                             f"{metric('ise3_dataset_collection_duration_seconds')})",
                             ref="A"),
                     instant(metric("ise3_dataset_interval_seconds"), ref="B"),
@@ -4701,10 +4695,10 @@ def load_dashboard():
                 "measured line without a configuration change means a view's "
                 "data volume grew.",
                 [
-                    query(f"sum by (instance,target) (rate("
+                    query(f"sum by (target) (rate("
                           f"{metric('ise3_load_measured_db_seconds_total')}[$__rate_interval]))",
                           "measured {{target}}"),
-                    query(f"sum by (instance) ("
+                    query(f"sum("
                           f"{metric('ise3_load_planned_db_seconds_per_hour')}) / 3600",
                           "declared", ref="B"),
                 ],
@@ -4720,7 +4714,7 @@ def load_dashboard():
                 "p95 well above the typical last duration means one statement "
                 "occasionally runs far longer than it usually does, which is "
                 "what actually breaches a duty cycle.",
-                [query("histogram_quantile(0.95, sum by (instance,view,le) (rate("
+                [query("histogram_quantile(0.95, sum by (view,le) (rate("
                        f"{metric('ise3_dataconnect_query_duration_seconds_bucket')}"
                        "[$__rate_interval])))", "{{view}}")],
                 unit="s",
@@ -4737,13 +4731,13 @@ def load_dashboard():
                 "queries an operator ran by hand. The last one matters: ad-hoc "
                 "reads come out of the same budget as scheduled collection.",
                 [
-                    query(f"sum by (instance) (rate("
+                    query(f"sum(rate("
                           f"{metric('ise3_budget_throttled_total')}[$__rate_interval]))",
                           "throttled"),
-                    query(f"max by (instance) ("
+                    query(f"max("
                           f"{metric('ise3_dataconnect_query_cooldown_seconds')})",
                           "peak cooldown", ref="B"),
-                    query(f"sum by (instance,result) (rate("
+                    query(f"sum by (result) (rate("
                           f"{metric('ise3_dataconnect_explorer_queries_total')}[$__rate_interval]))",
                           "ad-hoc {{result}}", ref="C"),
                 ],
@@ -4800,7 +4794,7 @@ def capacity_dashboard():
                 "Licence tiers ISE currently reports as non-compliant. Any "
                 "value above zero is a procurement conversation with a "
                 "deadline attached, not an operational one.",
-                [instant(f"count by (instance) "
+                [instant(f"count"
                          f"(({gate(metric('ise3_license_compliant'), 'licensing')}) == 0)")],
                 thresholds=NONZERO_CRITICAL,
                 no_value=NO_DATA_CLEAN,
@@ -4915,7 +4909,7 @@ def capacity_dashboard():
                 "that says whether a node is trending towards needing help, as "
                 "opposed to the PSN dashboard, which says whether it needs help "
                 "right now.",
-                [query("max by (instance,node) (" +
+                [query("max by (node) (" +
                        gate(metric("ise3_node_cpu_utilization_percent"),
                             "psn_performance") + ")", "{{node}}")],
                 unit="percent",
@@ -4999,7 +4993,7 @@ def capacity_dashboard():
                 "window. A duration growing with the estate is the signal to "
                 "lengthen an interval or narrow a scan window before freshness "
                 "starts failing.",
-                [query(f"max by (instance,dataset) ("
+                [query(f"max by (dataset) ("
                        f"{metric('ise3_dataset_collection_duration_seconds')})",
                        "{{dataset}}")],
                 unit="s",
