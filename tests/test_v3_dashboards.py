@@ -348,6 +348,68 @@ def test_every_drilldown_points_at_a_dashboard_that_exists(filename, dashboard):
             f"{filename} links to /d/{uid}, which this set does not build")
 
 
+def _triage_exprs():
+    """Every triage panel's query expressions, keyed by panel title."""
+    exprs = {}
+    for panel, target in _targets(_dashboard("ise3-triage.json")):
+        exprs.setdefault(panel.get("title"), []).append(target.get("expr", ""))
+    return {title: " ".join(bodies) for title, bodies in exprs.items()}
+
+
+def test_triage_declares_the_operations_owner_variable():
+    # An ops owner owns a region's endpoints and NADs. Selecting themselves
+    # must turn the diagnosis layer into their own fix list; All must keep the
+    # fleet-wide behaviour, which is why the variable is multi with an All
+    # default rather than a forced single choice.
+    dashboard = _dashboard("ise3-triage.json")
+    variables = {item["name"]: item for item in dashboard["templating"]["list"]}
+    owner = variables.get("ops_owner")
+    assert owner is not None, "triage lost the Operations owner variable"
+    assert owner["multi"] and owner["includeAll"]
+    assert owner["allValue"] == ".*", (
+        "the All option must expand to a regex the =~ matchers accept")
+    assert owner["query"] == (
+        "label_values(ise3_network_devices_by_ops_owner, ops_owner)"), (
+        "the option list must come from the by-owner census, which still "
+        "offers 'unknown' when the directory classifies nothing")
+
+
+def test_triage_owner_scopes_the_panels_an_owner_can_act_on():
+    exprs = _triage_exprs()
+
+    failing = exprs["Failing network devices"]
+    assert '$ops_owner' in failing
+    assert "ise3_network_device_assignment" in failing
+    # The assignment family is not total -- an unclassified or uninventoried
+    # NAD has no row -- so a bare join would silently drop a failing device.
+    # The expression must keep the unmatched remainder, labelled unknown.
+    assert "unless" in failing and '"unknown"' in failing
+
+    union = exprs["Attention needed"]
+    assert 'ise3_posture_endpoints' in union
+    assert union.count('$ops_owner') >= 2, (
+        "both actionable attention rows (failing NADs and posture) must "
+        "respect the owner variable")
+
+    # The symptom row stays fleet-wide: "is ISE serving right now" is not an
+    # owner-scoped question.
+    for fleet in ("Authentication success rate", "Failed authentications",
+                  "Active sessions", "Nodes not connected"):
+        assert '$ops_owner' not in exprs[fleet], (
+            f"{fleet} is a fleet symptom and must not be owner-scoped")
+
+
+def test_triage_breaks_live_failures_down_by_reason_for_an_owner():
+    exprs = _triage_exprs()
+    reason = exprs.get("Failure reasons for the selected owner")
+    assert reason, "triage lost the per-owner failure reason breakdown"
+    assert "ise3_session_failure_reason_endpoints" in reason
+    assert '$ops_owner' in reason
+    assert "sum by (reason_code)" in reason
+    # Gated on its own dataset, like every ISE-sourced expression.
+    assert 'dataset="session_authorization"' in reason
+
+
 def test_triage_links_down_into_every_diagnostic_it_names():
     # Tier 1 is only useful if it hands off. A triage panel that identifies a
     # problem and offers nowhere to go is a dead end.
@@ -382,6 +444,8 @@ CAPABILITY_CONTRACTS = {
         "ise3_radius_errors_by_psn",
         "ise3_radius_errors_by_message_code",
         "ise3_session_authentication_latency_seconds",
+        "ise3_network_device_assignment",
+        "ise3_session_failure_reason_endpoints",
     },
     "ise3-access.json": {
         "ise3_radius_authentications",

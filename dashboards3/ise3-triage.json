@@ -492,7 +492,7 @@
         "type": "prometheus",
         "uid": "${prometheus}"
       },
-      "description": "One row per class of problem currently detected anywhere in this deployment, with how many instances of it there are. An empty table is the healthy state and needs no interpretation. Rows sourced from ISE are suppressed while their dataset is stale, so a fixed problem cannot keep raising an alarm from a collection that has not refreshed yet.",
+      "description": "One row per class of problem currently detected anywhere in this deployment, with how many instances of it there are. An empty table is the healthy state and needs no interpretation. Rows sourced from ISE are suppressed while their dataset is stale, so a fixed problem cannot keep raising an alarm from a collection that has not refreshed yet. The failing-devices and posture rows respect the Operations owner variable; with All selected they count the whole deployment.",
       "fieldConfig": {
         "defaults": {},
         "overrides": [
@@ -543,7 +543,7 @@
       "repeatDirection": "h",
       "targets": [
         {
-          "expr": "label_replace(count((((max by (dataset) (ise3_dataset_up and on(dataset,provider) (ise3_dataset_provider_active == 1))) == bool 1) * ((max by (dataset) (ise3_dataset_fresh and on(dataset,provider) (ise3_dataset_provider_active == 1))) == bool 1)) == 0), \"issue\", \"Datasets not collecting\", \"\", \"\") or label_replace(count(ise3_dataset_provider_degraded > 0), \"issue\", \"Datasets on a fallback provider\", \"\", \"\") or label_replace(count(((ise3_deployment_node_state{state!=\"Connected\"}) and on() (((max(ise3_dataset_up{dataset=\"deployment\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"deployment\"} == 1))) == 1) and ((max(ise3_dataset_fresh{dataset=\"deployment\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"deployment\"} == 1))) == 1))) == 1), \"issue\", \"Deployment nodes not connected\", \"\", \"\") or label_replace(sum(((ise3_certificates_expired) and on() (((max(ise3_dataset_up{dataset=\"certificates\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"certificates\"} == 1))) == 1) and ((max(ise3_dataset_fresh{dataset=\"certificates\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"certificates\"} == 1))) == 1))) > 0), \"issue\", \"Certificates already expired\", \"\", \"\") or label_replace(sum(((ise3_certificate_nodes_unreachable) and on() (((max(ise3_dataset_up{dataset=\"certificates\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"certificates\"} == 1))) == 1) and ((max(ise3_dataset_fresh{dataset=\"certificates\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"certificates\"} == 1))) == 1))) > 0), \"issue\", \"ISE nodes unreachable for the certificate scan\", \"\", \"\") or label_replace(count(((ise3_backup_age_hours) and on() (((max(ise3_dataset_up{dataset=\"backup\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"backup\"} == 1))) == 1) and ((max(ise3_dataset_fresh{dataset=\"backup\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"backup\"} == 1))) == 1))) > 26), \"issue\", \"Deployments whose backup is older than 26 hours\", \"\", \"\") or label_replace(count(((ise3_license_compliant) and on() (((max(ise3_dataset_up{dataset=\"licensing\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"licensing\"} == 1))) == 1) and ((max(ise3_dataset_fresh{dataset=\"licensing\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"licensing\"} == 1))) == 1))) == 0), \"issue\", \"Licence tiers out of compliance\", \"\", \"\") or label_replace(count(((ise3_node_cpu_utilization_percent) and on() (((max(ise3_dataset_up{dataset=\"psn_performance\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"psn_performance\"} == 1))) == 1) and ((max(ise3_dataset_fresh{dataset=\"psn_performance\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"psn_performance\"} == 1))) == 1))) > 90), \"issue\", \"PSNs above 90% CPU\", \"\", \"\") or label_replace(count(((ise3_radius_errors_by_nad) and on() (((max(ise3_dataset_up{dataset=\"radius_errors\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"radius_errors\"} == 1))) == 1) and ((max(ise3_dataset_fresh{dataset=\"radius_errors\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"radius_errors\"} == 1))) == 1))) > 0), \"issue\", \"Network devices with failing authentications\", \"\", \"\") or label_replace(sum(((ise3_posture_endpoints{status!~\"Compliant|compliant\"}) and on() (((max(ise3_dataset_up{dataset=\"posture_current\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"posture_current\"} == 1))) == 1) and ((max(ise3_dataset_fresh{dataset=\"posture_current\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"posture_current\"} == 1))) == 1))) > 0), \"issue\", \"Endpoints failing posture\", \"\", \"\") or label_replace(count(((ise3_tacacs_internal_account_hygiene_risk) and on() (((max(ise3_dataset_up{dataset=\"tacacs_config\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"tacacs_config\"} == 1))) == 1) and ((max(ise3_dataset_fresh{dataset=\"tacacs_config\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"tacacs_config\"} == 1))) == 1))) > 0), \"issue\", \"TACACS accounts flagged for hygiene review\", \"\", \"\")",
+          "expr": "label_replace(count((((max by (dataset) (ise3_dataset_up and on(dataset,provider) (ise3_dataset_provider_active == 1))) == bool 1) * ((max by (dataset) (ise3_dataset_fresh and on(dataset,provider) (ise3_dataset_provider_active == 1))) == bool 1)) == 0), \"issue\", \"Datasets not collecting\", \"\", \"\") or label_replace(count(ise3_dataset_provider_degraded > 0), \"issue\", \"Datasets on a fallback provider\", \"\", \"\") or label_replace(count(((ise3_deployment_node_state{state!=\"Connected\"}) and on() (((max(ise3_dataset_up{dataset=\"deployment\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"deployment\"} == 1))) == 1) and ((max(ise3_dataset_fresh{dataset=\"deployment\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"deployment\"} == 1))) == 1))) == 1), \"issue\", \"Deployment nodes not connected\", \"\", \"\") or label_replace(sum(((ise3_certificates_expired) and on() (((max(ise3_dataset_up{dataset=\"certificates\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"certificates\"} == 1))) == 1) and ((max(ise3_dataset_fresh{dataset=\"certificates\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"certificates\"} == 1))) == 1))) > 0), \"issue\", \"Certificates already expired\", \"\", \"\") or label_replace(sum(((ise3_certificate_nodes_unreachable) and on() (((max(ise3_dataset_up{dataset=\"certificates\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"certificates\"} == 1))) == 1) and ((max(ise3_dataset_fresh{dataset=\"certificates\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"certificates\"} == 1))) == 1))) > 0), \"issue\", \"ISE nodes unreachable for the certificate scan\", \"\", \"\") or label_replace(count(((ise3_backup_age_hours) and on() (((max(ise3_dataset_up{dataset=\"backup\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"backup\"} == 1))) == 1) and ((max(ise3_dataset_fresh{dataset=\"backup\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"backup\"} == 1))) == 1))) > 26), \"issue\", \"Deployments whose backup is older than 26 hours\", \"\", \"\") or label_replace(count(((ise3_license_compliant) and on() (((max(ise3_dataset_up{dataset=\"licensing\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"licensing\"} == 1))) == 1) and ((max(ise3_dataset_fresh{dataset=\"licensing\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"licensing\"} == 1))) == 1))) == 0), \"issue\", \"Licence tiers out of compliance\", \"\", \"\") or label_replace(count(((ise3_node_cpu_utilization_percent) and on() (((max(ise3_dataset_up{dataset=\"psn_performance\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"psn_performance\"} == 1))) == 1) and ((max(ise3_dataset_fresh{dataset=\"psn_performance\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"psn_performance\"} == 1))) == 1))) > 90), \"issue\", \"PSNs above 90% CPU\", \"\", \"\") or label_replace(count((((ise3_radius_errors_by_nad) and on() (((max(ise3_dataset_up{dataset=\"radius_errors\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"radius_errors\"} == 1))) == 1) and ((max(ise3_dataset_fresh{dataset=\"radius_errors\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"radius_errors\"} == 1))) == 1))) * on(nad) group_left(ops_owner, location) (max by (nad, ops_owner, location) (ise3_network_device_assignment{ops_owner=~\"$ops_owner\"})) or label_replace(label_replace(((ise3_radius_errors_by_nad) and on() (((max(ise3_dataset_up{dataset=\"radius_errors\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"radius_errors\"} == 1))) == 1) and ((max(ise3_dataset_fresh{dataset=\"radius_errors\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"radius_errors\"} == 1))) == 1))) unless on(nad) (max by (nad) (ise3_network_device_assignment)), \"ops_owner\", \"unknown\", \"\", \"\"), \"location\", \"Unknown\", \"\", \"\")) > 0), \"issue\", \"Network devices with failing authentications\", \"\", \"\") or label_replace(sum(((ise3_posture_endpoints{status!~\"Compliant|compliant\",ops_owner=~\"$ops_owner\"}) and on() (((max(ise3_dataset_up{dataset=\"posture_current\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"posture_current\"} == 1))) == 1) and ((max(ise3_dataset_fresh{dataset=\"posture_current\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"posture_current\"} == 1))) == 1))) > 0), \"issue\", \"Endpoints failing posture\", \"\", \"\") or label_replace(count(((ise3_tacacs_internal_account_hygiene_risk) and on() (((max(ise3_dataset_up{dataset=\"tacacs_config\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"tacacs_config\"} == 1))) == 1) and ((max(ise3_dataset_fresh{dataset=\"tacacs_config\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"tacacs_config\"} == 1))) == 1))) > 0), \"issue\", \"TACACS accounts flagged for hygiene review\", \"\", \"\")",
           "format": "table",
           "instant": true,
           "legendFormat": "",
@@ -878,7 +878,7 @@
         "type": "prometheus",
         "uid": "${prometheus}"
       },
-      "description": "Every network device with RADIUS errors in the window, worst first. Complete \u2014 the table scrolls, so nothing is hidden below a cut-off. A single device dominating this list is a shared-secret or supplicant problem at that site, not an ISE problem.",
+      "description": "Every network device with RADIUS errors in the window, worst first, with the owner and location ISE holds for it \u2014 scoped by the Operations owner variable. Complete \u2014 the table scrolls, so nothing is hidden below a cut-off, and a device with no inventory assignment has no owner to filter by, so it is kept and shown as unknown to every owner rather than silently dropped. A single device dominating this list is a shared-secret or supplicant problem at that site, not an ISE problem.",
       "fieldConfig": {
         "defaults": {},
         "overrides": [
@@ -939,7 +939,7 @@
       },
       "gridPos": {
         "h": 8,
-        "w": 8,
+        "w": 6,
         "x": 0,
         "y": 25
       },
@@ -947,7 +947,7 @@
       "repeatDirection": "h",
       "targets": [
         {
-          "expr": "(ise3_radius_errors_by_nad) and on() (((max(ise3_dataset_up{dataset=\"radius_errors\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"radius_errors\"} == 1))) == 1) and ((max(ise3_dataset_fresh{dataset=\"radius_errors\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"radius_errors\"} == 1))) == 1))",
+          "expr": "((ise3_radius_errors_by_nad) and on() (((max(ise3_dataset_up{dataset=\"radius_errors\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"radius_errors\"} == 1))) == 1) and ((max(ise3_dataset_fresh{dataset=\"radius_errors\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"radius_errors\"} == 1))) == 1))) * on(nad) group_left(ops_owner, location) (max by (nad, ops_owner, location) (ise3_network_device_assignment{ops_owner=~\"$ops_owner\"})) or label_replace(label_replace(((ise3_radius_errors_by_nad) and on() (((max(ise3_dataset_up{dataset=\"radius_errors\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"radius_errors\"} == 1))) == 1) and ((max(ise3_dataset_fresh{dataset=\"radius_errors\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"radius_errors\"} == 1))) == 1))) unless on(nad) (max by (nad) (ise3_network_device_assignment)), \"ops_owner\", \"unknown\", \"\", \"\"), \"location\", \"Unknown\", \"\", \"\")",
           "format": "table",
           "instant": true,
           "legendFormat": "",
@@ -975,7 +975,9 @@
           "options": {
             "renameByName": {
               "Value": "Errors",
-              "nad": "Network device"
+              "location": "Location",
+              "nad": "Network device",
+              "ops_owner": "Operations owner"
             }
           }
         },
@@ -1060,8 +1062,8 @@
       },
       "gridPos": {
         "h": 8,
-        "w": 8,
-        "x": 8,
+        "w": 6,
+        "x": 6,
         "y": 25
       },
       "options": null,
@@ -1163,8 +1165,8 @@
       },
       "gridPos": {
         "h": 8,
-        "w": 8,
-        "x": 16,
+        "w": 6,
+        "x": 12,
         "y": 25
       },
       "options": null,
@@ -1219,6 +1221,109 @@
       "type": "table"
     },
     {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${prometheus}"
+      },
+      "description": "Reason codes attached to endpoints failing authorization right now, scoped by the Operations owner variable, worst first. Well-known codes are annotated with what they mean; a code this exporter cannot name is shown bare. A reason concentrated in one owner's region points at that region's device configuration or identities; the same reason spread across every owner points at policy \u2014 flip the variable between yourself and All to tell the two apart.",
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Endpoints"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "short"
+              },
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "green",
+                      "value": null
+                    },
+                    {
+                      "color": "orange",
+                      "value": 1
+                    }
+                  ]
+                }
+              },
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "mode": "basic",
+                  "type": "color-background"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 18,
+        "y": 25
+      },
+      "options": null,
+      "repeatDirection": "h",
+      "targets": [
+        {
+          "expr": "label_replace(label_replace(label_replace(label_replace(label_replace(label_replace(label_replace(label_replace(label_replace(label_replace(label_replace(label_replace(label_replace(sum by (reason_code) ((ise3_session_failure_reason_endpoints{ops_owner=~\"$ops_owner\"}) and on() (((max(ise3_dataset_up{dataset=\"session_authorization\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"session_authorization\"} == 1))) == 1) and ((max(ise3_dataset_fresh{dataset=\"session_authorization\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"session_authorization\"} == 1))) == 1))), \"reason_code\", \"12300 \u00b7 last step: proposed PEAP to the client\", \"reason_code\", \"12300\"), \"reason_code\", \"12321 \u00b7 PEAP handshake failed, client rejected the ISE certificate\", \"reason_code\", \"12321\"), \"reason_code\", \"12500 \u00b7 last step: proposed EAP-TLS to the client\", \"reason_code\", \"12500\"), \"reason_code\", \"12511 \u00b7 unexpected TLS alert, treated as client rejection\", \"reason_code\", \"12511\"), \"reason_code\", \"5400 \u00b7 authentication failed\", \"reason_code\", \"5400\"), \"reason_code\", \"5411 \u00b7 supplicant stopped responding to ISE\", \"reason_code\", \"5411\"), \"reason_code\", \"5440 \u00b7 endpoint abandoned the EAP session and started a new one\", \"reason_code\", \"5440\"), \"reason_code\", \"11007 \u00b7 could not locate network device or AAA client\", \"reason_code\", \"11007\"), \"reason_code\", \"11036 \u00b7 invalid RADIUS Message-Authenticator attribute\", \"reason_code\", \"11036\"), \"reason_code\", \"15039 \u00b7 rejected by the matched authorization profile\", \"reason_code\", \"15039\"), \"reason_code\", \"22040 \u00b7 wrong password or invalid shared secret\", \"reason_code\", \"22040\"), \"reason_code\", \"22056 \u00b7 subject not found in the identity store\", \"reason_code\", \"22056\"), \"reason_code\", \"24408 \u00b7 Active Directory authentication failed, wrong password\", \"reason_code\", \"24408\")",
+          "format": "table",
+          "instant": true,
+          "legendFormat": "",
+          "range": false,
+          "refId": "A"
+        }
+      ],
+      "title": "Failure reasons for the selected owner",
+      "transformations": [
+        {
+          "id": "filterFieldsByName",
+          "options": {
+            "exclude": {
+              "names": [
+                "Time",
+                "__name__",
+                "job",
+                "instance"
+              ]
+            }
+          }
+        },
+        {
+          "id": "organize",
+          "options": {
+            "renameByName": {
+              "Value": "Endpoints",
+              "reason_code": "Reason code"
+            }
+          }
+        },
+        {
+          "id": "sortBy",
+          "options": {
+            "sort": [
+              {
+                "desc": true,
+                "field": "Endpoints"
+              }
+            ]
+          }
+        }
+      ],
+      "transparent": false,
+      "type": "table"
+    },
+    {
       "collapsed": true,
       "gridPos": {
         "h": 1,
@@ -1245,7 +1350,7 @@
             "y": 34
           },
           "options": {
-            "content": "**Purpose** \u2014 answer, in ten seconds, whether ISE is authenticating users right now \u2014 and nothing else.\n\n**Read it in this order**\n\n1. Read the success rate. If it is green and the trust pair is 100%, ISE is serving.\n2. Read **Attention needed**. An empty table means nothing else is known to be wrong.\n3. If a row is populated, click into the dashboard named in that panel's link rather than reading further here.\n\n**When something is red**\n\n- Blank panels are not the same as zero \u2014 check **Data trustworthy** first, then the Collection pipeline dashboard.\n- A change marker (purple, orange, blue) across every graph means the exporter's view changed, not necessarily ISE.\n\n**Related dashboards** \u2014 RADIUS access, PSN service, Control plane, Collection pipeline\n\n*Owner: set this to the team that answers the page. Runbook: link it here \u2014 a red panel with no runbook is a puzzle, not an alert.*",
+            "content": "**Purpose** \u2014 answer, in ten seconds, whether ISE is authenticating users right now \u2014 and nothing else.\n\n**Read it in this order**\n\n1. Read the success rate. If it is green and the trust pair is 100%, ISE is serving.\n2. Read **Attention needed**. An empty table means nothing else is known to be wrong.\n3. If a row is populated, click into the dashboard named in that panel's link rather than reading further here.\n4. If you own a region, select yourself in the **Operations owner** variable: the failing-devices, posture, and failure-reason panels in the two lower sections become your own fix list. The **Right now** row and the platform rows stay fleet-wide.\n\n**When something is red**\n\n- Blank panels are not the same as zero \u2014 check **Data trustworthy** first, then the Collection pipeline dashboard.\n- A change marker (purple, orange, blue) across every graph means the exporter's view changed, not necessarily ISE.\n\n**Related dashboards** \u2014 RADIUS access, PSN service, Control plane, Collection pipeline\n\n*Owner: set this to the team that answers the page. Runbook: link it here \u2014 a red panel with no runbook is a puzzle, not an alert.*",
             "mode": "markdown"
           },
           "repeatDirection": "h",
@@ -1281,6 +1386,25 @@
         "query": "prometheus",
         "skipUrlSync": false,
         "type": "datasource"
+      },
+      {
+        "allValue": ".*",
+        "auto": false,
+        "auto_count": 30,
+        "auto_min": "10s",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${prometheus}"
+        },
+        "hide": 0,
+        "id": "00000000-0000-0000-0000-000000000000",
+        "includeAll": true,
+        "label": "Operations owner",
+        "multi": true,
+        "name": "ops_owner",
+        "query": "label_values(ise3_network_devices_by_ops_owner, ops_owner)",
+        "skipUrlSync": false,
+        "type": "query"
       }
     ]
   },

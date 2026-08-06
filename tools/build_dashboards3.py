@@ -1055,6 +1055,37 @@ NODE_CONNECTED = summed(
 # Tier 1 — triage
 # ---------------------------------------------------------------------------
 
+# The Operations owner variable turns the diagnosis layer of the triage page
+# into one owner's fix list. The symptom row above it stays fleet-wide: "is ISE
+# serving right now" is not an owner-scoped question.
+TRIAGE_OWNER = 'ops_owner=~"$ops_owner"'
+
+
+def owner_scoped_nad_errors():
+    """RADIUS errors per NAD, with owner and location joined on.
+
+    The assignment family is not total: network_devices publishes a row only
+    once a NAD's group detail is cached, and a NAD that MnT reports errors for
+    can be absent from ERS entirely — so a bare join would silently drop a
+    failing device. The unmatched remainder is therefore kept and labelled
+    unknown; an unowned device stays visible to every owner, because scoping it
+    to an owner nobody is would hide it from all of them. With All selected the
+    union carries every error row exactly once, so nothing changes. The
+    `max by` collapses the provider and device_type labels off the info metric
+    so the join has one row per device.
+    """
+    errors = f"({gate(metric('ise3_radius_errors_by_nad'), 'radius_errors')})"
+    owned = ("max by (nad, ops_owner, location) "
+             f"({metric('ise3_network_device_assignment', TRIAGE_OWNER)})")
+    inventoried = f"max by (nad) ({metric('ise3_network_device_assignment')})"
+    return (
+        f"{errors} * on(nad) group_left(ops_owner, location) ({owned}) "
+        "or label_replace(label_replace("
+        f"{errors} unless on(nad) ({inventoried}), "
+        '"ops_owner", "unknown", "", ""), "location", "Unknown", "", "")'
+    )
+
+
 def triage_dashboard():
     # The union that answers "is anything wrong?" before anything is read. Each
     # row counts one class of problem and says what it is, so an empty table is
@@ -1104,13 +1135,13 @@ def triage_dashboard():
         ),
         attention(
             "Network devices with failing authentications",
-            "count"
-            f"(({gate(metric('ise3_radius_errors_by_nad'), 'radius_errors')}) > 0)",
+            f"count(({owner_scoped_nad_errors()}) > 0)",
         ),
         attention(
             "Endpoints failing posture",
             "sum((" +
-            gate(metric("ise3_posture_endpoints", 'status!~"Compliant|compliant"'),
+            gate(metric("ise3_posture_endpoints",
+                        f'status!~"Compliant|compliant",{TRIAGE_OWNER}'),
                  "posture_current") +
             ") > 0)",
         ),
@@ -1206,7 +1237,9 @@ def triage_dashboard():
                 "empty table is the healthy state and needs no interpretation. "
                 "Rows sourced from ISE are suppressed while their dataset is "
                 "stale, so a fixed problem cannot keep raising an alarm from a "
-                "collection that has not refreshed yet.",
+                "collection that has not refreshed yet. The failing-devices "
+                "and posture rows respect the Operations owner variable; with "
+                "All selected they count the whole deployment.",
                 [instant(attention_needed)],
                 columns=["Count"],
                 sort=("Count", True),
@@ -1278,24 +1311,33 @@ def triage_dashboard():
 
     where = [
         sized(
-            ranked(
+            tbl(
                 "Failing network devices",
                 "Every network device with RADIUS errors in the window, worst "
-                "first. Complete — the table scrolls, so nothing is hidden "
-                "below a cut-off. A single device dominating this list is a "
+                "first, with the owner and location ISE holds for it — scoped "
+                "by the Operations owner variable. Complete — the table "
+                "scrolls, so nothing is hidden below a cut-off, and a device "
+                "with no inventory assignment has no owner to filter by, so "
+                "it is kept and shown as unknown to every owner rather than "
+                "silently dropped. A single device dominating this list is a "
                 "shared-secret or supplicant problem at that site, not an ISE "
                 "problem.",
-                gate(metric("ise3_radius_errors_by_nad"), "radius_errors"),
-                label="nad",
-                label_header="Network device",
-                header="Errors",
-                value_thresholds=NONZERO_WARNING,
-                colour_cells=True,
-                links=(drilldown("Isolate this device", "ise3-access",
-                                 nad=by_row("Network device")),),
+                [instant(owner_scoped_nad_errors())],
+                columns=["Errors"],
+                sort=("Errors", True),
+                labels={"nad": "Network device",
+                        "ops_owner": "Operations owner",
+                        "location": "Location"},
+                column_overrides=[
+                    by_column("Errors", unit="short",
+                              thresholds=NONZERO_WARNING, colour_cells=True),
+                    by_column("nad", links=[
+                        drilldown("Isolate this device", "ise3-access",
+                                  nad=by_row("Network device"))]),
+                ],
             ),
             PANEL_H,
-            THIRD,
+            QUARTER,
         ),
         sized(
             ranked(
@@ -1314,7 +1356,7 @@ def triage_dashboard():
                                  node=by_row("PSN")),),
             ),
             PANEL_H,
-            THIRD,
+            QUARTER,
         ),
         sized(
             ranked(
@@ -1333,7 +1375,32 @@ def triage_dashboard():
                 colour_cells=True,
             ),
             PANEL_H,
-            THIRD,
+            QUARTER,
+        ),
+        sized(
+            ranked(
+                "Failure reasons for the selected owner",
+                "Reason codes attached to endpoints failing authorization "
+                "right now, scoped by the Operations owner variable, worst "
+                "first." + NAMED_CODES_NOTE + " A reason concentrated in one "
+                "owner's region points at that region's device configuration "
+                "or identities; the same reason spread across every owner "
+                "points at policy — flip the variable between yourself and "
+                "All to tell the two apart.",
+                named_codes(
+                    summed(gate(metric("ise3_session_failure_reason_endpoints",
+                                       TRIAGE_OWNER),
+                                "session_authorization"),
+                           by="reason_code"),
+                    label="reason_code"),
+                label="reason_code",
+                label_header="Reason code",
+                header="Endpoints",
+                value_thresholds=NONZERO_WARNING,
+                colour_cells=True,
+            ),
+            PANEL_H,
+            QUARTER,
         ),
     ]
 
@@ -1347,6 +1414,10 @@ def triage_dashboard():
             "known to be wrong.",
             "If a row is populated, click into the dashboard named in that "
             "panel's link rather than reading further here.",
+            "If you own a region, select yourself in the **Operations owner** "
+            "variable: the failing-devices, posture, and failure-reason "
+            "panels in the two lower sections become your own fix list. The "
+            "**Right now** row and the platform rows stay fleet-wide.",
         ],
         [
             "Blank panels are not the same as zero — check **Data trustworthy** "
@@ -1370,6 +1441,14 @@ def triage_dashboard():
             ("Reference", closing, COLLAPSED),
         ],
         tier=TRIAGE,
+        variables=(
+            # Sourced from the by-owner census rather than the assignment
+            # rows so the option list stays one entry per owner. A directory
+            # that classifies nothing still yields "unknown" as an option,
+            # because classify() defaults the owner rather than omitting it.
+            label_variable("ops_owner", "Operations owner",
+                           "ise3_network_devices_by_ops_owner", "ops_owner"),
+        ),
     )
 
 
