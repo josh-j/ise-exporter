@@ -12,8 +12,10 @@ read a config and say what it would do. Here a config answers five questions:
     datasets  which are on, which source to prefer, how often, and any bound
               a dataset puts on its own breakdowns
 
-Pacing, cooldowns and timeouts are still not knobs: they fall out of the budget
-and the provider's declared cost. Row ceilings used to be in that list, as
+Pacing and cooldowns are still not knobs: they fall out of the budget and the
+provider's declared cost. The one timeout an operator can set is a heavy Data
+Connect dataset's declared ``statement_timeout`` option, because the right
+budget for a multi-hour aggregate depends on fleet size, not on the transport. Row ceilings used to be in that list, as
 module constants nobody could see -- and three of them silently contradicted
 each other until ``tacacs_activity`` stopped publishing at the declared scale.
 They are derived from ``[scale]`` now and shown in ``[limits]``, because a

@@ -41,8 +41,12 @@ def test_fetch_publishes_totals_dimensions_duration_and_coverage():
             }
         }
 
-        def query_many(self, statements):
+        def query_many(self, statements, *, timeout=None):
             assert set(statements) == {"totals", "marginals"}
+            # The accounting aggregates are the heaviest reads this exporter
+            # issues; the dataset must declare the wider statement budget.
+            assert timeout == radius_accounting.DATASET.option(
+                "statement_timeout").default == 45
             return {
                 "totals": [{
                     "starts": 10,
@@ -77,6 +81,9 @@ def test_fetch_publishes_totals_dimensions_duration_and_coverage():
 
         def __init__(self):
             self.samples = []
+
+        def option(self, name):
+            return radius_accounting.DATASET.option(name).default
 
         def set(self, family, sample_value, /, **labels):
             self.samples.append((family._name, sample_value, labels))
@@ -118,7 +125,7 @@ def test_the_always_null_policy_dimension_is_withheld_rather_than_published():
             "TIMESTAMP", "ACCT_STATUS_TYPE", "DEVICE_NAME", "ISE_NODE",
             "AUTHORIZATION_POLICY"}}
 
-        def query_many(self, statements):
+        def query_many(self, statements, *, timeout=None):
             return {
                 "totals": [{"starts": 338, "stops": 32, "other": 0,
                             "duration_samples": 4, "records": 370}],
@@ -140,6 +147,9 @@ def test_the_always_null_policy_dimension_is_withheld_rather_than_published():
         def __init__(self):
             self.samples = []
             self.shared = []
+
+        def option(self, name):
+            return radius_accounting.DATASET.option(name).default
 
         def set(self, family, sample_value, /, **labels):
             self.samples.append((family._name, sample_value, labels))

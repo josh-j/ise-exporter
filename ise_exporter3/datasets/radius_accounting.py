@@ -44,6 +44,11 @@ window_seconds = Gauge(
 _METRICS = (events, session_duration, duration_coverage, window_seconds)
 VIEW = "radius_accounting"
 
+# Aggregating a multi-hour accounting window is among the heaviest reads this
+# exporter issues; see reporting.statement_timeout_option for why the widened
+# budget is a declared option rather than a constant.
+OPTIONS = (reporting.statement_timeout_option(45),)
+
 
 def _has(schema, column):
     columns = None if schema is None else schema.get(VIEW.upper())
@@ -139,7 +144,9 @@ def _publish(ctx, dimension, value, row):
 def fetch(ctx):
     hours = reporting.scan_window(ctx)
     schema = getattr(ctx.transport, "schema", None)
-    results = ctx.transport.query_many(statements(hours, ctx.limits, schema))
+    results = ctx.transport.query_many(
+        statements(hours, ctx.limits, schema),
+        timeout=ctx.option("statement_timeout"))
     ctx.set(window_seconds, hours * 3600)
 
     for row in results.get("totals", []):
@@ -162,6 +169,7 @@ DATASET = Dataset(
     default_interval=1800,
     windowed=True,
     metrics=_METRICS,
+    options=OPTIONS,
     providers=(
         Provider(
             name="dataconnect",

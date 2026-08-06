@@ -83,6 +83,13 @@ VIEW_BATCHES = (
 # drops below its declared sync delay.
 SYNC_DELAY_FLOOR_SECONDS = {"endpoints_data": 12 * 3600}
 
+# batch_0 carries the three highest-volume radius history views and shares the
+# appliance with the heavy reporting reads this probe exists to diagnose, so
+# its MAX() aggregates were observed exceeding the transport's default attempt
+# budget in production. Each statement gets its own deadline; a slow batch_0
+# cannot spend the budget of the batches behind it.
+OPTIONS = (reporting.statement_timeout_option(30),)
+
 
 def _branch(view, column):
     # The age is deliberately NOT taken under a window predicate. Computing the
@@ -112,7 +119,8 @@ def statements():
 
 def fetch(ctx):
     window = reporting.scan_window(ctx) * 3600
-    results, errors = ctx.transport.query_many(statements(), tolerant=True)
+    results, errors = ctx.transport.query_many(
+        statements(), tolerant=True, timeout=ctx.option("statement_timeout"))
     if not results:
         # Nothing answered, so there is no partial verdict to publish; the
         # first classified error names why for the failure detail.
@@ -144,6 +152,7 @@ DATASET = Dataset(
     default_interval=3600,
     windowed=True,
     metrics=_METRICS,
+    options=OPTIONS,
     providers=(
         Provider(
             name="dataconnect",

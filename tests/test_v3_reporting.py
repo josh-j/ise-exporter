@@ -17,6 +17,7 @@ from ise_exporter3.datasets import (
     radius_accounting,
     radius_errors,
     radius_reporting,
+    source_freshness,
     tacacs_activity,
 )
 
@@ -253,6 +254,13 @@ class _DimensionCtx:
     def set_shared(self, family, sample_value, /, **labels):
         self.shared.append((family._name, sample_value, labels))
 
+    def option(self, name):
+        # Resolve against the real declaration, as the runtime context does.
+        for module in REPORTING_DATASETS + (source_freshness,):
+            if module.DATASET.name == self.dataset.name:
+                return module.DATASET.option(name).default
+        raise AssertionError(f"no declared dataset named {self.dataset.name!r}")
+
 
 def test_a_dimension_that_is_null_on_every_row_is_withheld_not_published():
     # ISE 3.3 P11 carries four of these: the column exists, passes every schema
@@ -350,7 +358,7 @@ def test_a_stale_view_publishes_an_age_and_an_empty_one_does_not():
     from ise_exporter3.datasets import source_freshness
 
     class Transport:
-        def query_many(self, statements, *, tolerant=False):
+        def query_many(self, statements, *, tolerant=False, timeout=None):
             assert tolerant
             return {"batch_0": [
                 # Four days stale on the appliance, but it does hold rows.
@@ -395,7 +403,7 @@ def test_endpoints_data_recency_respects_the_documented_sync_delay():
     # different verdicts, and the probe must not report the documented sync
     # as an outage.
     class Transport:
-        def query_many(self, statements, *, tolerant=False):
+        def query_many(self, statements, *, tolerant=False, timeout=None):
             return {"batch_1": [
                 {"view_name": "endpoints_data", "has_rows": 1,
                  "age_seconds": 8 * 3600},
@@ -415,7 +423,8 @@ def test_endpoints_data_recency_respects_the_documented_sync_delay():
     # Beyond even the documented sync delay, stale is stale.
     ctx = _DimensionCtx("source_freshness")
     ctx.interval = 21600
-    ctx.transport = type("T", (), {"query_many": lambda self, s, tolerant=False: (
+    ctx.transport = type("T", (), {
+        "query_many": lambda self, s, tolerant=False, timeout=None: (
         {"batch_1": [{"view_name": "endpoints_data", "has_rows": 1,
                       "age_seconds": 14 * 3600}]}, {})})()
     source_freshness.fetch(ctx)
@@ -432,7 +441,7 @@ def test_a_slow_view_silences_only_its_own_batch():
     # needed. The views the failed statements carried are named by probed=0
     # and publish no freshness facts -- unknown, not missing.
     class Transport:
-        def query_many(self, statements, *, tolerant=False):
+        def query_many(self, statements, *, tolerant=False, timeout=None):
             assert tolerant
             return (
                 {"batch_2": [
@@ -464,7 +473,7 @@ def test_a_probe_where_nothing_answered_fails_with_a_classified_reason():
     from ise_exporter3.transports import TransportError
 
     class Transport:
-        def query_many(self, statements, *, tolerant=False):
+        def query_many(self, statements, *, tolerant=False, timeout=None):
             return {}, {name: TransportError("timeout") for name in statements}
 
     ctx = _DimensionCtx("source_freshness")

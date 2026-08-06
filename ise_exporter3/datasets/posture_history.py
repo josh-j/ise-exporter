@@ -168,9 +168,17 @@ def statements(hours, limits):
     }
 
 
+# The assessment scan is the single most expensive declared statement
+# (db_seconds=12.0); see reporting.statement_timeout_option for why the
+# widened budget is a declared option rather than a constant.
+OPTIONS = (reporting.statement_timeout_option(30),)
+
+
 def fetch(ctx):
     hours = reporting.scan_window(ctx)
-    results = ctx.transport.query_many(statements(hours, ctx.limits))
+    results = ctx.transport.query_many(
+        statements(hours, ctx.limits),
+        timeout=ctx.option("statement_timeout"))
 
     pairs = results.get("policy_status", [])
     reporting.publish_truncation(ctx, "policy_status", pairs)
@@ -236,6 +244,7 @@ DATASET = Dataset(
     default_interval=3600,
     windowed=True,
     metrics=_METRICS,
+    options=OPTIONS,
     providers=(
         Provider(
             name="dataconnect",

@@ -23,7 +23,12 @@ from prometheus_client import Gauge
 
 from . import snapshots, telemetry
 from .labels import label
+from .model import Option
 from .parsing import finite
+from .transports.dataconnect import (
+    MAX_QUERY_TIMEOUT_SECONDS,
+    QUERY_TIMEOUT_SECONDS,
+)
 
 
 # Shared across every dataset that publishes marginals, like the coverage
@@ -57,6 +62,25 @@ def scan_window(ctx):
     interval = max(int(getattr(ctx, "interval", 0) or 0),
                    int(ctx.dataset.default_interval))
     return window_hours(interval, ctx.limits)
+
+
+def statement_timeout_option(default):
+    """The declared per-statement Data Connect budget for one heavy dataset.
+
+    Heavy aggregates exceed the transport's default attempt budget in
+    production (DPY-4024), and a timeout denies the whole dataset rather than
+    degrading a dimension. The widened budget is an operator-visible decision:
+    the cooldown charges whatever the statement really spent. The bounds are
+    the transport's own, so a declared value is never silently re-clamped.
+    """
+    return Option(
+        name="statement_timeout",
+        default=default,
+        minimum=QUERY_TIMEOUT_SECONDS,
+        maximum=MAX_QUERY_TIMEOUT_SECONDS,
+        description="seconds one Data Connect statement may spend before its "
+                    "attempt is abandoned and the dataset reports a timeout",
+    )
 
 
 def recent(column, hours, limits):

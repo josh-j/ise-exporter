@@ -223,10 +223,18 @@ def _publish_outcomes(ctx, grouped, gauges):
                     status="failed", **{label_name: value})
 
 
+# Multi-hour scans over the largest RADIUS history view run in the same class
+# as radius_accounting; see reporting.statement_timeout_option for why the
+# widened budget is a declared option rather than a constant.
+OPTIONS = (reporting.statement_timeout_option(30),)
+
+
 def fetch(ctx):
     hours = reporting.scan_window(ctx)
     schema = getattr(ctx.transport, "schema", None)
-    results = ctx.transport.query_many(statements(hours, ctx.limits, schema))
+    results = ctx.transport.query_many(
+        statements(hours, ctx.limits, schema),
+        timeout=ctx.option("statement_timeout"))
     ctx.set(window_seconds, hours * 3600)
 
     for row in results.get("totals", []):
@@ -295,6 +303,7 @@ DATASET = Dataset(
     default_interval=1800,
     windowed=True,
     metrics=_METRICS,
+    options=OPTIONS,
     providers=(
         Provider(
             name="dataconnect",

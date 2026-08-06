@@ -55,7 +55,9 @@ def test_fetch_publishes_failure_marginals_correlation_and_repeat_auth_inputs():
             },
         }
 
-        def query_many(self, statements):
+        def query_many(self, statements, *, timeout=None):
+            assert timeout == radius_reporting.DATASET.option(
+                "statement_timeout").default == 30
             assert set(statements) == {
                 "totals",
                 "summary_marginals",
@@ -102,6 +104,9 @@ def test_fetch_publishes_failure_marginals_correlation_and_repeat_auth_inputs():
         def __init__(self):
             self.samples = []
 
+        def option(self, name):
+            return radius_reporting.DATASET.option(name).default
+
         def set(self, family, sample_value, /, **labels):
             self.samples.append((family._name, sample_value, labels))
 
@@ -135,7 +140,9 @@ def test_the_always_null_security_group_dimension_is_withheld():
     class Transport:
         schema = None
 
-        def query_many(self, statements):
+        def query_many(self, statements, *, timeout=None):
+            assert timeout == radius_reporting.DATASET.option(
+                "statement_timeout").default == 30
             return {
                 "totals": [{"passed": 322, "failed": 62}],
                 "summary_marginals": [
@@ -164,6 +171,9 @@ def test_the_always_null_security_group_dimension_is_withheld():
         def __init__(self):
             self.samples = []
             self.shared = []
+
+        def option(self, name):
+            return radius_reporting.DATASET.option(name).default
 
         def set(self, family, sample_value, /, **labels):
             self.samples.append((family._name, sample_value, labels))

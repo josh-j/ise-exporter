@@ -241,6 +241,12 @@ interval = "6h"
 providers = ["pxgrid", "mnt", "dataconnect"]
 interval = "5m"
 
+# Only the Data Connect fallback reads Oracle, and its accounting
+# reconstruction is the costliest statement this dataset can issue; the budget
+# is the same declared `statement_timeout` the reporting datasets carry below.
+[datasets.active_sessions.options]
+statement_timeout = 45
+
 # Per-endpoint policy set, authorization rule, profile and method. MnT-only:
 # nothing else carries the per-session authorization detail. This is the single
 # largest consumer of the MnT budget, and its interval is the lever -- one fetch
@@ -314,6 +320,16 @@ interval = "6h"
 [datasets.radius_reporting]
 interval = "30m"
 
+# The heavy Data Connect datasets declare how long one statement may run before
+# the attempt is abandoned (`statement_timeout`, seconds). Production aggregates
+# over multi-hour windows exceed the transport's 15s default attempt budget
+# (DPY-4024), and a timeout denies the whole dataset rather than degrading one
+# dimension. The transport clamps to its 60s ceiling; the cooldown charges
+# whatever the statement really spent, so widening this trades duty cycle for
+# completeness. `plan` prints the value.
+[datasets.radius_reporting.options]
+statement_timeout = 30
+
 # Authentication failures broken out by reason and offender. Separate from
 # radius_reporting so a failure panel can run at its own cadence.
 [datasets.radius_errors]
@@ -326,11 +342,19 @@ interval = "30m"
 # operator shift. The 12-second declared query cost still fits hourly.
 interval = "1h"
 
+[datasets.posture_history.options]
+statement_timeout = 30
+
 [datasets.radius_accounting]
 # Accounting is event history, not the current-session directory. It supplies
 # start/stop volume, per-NAD and per-PSN accounting, and completed-session
 # duration without changing what `active_sessions` means.
 interval = "30m"
+
+# The multi-hour accounting aggregate is the heaviest read the exporter issues,
+# so it carries the widest declared statement budget.
+[datasets.radius_accounting.options]
+statement_timeout = 45
 
 [datasets.nad_health]
 interval = "6h"
@@ -352,6 +376,11 @@ interval = "10m"
 
 [datasets.source_freshness]
 interval = "1h"
+
+# The probe's MAX() batches share the appliance with the heavy reporting reads
+# it exists to diagnose, so its statements get their own declared budget too.
+[datasets.source_freshness.options]
+statement_timeout = 30
 
 # TACACS activity has two large dimensions -- one group per Device Admin account
 # and one per device doing Device Admin -- so it is the one dataset whose device
