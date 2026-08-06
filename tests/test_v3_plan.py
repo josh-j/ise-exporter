@@ -421,7 +421,7 @@ def test_plan_is_json_serialisable_for_the_operator_api():
     assert active["provider"] == "pxgrid"
     assert active["streaming"] is True
     assert active["alternatives"] == ["mnt", "dataconnect"]
-    assert "posture_status" in active["supplies"]
+    assert "psn" in active["supplies"]
 
 
 def test_rendered_report_states_the_source_the_cost_and_the_verdict():

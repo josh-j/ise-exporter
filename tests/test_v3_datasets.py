@@ -502,6 +502,173 @@ def test_an_empty_active_list_publishes_a_psn_zero_state():
             {"psn": "No active sessions"}) in published
 
 
+def test_active_sessions_pxgrid_counts_sessions_per_serving_node():
+    # The production regression: pxGrid is the preferred provider, and a commit
+    # clears every family the dataset declares, so a pxgrid fetch that never
+    # wrote by_psn left the per-PSN panels permanently empty wherever pxGrid
+    # was healthy. The session record does name its serving node -- the
+    # `providers` list, with "None" standing in for nothing, and scalar
+    # spellings on other releases -- so the breakdown must come from here too.
+    from types import SimpleNamespace
+
+    from ise_exporter3 import nad_directory
+    from ise_exporter3.datasets import active_sessions
+
+    nad_directory.shared().replace([])
+    sessions = [
+        {"macAddress": "00:11:22:33:44:55", "nasIpAddress": "10.200.40.12",
+         "providers": ["laba-ise-001"]},
+        {"macAddress": "00:11:22:33:44:56", "nasIpAddress": "10.200.40.12",
+         "providers": ["None"], "psnName": "laba-ise-002"},
+        {"macAddress": "00:11:22:33:44:57", "nasIpAddress": "10.200.40.99",
+         "providers": ["laba-ise-001"]},
+    ]
+
+    published = []
+    ctx = SimpleNamespace(
+        interval=300,
+        transport=SimpleNamespace(get_sessions=lambda *, max_age: sessions),
+        set=lambda family, value, /, **labels: published.append(
+            (family._name, value, labels)))
+    active_sessions.fetch_pxgrid(ctx)
+
+    by_psn = {labels["psn"]: value for name, value, labels in published
+              if name == "ise3_active_sessions_by_psn"}
+    assert by_psn == {"laba-ise-001": 2, "laba-ise-002": 1}
+
+
+def test_an_empty_pxgrid_baseline_publishes_the_same_psn_zero_state():
+    # Empty-vs-failed must read the same whichever provider is active: a quiet
+    # deployment on pxGrid gets the explicit zero, not the blank of a broken
+    # collector.
+    from types import SimpleNamespace
+
+    from ise_exporter3.datasets import active_sessions
+
+    published = []
+    ctx = SimpleNamespace(
+        interval=300,
+        transport=SimpleNamespace(get_sessions=lambda *, max_age: []),
+        set=lambda family, value, /, **labels: published.append(
+            (family._name, value, labels)))
+
+    active_sessions.fetch_pxgrid(ctx)
+
+    assert ("ise3_active_sessions_by_psn", 0,
+            {"psn": "No active sessions"}) in published
+
+
+def _dataconnect_limits():
+    from ise_exporter3 import limits as limits_module
+    from ise_exporter3.model import Scale
+
+    return limits_module.for_scale(
+        Scale(nads=5_000, endpoints=100_000, sessions=20_000, accounts=1_000))
+
+
+def _dataconnect_ctx(transport):
+    from types import SimpleNamespace
+
+    published, shared = [], []
+    return SimpleNamespace(
+        interval=300,
+        dataset=SimpleNamespace(name="active_sessions", default_interval=300),
+        limits=_dataconnect_limits(),
+        transport=transport,
+        option=lambda name: {"statement_timeout": 45}[name],
+        set=lambda family, value, /, **labels: published.append(
+            (family._name, value, labels)),
+        set_shared=lambda family, value, /, **labels: shared.append(
+            (family._name, value, labels)),
+        published=published,
+        shared=shared)
+
+
+def test_active_sessions_dataconnect_dedupes_and_bounds_the_accounting_scan():
+    # The reconstruction rule in one statement: latest record per session id
+    # and calling station over the stale window, live means not a stop, and
+    # every breakdown comes from that single pass under the group ceiling.
+    from ise_exporter3.datasets import active_sessions
+
+    sql = active_sessions.statement(1, _dataconnect_limits())
+    assert "ROW_NUMBER() OVER" in sql
+    assert "COALESCE(acct_session_id, session_id), calling_station_id" in sql
+    assert "NOT LIKE '%STOP%'" in sql
+    assert "GROUPING SETS ((psn), (nad), ())" in sql
+    assert "NUMTODSINTERVAL(1, 'HOUR')" in sql
+    assert "FETCH FIRST" in sql and "COUNT(*) OVER ()" in sql
+
+
+def test_active_sessions_dataconnect_reconstructs_the_three_breakdowns():
+    from ise_exporter3 import nad_directory
+    from ise_exporter3.datasets import active_sessions
+
+    nad_directory.shared().replace([{
+        "nad": "campus-corp-wired", "location": "Ramstein",
+        "ops_owner": "Network Team", "keys": ("10.200.40.12",)}])
+
+    rows = [
+        {"dimension": "total", "value": "all", "sessions": 3, "endpoints": 2,
+         "nas_ip": None, "group_total": 5},
+        {"dimension": "psn", "value": "laba-ise-001", "sessions": 2,
+         "endpoints": 2, "nas_ip": None, "group_total": 5},
+        {"dimension": "psn", "value": "laba-ise-002", "sessions": 1,
+         "endpoints": 1, "nas_ip": None, "group_total": 5},
+        {"dimension": "nad", "value": "sw-campus-1", "sessions": 2,
+         "endpoints": 2, "nas_ip": "10.200.40.12", "group_total": 5},
+        {"dimension": "nad", "value": "10.200.40.99", "sessions": 1,
+         "endpoints": 1, "nas_ip": "10.200.40.99", "group_total": 5},
+    ]
+
+    class Transport:
+        schema = None
+
+        def query_many(self, statements, *, timeout=None):
+            assert set(statements) == {"sessions"}
+            # The costliest recurring statement in v2: the dataset must pass
+            # its declared statement budget through to the transport.
+            assert timeout == 45
+            return {"sessions": rows}
+
+    ctx = _dataconnect_ctx(Transport())
+    active_sessions.fetch_dataconnect(ctx)
+
+    assert ("ise3_active_sessions_total", 3.0, {}) in ctx.published
+    assert ("ise3_active_session_endpoints", 2.0, {}) in ctx.published
+    by_psn = {labels["psn"]: value for name, value, labels in ctx.published
+              if name == "ise3_active_sessions_by_psn"}
+    assert by_psn == {"laba-ise-001": 2.0, "laba-ise-002": 1.0}
+    by_nad = {tuple(sorted(labels.items())): value
+              for name, value, labels in ctx.published
+              if name == "ise3_active_sessions_by_nad"}
+    # Attributed through the NAS address the group carries, like the other
+    # providers; unresolved devices are published as themselves.
+    assert by_nad[(("location", "Ramstein"), ("nad", "campus-corp-wired"))] == 2.0
+    assert by_nad[(("location", "Unknown"), ("nad", "10.200.40.99"))] == 1.0
+
+
+def test_an_empty_accounting_window_publishes_the_same_psn_zero_state():
+    # A healthy empty window comes back as the lone zero total row the empty
+    # grouping set produces (or as no rows at all); either way the zero
+    # sentinel keeps it distinct from a failed collector.
+    from ise_exporter3.datasets import active_sessions
+
+    class Transport:
+        schema = None
+
+        def query_many(self, statements, *, timeout=None):
+            return {"sessions": [{
+                "dimension": "total", "value": "all", "sessions": 0,
+                "endpoints": 0, "nas_ip": None, "group_total": 1}]}
+
+    ctx = _dataconnect_ctx(Transport())
+    active_sessions.fetch_dataconnect(ctx)
+
+    assert ("ise3_active_sessions_total", 0.0, {}) in ctx.published
+    assert ("ise3_active_sessions_by_psn", 0,
+            {"psn": "No active sessions"}) in ctx.published
+
+
 def test_an_empty_active_list_publishes_current_posture_zero_states():
     from types import SimpleNamespace
 
