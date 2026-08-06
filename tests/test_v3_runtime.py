@@ -267,6 +267,96 @@ def test_telemetry_publishes_the_plan_including_rejected_providers():
     assert _sample("ise3_load_planned_requests_per_hour", target="mnt") > 0
 
 
+# Everything below asserts the same defect from three angles: a labelled
+# counter with no children exports no samples at all, so until its first event
+# a family reads on a dashboard as an absent exporter rather than as zero
+# events. Publishing the plan must therefore seed a zero-valued child for every
+# combination the resolved plan can actually increment -- and no others. The
+# registry is process-global, so a test earlier in the run may already have
+# counted real events into a child; seeding must then leave that count alone,
+# which is why each test captures the value first and asserts "present, and
+# exactly what it was -- or exactly zero".
+
+
+def _full_config():
+    return Config.from_document(
+        {"profile": "production",
+         "targets": {
+             "pan": {"host": "pan1", "user": "ro"},
+             "mnt": {"host": "mnt1"},
+             "oracle": {"host": "mnt1", "user": "dataconnect",
+                        "service": "cpm10"},
+             "pxgrid": {"host": "px1", "node_name": "ise-exporter"},
+         }},
+        path="test.toml",
+        environ={"ISE_PASS": "secret",
+                 "ISE_DATACONNECT_PASSWORD": "secret",
+                 "ISE_PXGRID_PASSWORD": "secret"})
+
+
+def test_publishing_the_plan_seeds_the_measured_load_counters():
+    from ise_exporter3.plan import build_plan
+
+    request_targets = ("pan", "mnt", "pxgrid")
+    before = {target: _sample("ise3_load_measured_requests_total", target=target)
+              for target in request_targets}
+    oracle_before = _sample("ise3_load_measured_db_seconds_total",
+                            target="oracle")
+    telemetry.publish_plan(build_plan(_full_config()))
+    for target in request_targets:
+        assert _sample("ise3_load_measured_requests_total",
+                       target=target) == (before[target] or 0.0)
+    # Data Connect load is measured in database seconds, not requests, so the
+    # oracle target gets a seed in that family and never a requests series.
+    assert _sample("ise3_load_measured_db_seconds_total",
+                   target="oracle") == (oracle_before or 0.0)
+    assert _sample("ise3_load_measured_requests_total", target="oracle") is None
+
+
+def test_publishing_the_plan_seeds_a_zero_per_planned_dataconnect_view():
+    from ise_exporter3.plan import build_plan
+
+    plan = build_plan(_full_config())
+    views = {requirement[len("view:"):].lower()
+             for entry in plan.entries
+             if entry.enabled and entry.resolved
+             and entry.provider.target == "oracle"
+             for requirement in entry.provider.requires
+             if str(requirement).startswith("view:")}
+    assert views, "this config was meant to plan Data Connect work"
+    before = {(view, result): _sample("ise3_dataconnect_queries_total",
+                                      view=view, result=result)
+              for view in views for result in ("success", "error")}
+    telemetry.publish_plan(plan)
+    for (view, result), prior in before.items():
+        assert _sample("ise3_dataconnect_queries_total",
+                       view=view, result=result) == (prior or 0.0)
+
+
+def test_publishing_the_plan_seeds_detail_fetch_outcomes_for_resolved_caches():
+    from ise_exporter3 import detail_cache
+    from ise_exporter3.plan import build_plan
+
+    plan = build_plan(_full_config())
+    resolved = {(entry.name, entry.provider.name)
+                for entry in plan.entries if entry.enabled and entry.resolved}
+    # The pairs the seed table keys on must be ones this plan really produces,
+    # or the loop below would pass by testing nothing.
+    assert ("session_authorization", "mnt") in resolved
+    assert ("network_devices", "ers") in resolved
+    expected = [(cache, result)
+                for cache, tickers, results in detail_cache.FETCH_OUTCOMES
+                if any(pair in resolved for pair in tickers)
+                for result in results]
+    before = {pair: _sample("ise3_detail_fetches_total",
+                            cache=pair[0], result=pair[1])
+              for pair in expected}
+    telemetry.publish_plan(plan)
+    for (cache, result), prior in before.items():
+        assert _sample("ise3_detail_fetches_total",
+                       cache=cache, result=result) == (prior or 0.0)
+
+
 def test_coverage_is_rolled_back_with_the_snapshot_it_describes():
     # publish_coverage wrote straight to the registry, so a failure after it --
     # a normalisation error, or the sample ceiling tripping on commit -- left

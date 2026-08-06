@@ -1,5 +1,6 @@
 """End to end: a real listener, a real scrape, real dataset series."""
 import gzip
+import re
 import struct
 import urllib.error
 import urllib.request
@@ -31,6 +32,17 @@ def _get(url):
         return response.status, response.read().decode("utf-8")
 
 
+def _sample(body, name, selector=""):
+    """A real sample line: name, optional labels, then a value.
+
+    A family that exports only its # HELP and # TYPE header satisfies a bare
+    substring check while rendering as no-data on every dashboard -- which is
+    exactly how the measured-load counters shipped invisible.
+    """
+    labels = re.escape(selector) if selector else r"(?:\{[^}]*\})?"
+    return re.search(rf"^{re.escape(name)}{labels} \S+$", body, re.MULTILINE)
+
+
 def test_metrics_are_served_after_a_collection(served):
     server, base = served
     config = Config.from_document(
@@ -47,8 +59,17 @@ def test_metrics_are_served_after_a_collection(served):
     assert 'ise3_deployment_pan_ha_enabled{provider="openapi"} 1.0' in body
     assert 'ise3_dataset_up{dataset="deployment",provider="openapi"} 1.0' in body
     assert 'ise3_dataset_provider_active{dataset="deployment",provider="openapi"} 1.0' in body
-    assert "ise3_load_planned_requests_per_hour" in body
-    assert "ise3_load_measured_requests_total" in body
+    assert _sample(body, "ise3_load_planned_requests_per_hour")
+    # A sample, not just the family header: the measured counter has no events
+    # yet, so this line only exists because publishing the plan seeded it, and
+    # it must survive the snapshot commit that produced the scrape above.
+    assert _sample(body, "ise3_load_measured_requests_total",
+                   '{target="pan"}')
+    # Same fact for the detail-fetch counter: network_devices resolved to ERS
+    # on the configured pan target, so its outcomes are seeded even though no
+    # fetch has happened, and the snapshot commits above must not clear them.
+    assert _sample(body, "ise3_detail_fetches_total",
+                   '{cache="ers_network_device",result="fetched"}')
 
 
 def test_a_route_handler_is_given_the_parsed_query_string():

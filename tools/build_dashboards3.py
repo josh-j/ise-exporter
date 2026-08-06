@@ -4232,8 +4232,14 @@ def pipeline_dashboard():
                     query(f"sum(rate("
                           f"{metric('ise3_api_requests_total')}[$__rate_interval]))",
                           "requests"),
+                    # The error counter's label space (error_type x http_code)
+                    # is unbounded, so it is never seeded at startup and has no
+                    # series until the first error. `or vector(0)` renders that
+                    # absence as an explicit zero line -- otherwise the
+                    # healthiest state this panel can show reads as "no data".
                     query(f"sum(rate("
-                          f"{metric('ise3_api_errors_total')}[$__rate_interval]))",
+                          f"{metric('ise3_api_errors_total')}[$__rate_interval])) "
+                          f"or vector(0)",
                           "errors", ref="B"),
                 ],
                 unit="reqps",

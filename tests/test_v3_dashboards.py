@@ -622,14 +622,27 @@ def test_the_pipeline_dashboard_answers_which_provider_is_live():
     assert "ise3_dataset_provider_available" in body
 
 
+def _queried_metrics(name):
+    """Metric names referenced by an actual query expression in a dashboard.
+
+    A substring check on the raw JSON is satisfied by a panel description that
+    merely mentions the metric; the contract these tests state is that a query
+    reads it.
+    """
+    queried = set()
+    for _panel, target in _targets(_dashboard(name)):
+        queried.update(METRIC_NAME.findall(target.get("expr", "")))
+    return queried
+
+
 def test_the_load_dashboard_compares_planned_against_measured():
     # Cost declarations are the one thing in this design that can quietly lie,
     # so the panel that catches them is not optional.
-    body = (DASHBOARDS / "ise3-load.json").read_text()
-    assert "ise3_load_planned_requests_per_hour" in body
-    assert "ise3_load_measured_requests_total" in body
-    assert "ise3_load_measured_db_seconds_total" in body
-    assert "ise3_load_budget_utilisation" in body
+    queried = _queried_metrics("ise3-load.json")
+    assert "ise3_load_planned_requests_per_hour" in queried
+    assert "ise3_load_measured_requests_total" in queried
+    assert "ise3_load_measured_db_seconds_total" in queried
+    assert "ise3_load_budget_utilisation" in queried
 
 
 def test_the_pipeline_dashboard_states_what_it_had_to_truncate():

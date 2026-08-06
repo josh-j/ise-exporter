@@ -11,6 +11,8 @@ this design cannot catch by construction.
 """
 from prometheus_client import Counter, Gauge, Histogram
 
+from . import detail_cache
+
 
 # --- identity ---
 exporter_build_info = Gauge(
@@ -236,8 +238,55 @@ def _reason_slug(text):
     return slug[:96] or "unavailable"
 
 
+def _seed_event_counters(plan):
+    """Give every event counter this plan can increment a zero-valued child.
+
+    A labelled counter with no children exports no samples at all, so until the
+    first event arrives these families are indistinguishable on a dashboard
+    from an exporter that is not running. Zero rather than absent: "nothing has
+    happened yet" and "nobody is counting" are different facts, and only one of
+    them is reassuring. Only children the resolved plan can actually increment
+    are created -- a zero for a target this deployment never talks to would be
+    a promise, not a fact. ``api_errors_total`` is deliberately not here: its
+    error_type x http_code space is unbounded, so the dashboards degrade it to
+    an explicit zero instead.
+    """
+    for target in plan.targets:
+        if not plan.config.targets[target.target].configured:
+            continue
+        # Load on Data Connect is measured in database seconds, not requests;
+        # each transport only ever increments one of the two for its target.
+        if target.target == "oracle":
+            load_measured_db_seconds_total.labels(target=target.target)
+        else:
+            load_measured_requests_total.labels(target=target.target)
+
+    for entry in plan.entries:
+        if not (entry.enabled and entry.resolved):
+            continue
+        if entry.provider.target != "oracle":
+            continue
+        # A Data Connect provider names the views it reads in ``requires``, and
+        # the transport labels its statement counter with the same name,
+        # lowercased (transports.dataconnect.view_of). Both results, because a
+        # panel split by result needs the failure series at zero to say
+        # "no failures" rather than nothing.
+        for requirement in entry.provider.requires:
+            name = str(requirement)
+            if not name.startswith("view:"):
+                continue
+            view = name[len("view:"):].lower()
+            for result in ("success", "error"):
+                dataconnect_queries_total.labels(view=view, result=result)
+
+    detail_cache.seed(
+        {(entry.name, entry.provider.name)
+         for entry in plan.entries if entry.enabled and entry.resolved})
+
+
 def publish_plan(plan):
     """Export the planned load and provider selection for a resolved plan."""
+    _seed_event_counters(plan)
     for target in plan.targets:
         labels = {"target": target.target}
         load_planned_requests_per_hour.labels(**labels).set(

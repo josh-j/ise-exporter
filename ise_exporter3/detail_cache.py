@@ -121,6 +121,47 @@ class DetailCache:
         fetches_total.labels(cache=self.name, result=result).inc()
 
 
+# A cache's fetch counter only gains a child when its first fetch resolves, and
+# a labelled family with no children exports no samples at all -- so a cache
+# that has simply not fetched anything yet reads on a dashboard exactly like an
+# exporter that is down. Seeding the children at startup makes "zero fetches so
+# far" a visible fact. The table names, per cache, the (dataset, provider)
+# pairs whose call sites tick it and the bounded result vocabulary those sites
+# can emit; grep the dataset for ``cache.count(`` when changing either side.
+FETCH_OUTCOMES = (
+    ("mnt_active_list",
+     (("session_authorization", "mnt"), ("posture_current", "mnt")),
+     ("cache_hit", "fetched")),
+    ("mnt_session_detail",
+     (("session_authorization", "mnt"),),
+     ("fetched", "empty", "gone", "failed", "invalid")),
+    ("ers_network_device",
+     (("network_devices", "ers"),),
+     ("fetched", "empty", "failed", "inline")),
+    ("ers_tacacs_user",
+     (("tacacs_config", "ers"),),
+     ("fetched", "empty", "failed")),
+    ("openapi_tacacs_policy_rules",
+     (("tacacs_policy_rules", "openapi"),),
+     ("fetched", "empty", "failed")),
+)
+
+
+def seed(resolved):
+    """Create zero-valued fetch children for the caches this plan will use.
+
+    ``resolved`` is the set of ``(dataset, provider)`` name pairs the plan
+    settled on. A cache is seeded when any dataset that ticks it resolved to
+    the provider that does the ticking, and only with the results its call
+    sites can produce: a zero for an outcome no code path emits would promise
+    a distinction this deployment cannot make.
+    """
+    for cache, tickers, results in FETCH_OUTCOMES:
+        if any(pair in resolved for pair in tickers):
+            for result in results:
+                fetches_total.labels(cache=cache, result=result)
+
+
 # One cache per process, keyed by name. Datasets that draw on the same fan-out
 # share an instance, which is also why they share a cost pool: one fetch answers
 # all of them.

@@ -1766,7 +1766,7 @@
               "refId": "A"
             },
             {
-              "expr": "sum(rate(ise3_api_errors_total[$__rate_interval]))",
+              "expr": "sum(rate(ise3_api_errors_total[$__rate_interval])) or vector(0)",
               "instant": false,
               "legendFormat": "errors",
               "range": true,
