@@ -26,8 +26,10 @@ from ise_exporter3.transports import TransportError
 from ise_exporter3.transports.dataconnect import (
     LIGHT_DEBT_CEILING_SECONDS,
     MAX_CRASH_LEASE_SECONDS,
+    MAX_QUERY_TIMEOUT_SECONDS,
     MAX_STATEMENT_TIMEOUT_PERIODS,
     MIN_QUERY_INTERVAL_SECONDS,
+    QUERY_TIMEOUT_SECONDS,
     REPLACEMENT_CHARACTER,
     SCHEMA_COLUMN_CONTRACTS,
     DataConnectTransport,
@@ -216,8 +218,11 @@ class _StubCursor:
         self._rows = list(self._connection.rows)
 
     def fetchmany(self, size):
-        if self._connection.fetch_error is not None:
-            raise self._connection.fetch_error
+        failure = self._connection.fetch_error
+        if failure is not None:
+            # A callable failure lets a test burn real time before raising,
+            # which is how a consumed statement budget is reproduced.
+            raise failure() if callable(failure) else failure
         batch, self._rows = self._rows[:size], self._rows[size:]
         return batch
 
@@ -629,7 +634,13 @@ def test_the_transport_enforces_the_same_ceilings_the_statements_are_built_for(
      "[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed", "tls_failed"),
     ("DPY-6005: cannot connect to database (CONNECTION_ID=x). "
      "[Errno 111] Connection refused", "connection_failed"),
-    ("DPY-4011: the database connection was closed", "timeout"),
+    # A call timeout is a verdict on the statement, on a session the driver
+    # kept usable; a dropped session is a verdict on the connection. Reporting
+    # one as the other sent operators reconnect-hunting after slow aggregates.
+    ("DPY-4024: call timeout of 8000 ms exceeded", "timeout"),
+    ("DPY-4011: the database or network closed the connection",
+     "connection_failed"),
+    ("ORA-03135: connection lost contact", "connection_failed"),
     (BrokenPipeError(32, "Broken pipe"), "connection_failed"),
     ("ORA-00933: SQL command not properly ended", "invalid_response"),
 ])
@@ -652,6 +663,116 @@ def test_a_bare_broken_pipe_reconnects_once(transport, monkeypatch):
     assert rows == [{"x": 2}]
     assert broken.statements.count("SELECT x FROM key_performance_metrics") == 1
     assert recovered.statements.count("SELECT x FROM key_performance_metrics") == 1
+
+
+def test_a_call_timeout_is_a_timeout_on_a_kept_session_not_an_expiry(
+        transport, caplog):
+    # DPY-4024 arrives on a session python-oracledb cancelled the call on and
+    # kept usable. Tearing it down -- or reconnecting to repeat a statement
+    # that just proved it cannot fit its budget -- turned every slow aggregate
+    # into "session expired; reconnecting" churn and doubled the Oracle load.
+    connection = _StubConnection(
+        columns=("X",), rows=[(1,)],
+        fetch_error=Exception("DPY-4024: call timeout of 8000 ms exceeded"))
+    transport._connection = connection
+    with pytest.raises(TransportError) as raised:
+        transport._execute("SELECT x FROM radius_accounting", None,
+                           "radius_accounting")
+    assert raised.value.reason == "timeout"
+    assert connection.statements.count("SELECT x FROM radius_accounting") == 1
+    assert transport._connection is connection
+    assert "reconnecting" not in caplog.text
+
+
+def test_a_disconnect_after_the_budget_is_burned_is_not_retried(
+        transport, caplog):
+    # When the break/reset behind a call timeout dies, the failure wears a
+    # disconnect code (DPY-4011). The consumed deadline is what tells it apart
+    # from an idle-expired session: repeating the statement would spend a
+    # second full budget on the same certain failure.
+    transport.timeout = 0.05
+
+    def drop():
+        time.sleep(0.1)
+        return Exception(
+            "DPY-4011: the database or network closed the connection")
+
+    connection = _StubConnection(
+        columns=("X",), rows=[(1,)], fetch_error=drop)
+    transport._connection = connection
+    with pytest.raises(TransportError) as raised:
+        transport._execute("SELECT x FROM radius_accounting", None,
+                           "radius_accounting")
+    assert raised.value.reason == "timeout"
+    assert connection.statements.count("SELECT x FROM radius_accounting") == 1
+    # The dead connection is not kept; the deadline is what stops the retry.
+    assert transport._connection is None
+    assert "reconnecting" not in caplog.text
+
+
+class _SlowViewConnection(_StubConnection):
+    """DPY-4024 on any statement naming one view; ordinary rows otherwise."""
+
+    def __init__(self, slow_view, **kwargs):
+        super().__init__(**kwargs)
+        self.slow_view = slow_view
+
+    def cursor(self):
+        connection = self
+
+        class _Cursor(_StubCursor):
+            def fetchmany(self, size):
+                if connection.slow_view in str(connection.statements[-1]):
+                    raise Exception(
+                        "DPY-4024: call timeout of 8000 ms exceeded")
+                return super().fetchmany(size)
+
+        return _Cursor(self)
+
+
+def test_a_tolerant_batch_runs_on_past_a_timed_out_statement(transport):
+    # The freshness probe's contract: one slow view damages only its own
+    # statement. The statements behind it keep the same session -- no logon is
+    # paid for the survivor -- and each runs under its own fresh deadline.
+    transport._wait = lambda seconds: None
+    connection = _SlowViewConnection(
+        "radius_accounting", columns=("X",), rows=[(1,)])
+    transport._connection = connection
+
+    results, errors = transport.query_many(
+        {"batch_0": "SELECT MAX(timestamp) FROM radius_accounting",
+         "batch_1": "SELECT MAX(timestamp) FROM system_summary"},
+        tolerant=True)
+
+    assert errors["batch_0"].reason == "timeout"
+    assert results == {"batch_1": [{"x": 1}]}
+    assert transport._connection is connection
+
+
+def test_a_dataset_declared_budget_is_bounded_on_both_sides(transport):
+    assert transport._statement_budget() == QUERY_TIMEOUT_SECONDS
+    assert transport._statement_budget(45) == 45
+    assert transport._statement_budget(600) == MAX_QUERY_TIMEOUT_SECONDS
+    # Never narrower than the default: the crash lease reserves at least the
+    # four standard periods, and a declaration only ever widens the statement.
+    assert transport._statement_budget(1) == QUERY_TIMEOUT_SECONDS
+
+
+def test_the_crash_lease_scales_with_a_declared_statement_budget(tmp_path):
+    # A widened statement widens only its own two periods; the two bounded
+    # logons keep the default. Without this the lease under-reserves and a
+    # SIGKILL mid-statement lets the next start hit the database early.
+    transport = DataConnectTransport(_config(tmp_path, duty=10.0))
+    assert transport._crash_lease(timeout=45) == pytest.approx(
+        (2 * transport.timeout + 2 * 45) * (100 / 10.0 - 1))
+
+
+def test_a_declared_budget_widens_the_call_timeout_the_driver_sees(transport):
+    connection = _StubConnection(columns=("X",), rows=[(1,)])
+    transport._connection = connection
+    transport._execute("SELECT x FROM radius_accounting", None,
+                       "radius_accounting", timeout=45)
+    assert 40_000 < connection.call_timeout <= 45_000
 
 
 def test_view_labels_are_bounded_and_never_contain_raw_sql():
@@ -680,10 +801,10 @@ class _FailingCatalogTransport(DataConnectTransport):
     def _wait(self, seconds):
         return None
 
-    def _execute(self, sql, parameters, view):
+    def _execute(self, sql, parameters, view, timeout=None):
         self.executed += 1
         time.sleep(0.05)
-        raise TransportError("timeout", "DPY-4011: the connection was closed")
+        raise TransportError("timeout", "DPY-4024: call timeout exceeded")
 
     def _cooldown(self, duration, adaptive=True):
         cooldown = super()._cooldown(duration, adaptive)

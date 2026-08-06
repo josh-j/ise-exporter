@@ -22,7 +22,9 @@ What the guards do, and why each exists:
 - ``ALTER SESSION DISABLE PARALLEL QUERY`` is a precondition, not a nicety: a
   small aggregate can otherwise fan out across parallel workers on the cluster.
 - One reconnect is retried, because ISE expires healthy sessions on a fixed
-  lifetime. Authentication and SQL errors are never retried.
+  lifetime. Authentication and SQL errors are never retried, and neither is a
+  statement that consumed its own budget -- even when the failure wears a
+  disconnect code, repeating it doubles the load for the same certain result.
 """
 from __future__ import annotations
 
@@ -61,12 +63,18 @@ FETCH_BATCH_ROWS = 100
 # A statement may spend one timeout on the whole logon and one on the statement
 # itself (the session precondition is issued under the statement's own deadline),
 # then repeat both after the single permitted reconnect. A crash lease must
-# reserve all four.
+# reserve all four; the statement periods widen to any budget the dataset
+# declared, the logon periods never do.
 MAX_STATEMENT_TIMEOUT_PERIODS = 4
 # Hard safety floor between statements. Not configurable: this is a floor, not a
 # preference, and the duty cycle is the knob that actually shapes load.
 MIN_QUERY_INTERVAL_SECONDS = 5.0
 QUERY_TIMEOUT_SECONDS = 15
+# The widest statement budget a dataset may declare. A multi-hour aggregate on
+# a production event history legitimately needs more than the default; the
+# ceiling keeps a declaration from becoming an unbounded hold on the serialised
+# lane, and the crash lease scales with whatever was declared.
+MAX_QUERY_TIMEOUT_SECONDS = 60
 # The pre-work lease only matters post-mortem -- the flock already stops any live
 # process from double-querying. Capping it at an hour keeps a crashed process
 # from stranding all reporting for most of a day at a low duty cycle. Measured
@@ -258,9 +266,15 @@ def classify_oracle_error(error):
         return "tls_failed"
     if any(code in message for code in _WRAPPED_CONNECT_FAILURE):
         return "connection_failed"
-    if isinstance(error, TimeoutError) or "TIMEOUT" in message or "DPY-4011" in message:
+    # A call timeout (DPY-4024) is a verdict on the statement, delivered on a
+    # session the driver kept usable; a dropped session (DPY-4011 and kin) is a
+    # verdict on the connection. Folding the second into "timeout" hid real
+    # disconnects, and folding the first into a disconnect made every slow
+    # aggregate wear the reconnect machinery.
+    if isinstance(error, TimeoutError) or "DPY-4024" in message or "TIMEOUT" in message:
         return "timeout"
-    if _is_broken_connection(error):
+    if _is_broken_connection(error) or any(
+            code in message for code in _RETRYABLE_DISCONNECT):
         return "connection_failed"
     return "invalid_response"
 
@@ -617,7 +631,7 @@ class DataConnectTransport(Transport):
 
     # --- cross-process pacing gate ---------------------------------------
 
-    def _acquire_gate(self, *, view, adaptive=True):
+    def _acquire_gate(self, *, view, adaptive=True, timeout=None):
         """Take the shared gate, waiting out any cooldown another process left."""
         path = os.path.abspath(os.path.expanduser(self.pacing_file))
         descriptor = None
@@ -663,7 +677,8 @@ class DataConnectTransport(Transport):
             # deadline it skipped has to survive both the lease it writes now and
             # the one written when it releases the gate.
             self._gate_floor = deadline if not adaptive else 0.0
-            self._write_lease(descriptor, self._crash_lease(adaptive),
+            self._write_lease(descriptor,
+                              self._crash_lease(adaptive, timeout=timeout),
                               self._gate_floor)
             return descriptor
         except TransportError:
@@ -708,8 +723,24 @@ class DataConnectTransport(Transport):
             pass
         return max(0.0, remaining)
 
-    def _crash_lease(self, adaptive=True, elapsed=0.0):
-        worst_case = elapsed + MAX_STATEMENT_TIMEOUT_PERIODS * self.timeout
+    def _statement_budget(self, timeout=None):
+        """One statement's attempt deadline, bounded on both sides.
+
+        A dataset may declare that its aggregates need more than the default,
+        never less: the floor keeps the crash-lease arithmetic monotone, and
+        the ceiling keeps a declaration from monopolising the serialised lane.
+        """
+        if timeout is None:
+            return self.timeout
+        return min(max(float(timeout), self.timeout), MAX_QUERY_TIMEOUT_SECONDS)
+
+    def _crash_lease(self, adaptive=True, elapsed=0.0, timeout=None):
+        # One bounded logon plus one bounded statement per attempt, doubled by
+        # the single permitted reconnect. A declared statement budget widens
+        # only the statement periods; the logon keeps its own.
+        budget = self._statement_budget(timeout)
+        worst_case = elapsed + (
+            MAX_STATEMENT_TIMEOUT_PERIODS // 2) * (self.timeout + budget)
         cooldown = max(
             self.min_query_interval,
             worst_case * (100 / self.duty_cycle - 1) if adaptive else worst_case)
@@ -832,16 +863,18 @@ class DataConnectTransport(Transport):
         finally:
             self._lock.release()
 
-    def _query(self, sql, parameters=None, *, adaptive=True, additive=False):
+    def _query(self, sql, parameters=None, *, adaptive=True, additive=False,
+               timeout=None):
         view = view_of(sql)
         gate = self._batch_gate
         if not self._batch_active:
-            gate = self._acquire_gate(view=view, adaptive=adaptive)
+            gate = self._acquire_gate(view=view, adaptive=adaptive,
+                                      timeout=timeout)
 
         started = time.monotonic()
         result = "error"
         try:
-            rows = self._execute(sql, parameters, view)
+            rows = self._execute(sql, parameters, view, timeout=timeout)
             result = "success"
             return rows
         finally:
@@ -888,11 +921,12 @@ class DataConnectTransport(Transport):
         spend = duration * (100 / self.duty_cycle - 1) if adaptive else duration
         return max(self.min_query_interval, spend)
 
-    def _execute(self, sql, parameters, view):
+    def _execute(self, sql, parameters, view, timeout=None):
+        budget = self._statement_budget(timeout)
         for attempt in range(2):
             try:
                 connection = self.connect()
-                deadline = time.perf_counter() + self.timeout
+                deadline = time.perf_counter() + budget
                 with connection.cursor() as cursor:
                     self._prepare_session(connection, cursor, deadline)
                     self._apply_timeout(connection, deadline)
@@ -940,7 +974,24 @@ class DataConnectTransport(Transport):
                     f"describe, so it could not be read ({error}); the bytes are "
                     "in ISE, not in this statement") from error
             except Exception as error:
-                self.close()
+                # A call timeout is not a dropped session: DPY-4024 arrives on
+                # a connection the driver cancelled the call on and kept
+                # usable, and the transport's own TimeoutError fires between
+                # round trips on an idle one. Neither may cost a teardown --
+                # in a tolerant batch that made every statement after a slow
+                # one pay a fresh logon.
+                timed_out = (isinstance(error, TimeoutError)
+                             or "DPY-4024" in str(error).upper())
+                if not timed_out:
+                    self.close()
+                if timed_out or time.perf_counter() >= deadline:
+                    # A statement that consumed its own budget must surface as
+                    # a timeout even when the failure wears a disconnect code
+                    # (the break/reset dying takes the session with it).
+                    # Reconnecting to repeat a statement that just proved it
+                    # cannot fit the budget doubles the appliance's load for
+                    # the same certain failure.
+                    raise TransportError("timeout", str(error)) from error
                 # ISE expires healthy sessions on a fixed lifetime, so one
                 # reconnect inside the same paced statement avoids losing a whole
                 # cadence to an idle period. Nothing else is ever retried.
@@ -993,7 +1044,8 @@ class DataConnectTransport(Transport):
             raise TimeoutError("statement exceeded its hard attempt timeout")
         connection.call_timeout = max(1, math.ceil(remaining * 1000))
 
-    def query_many(self, statements, parameters=None, *, tolerant=False):
+    def query_many(self, statements, parameters=None, *, tolerant=False,
+                   timeout=None):
         """Run a small atomic set of statements under one duty-cycle lease.
 
         One dashboard update often needs several bounded statements. Charging
@@ -1006,6 +1058,12 @@ class DataConnectTransport(Transport):
         decides what a partial answer means. A diagnostic dataset wants this
         -- the freshness probe going dark because one view is slow silences
         its verdict on the other eight, exactly when it is needed.
+
+        ``timeout`` widens each statement's attempt deadline, bounded by
+        ``MAX_QUERY_TIMEOUT_SECONDS``; the deadline stays per-statement, never
+        cumulative, so a slow first statement cannot starve the ones behind it.
+        The duty cycle already prices the extra time: a longer statement
+        charges a proportionally longer cooldown.
         """
         items = list(statements.items())
         if not items:
@@ -1021,7 +1079,7 @@ class DataConnectTransport(Transport):
                 raise RuntimeError("nested Data Connect batches are not supported")
 
             views = ",".join(dict.fromkeys(view_of(sql) for _name, sql in items))
-            gate = self._acquire_gate(view=views)
+            gate = self._acquire_gate(view=views, timeout=timeout)
             self._batch_active = True
             self._batch_gate = gate
             self._batch_duration = 0.0
@@ -1039,12 +1097,15 @@ class DataConnectTransport(Transport):
                         # a kill early in a batch cannot strand every reporting
                         # dataset behind a whole-batch worst case.
                         self._write_lease(
-                            gate, self._crash_lease(elapsed=self._batch_duration))
+                            gate, self._crash_lease(
+                                elapsed=self._batch_duration, timeout=timeout))
                     if not tolerant:
-                        results[name] = self._query(sql, given.get(name))
+                        results[name] = self._query(
+                            sql, given.get(name), timeout=timeout)
                         continue
                     try:
-                        results[name] = self._query(sql, given.get(name))
+                        results[name] = self._query(
+                            sql, given.get(name), timeout=timeout)
                     except TransportError as error:
                         # The Oracle time it burned is already in the batch
                         # duration, so the shared cooldown still charges it.
