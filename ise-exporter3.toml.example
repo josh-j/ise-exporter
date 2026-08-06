@@ -247,6 +247,19 @@ interval = "5m"
 [datasets.active_sessions.options]
 statement_timeout = 45
 
+# The per-PSN session breakdown. Its own dataset because the planner picks one
+# provider per dataset, and active_sessions' preferred source -- pxGrid --
+# carries no owning-PSN field: MnT's ActiveList is the authoritative cheap
+# answer, and Data Connect reconstructs it from accounting as the last resort.
+[datasets.session_distribution]
+providers = ["mnt", "dataconnect"]
+interval = "5m"
+
+# The Data Connect fallback runs the same bounded accounting scan
+# active_sessions declares, so it carries the same statement budget.
+[datasets.session_distribution.options]
+statement_timeout = 45
+
 # Per-endpoint policy set, authorization rule, profile and method. MnT-only:
 # nothing else carries the per-session authorization detail. This is the single
 # largest consumer of the MnT budget, and its interval is the lever -- one fetch

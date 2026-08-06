@@ -237,8 +237,8 @@ and a value that is legal but unwise warns at start.
 | Plane | Datasets |
 |---|---|
 | PAN (ERS / OpenAPI) | `deployment`, `network_devices`, `certificates`, `licensing`, `backup`, `patches`, `tacacs_config`, `tacacs_policy_rules` |
-| MnT | `active_sessions`, `session_authorization`, `posture_current` |
-| Data Connect | `endpoint_inventory`, `profile_events`, `psn_performance`, `radius_reporting`, `radius_accounting`, `radius_errors`, `posture_history`, `nad_health`, `tacacs_activity`, `source_freshness` |
+| MnT | `active_sessions`, `session_distribution`, `session_authorization`, `posture_current` |
+| Data Connect | `endpoint_inventory`, `profile_events`, `psn_performance`, `radius_reporting`, `radius_accounting`, `radius_errors`, `posture_history`, `nad_health`, `tacacs_activity`, `source_freshness`, `active_sessions`, `session_distribution` |
 | pxGrid | `active_sessions`, `posture_current`, `endpoint_inventory`, `endpoint_attributes` |
 
 Metrics are prefixed `ise3_`. `provider` is a label on the data itself, because

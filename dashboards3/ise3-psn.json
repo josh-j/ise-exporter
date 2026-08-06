@@ -314,7 +314,7 @@
         "type": "prometheus",
         "uid": "${prometheus}"
       },
-      "description": "Share of this dashboard's own datasets that both collected successfully and are inside their freshness window (active_sessions, psn_performance). Below 100% means some panel here is blank or stale, and the pipeline dashboard says which.",
+      "description": "Share of this dashboard's own datasets that both collected successfully and are inside their freshness window (psn_performance, session_distribution). Below 100% means some panel here is blank or stale, and the pipeline dashboard says which.",
       "fieldConfig": {
         "defaults": {
           "links": [
@@ -363,7 +363,7 @@
       "repeatDirection": "h",
       "targets": [
         {
-          "expr": "avg(((max by (dataset) (ise3_dataset_up{dataset=~\"psn_performance|active_sessions\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=~\"psn_performance|active_sessions\"} == 1))) == bool 1) * ((max by (dataset) (ise3_dataset_fresh{dataset=~\"psn_performance|active_sessions\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=~\"psn_performance|active_sessions\"} == 1))) == bool 1))",
+          "expr": "avg(((max by (dataset) (ise3_dataset_up{dataset=~\"psn_performance|session_distribution\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=~\"psn_performance|session_distribution\"} == 1))) == bool 1) * ((max by (dataset) (ise3_dataset_fresh{dataset=~\"psn_performance|session_distribution\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=~\"psn_performance|session_distribution\"} == 1))) == bool 1))",
           "instant": true,
           "legendFormat": "",
           "range": false,
@@ -431,7 +431,7 @@
       "repeatDirection": "h",
       "targets": [
         {
-          "expr": "max(time() - (max by (dataset) (ise3_dataset_last_success_timestamp{dataset=~\"psn_performance|active_sessions\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=~\"psn_performance|active_sessions\"} == 1))))",
+          "expr": "max(time() - (max by (dataset) (ise3_dataset_last_success_timestamp{dataset=~\"psn_performance|session_distribution\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=~\"psn_performance|session_distribution\"} == 1))))",
           "instant": true,
           "legendFormat": "",
           "range": false,
@@ -496,7 +496,7 @@
       "repeatDirection": "h",
       "targets": [
         {
-          "expr": "(ise3_active_sessions_by_psn) and on() (((max(ise3_dataset_up{dataset=\"active_sessions\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"active_sessions\"} == 1))) == 1) and ((max(ise3_dataset_fresh{dataset=\"active_sessions\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"active_sessions\"} == 1))) == 1))",
+          "expr": "(ise3_active_sessions_by_psn) and on() (((max(ise3_dataset_up{dataset=\"session_distribution\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"session_distribution\"} == 1))) == 1) and ((max(ise3_dataset_fresh{dataset=\"session_distribution\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"session_distribution\"} == 1))) == 1))",
           "instant": false,
           "legendFormat": "{{psn}}",
           "range": true,
@@ -564,7 +564,7 @@
       "repeatDirection": "h",
       "targets": [
         {
-          "expr": "(ise3_active_sessions_by_psn - ise3_active_sessions_by_psn offset 15m) and on() (((max(ise3_dataset_up{dataset=\"active_sessions\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"active_sessions\"} == 1))) == 1) and ((max(ise3_dataset_fresh{dataset=\"active_sessions\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"active_sessions\"} == 1))) == 1))",
+          "expr": "(ise3_active_sessions_by_psn - ise3_active_sessions_by_psn offset 15m) and on() (((max(ise3_dataset_up{dataset=\"session_distribution\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"session_distribution\"} == 1))) == 1) and ((max(ise3_dataset_fresh{dataset=\"session_distribution\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"session_distribution\"} == 1))) == 1))",
           "instant": false,
           "legendFormat": "{{psn}}",
           "range": true,

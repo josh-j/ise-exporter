@@ -483,32 +483,13 @@ def test_active_sessions_mnt_attributes_on_the_nas_address_alone():
     assert by_nad[(("location", "Unknown"), ("nad", "10.200.40.99"))] == 1
 
 
-def test_an_empty_active_list_publishes_a_psn_zero_state():
-    from types import SimpleNamespace
-
-    from ise_exporter3.datasets import active_sessions
-
-    published = []
-    ctx = SimpleNamespace(
-        interval=300,
-        transport=SimpleNamespace(get_mnt_xml=lambda path, *, api="": {
-            "total": 0, "sessions": []}),
-        set=lambda family, value, /, **labels: published.append(
-            (family._name, value, labels)))
-
-    active_sessions.fetch_mnt(ctx)
-
-    assert ("ise3_active_sessions_by_psn", 0,
-            {"psn": "No active sessions"}) in published
-
-
-def test_active_sessions_pxgrid_counts_sessions_per_serving_node():
-    # The production regression: pxGrid is the preferred provider, and a commit
-    # clears every family the dataset declares, so a pxgrid fetch that never
-    # wrote by_psn left the per-PSN panels permanently empty wherever pxGrid
-    # was healthy. The session record does name its serving node -- the
-    # `providers` list, with "None" standing in for nothing, and scalar
-    # spellings on other releases -- so the breakdown must come from here too.
+def test_active_sessions_pxgrid_never_writes_the_psn_breakdown():
+    # The production regression, from the other side: `providers` on a live
+    # 3.3 getSessions record is literally ["None"], and no node-name key
+    # (psnName, iseNode, server) exists on the record at all -- see the
+    # captured fixture in test_v3_api.py and DATASETS_FACTS 6.3. Deriving a
+    # PSN from it published every session as psn="unknown", so the family
+    # belongs to session_distribution and this fetch must leave it alone.
     from types import SimpleNamespace
 
     from ise_exporter3 import nad_directory
@@ -517,11 +498,9 @@ def test_active_sessions_pxgrid_counts_sessions_per_serving_node():
     nad_directory.shared().replace([])
     sessions = [
         {"macAddress": "00:11:22:33:44:55", "nasIpAddress": "10.200.40.12",
-         "providers": ["laba-ise-001"]},
-        {"macAddress": "00:11:22:33:44:56", "nasIpAddress": "10.200.40.12",
-         "providers": ["None"], "psnName": "laba-ise-002"},
-        {"macAddress": "00:11:22:33:44:57", "nasIpAddress": "10.200.40.99",
-         "providers": ["laba-ise-001"]},
+         "nasIdentifier": "sw-campus-1", "providers": ["None"]},
+        {"macAddress": "00:11:22:33:44:56", "nasIpAddress": "10.200.40.99",
+         "nasIdentifier": "sw-campus-2", "providers": ["None"]},
     ]
 
     published = []
@@ -532,30 +511,9 @@ def test_active_sessions_pxgrid_counts_sessions_per_serving_node():
             (family._name, value, labels)))
     active_sessions.fetch_pxgrid(ctx)
 
-    by_psn = {labels["psn"]: value for name, value, labels in published
-              if name == "ise3_active_sessions_by_psn"}
-    assert by_psn == {"laba-ise-001": 2, "laba-ise-002": 1}
-
-
-def test_an_empty_pxgrid_baseline_publishes_the_same_psn_zero_state():
-    # Empty-vs-failed must read the same whichever provider is active: a quiet
-    # deployment on pxGrid gets the explicit zero, not the blank of a broken
-    # collector.
-    from types import SimpleNamespace
-
-    from ise_exporter3.datasets import active_sessions
-
-    published = []
-    ctx = SimpleNamespace(
-        interval=300,
-        transport=SimpleNamespace(get_sessions=lambda *, max_age: []),
-        set=lambda family, value, /, **labels: published.append(
-            (family._name, value, labels)))
-
-    active_sessions.fetch_pxgrid(ctx)
-
-    assert ("ise3_active_sessions_by_psn", 0,
-            {"psn": "No active sessions"}) in published
+    assert not [name for name, _value, _labels in published
+                if name == "ise3_active_sessions_by_psn"]
+    assert ("ise3_active_sessions_total", 2, {}) in published
 
 
 def _dataconnect_limits():
@@ -566,13 +524,13 @@ def _dataconnect_limits():
         Scale(nads=5_000, endpoints=100_000, sessions=20_000, accounts=1_000))
 
 
-def _dataconnect_ctx(transport):
+def _dataconnect_ctx(transport, dataset="active_sessions"):
     from types import SimpleNamespace
 
     published, shared = [], []
     return SimpleNamespace(
         interval=300,
-        dataset=SimpleNamespace(name="active_sessions", default_interval=300),
+        dataset=SimpleNamespace(name=dataset, default_interval=300),
         limits=_dataconnect_limits(),
         transport=transport,
         option=lambda name: {"statement_timeout": 45}[name],
@@ -587,19 +545,21 @@ def _dataconnect_ctx(transport):
 def test_active_sessions_dataconnect_dedupes_and_bounds_the_accounting_scan():
     # The reconstruction rule in one statement: latest record per session id
     # and calling station over the stale window, live means not a stop, and
-    # every breakdown comes from that single pass under the group ceiling.
+    # the total and the NAD marginal come from that single pass under the
+    # group ceiling. The PSN marginal is session_distribution's, not here.
     from ise_exporter3.datasets import active_sessions
 
     sql = active_sessions.statement(1, _dataconnect_limits())
     assert "ROW_NUMBER() OVER" in sql
     assert "COALESCE(acct_session_id, session_id), calling_station_id" in sql
     assert "NOT LIKE '%STOP%'" in sql
-    assert "GROUPING SETS ((psn), (nad), ())" in sql
+    assert "GROUPING SETS ((nad), ())" in sql
+    assert "psn" not in sql.lower()
     assert "NUMTODSINTERVAL(1, 'HOUR')" in sql
     assert "FETCH FIRST" in sql and "COUNT(*) OVER ()" in sql
 
 
-def test_active_sessions_dataconnect_reconstructs_the_three_breakdowns():
+def test_active_sessions_dataconnect_reconstructs_the_totals_and_the_nads():
     from ise_exporter3 import nad_directory
     from ise_exporter3.datasets import active_sessions
 
@@ -609,15 +569,11 @@ def test_active_sessions_dataconnect_reconstructs_the_three_breakdowns():
 
     rows = [
         {"dimension": "total", "value": "all", "sessions": 3, "endpoints": 2,
-         "nas_ip": None, "group_total": 5},
-        {"dimension": "psn", "value": "laba-ise-001", "sessions": 2,
-         "endpoints": 2, "nas_ip": None, "group_total": 5},
-        {"dimension": "psn", "value": "laba-ise-002", "sessions": 1,
-         "endpoints": 1, "nas_ip": None, "group_total": 5},
+         "nas_ip": None, "group_total": 3},
         {"dimension": "nad", "value": "sw-campus-1", "sessions": 2,
-         "endpoints": 2, "nas_ip": "10.200.40.12", "group_total": 5},
+         "endpoints": 2, "nas_ip": "10.200.40.12", "group_total": 3},
         {"dimension": "nad", "value": "10.200.40.99", "sessions": 1,
-         "endpoints": 1, "nas_ip": "10.200.40.99", "group_total": 5},
+         "endpoints": 1, "nas_ip": "10.200.40.99", "group_total": 3},
     ]
 
     class Transport:
@@ -635,9 +591,6 @@ def test_active_sessions_dataconnect_reconstructs_the_three_breakdowns():
 
     assert ("ise3_active_sessions_total", 3.0, {}) in ctx.published
     assert ("ise3_active_session_endpoints", 2.0, {}) in ctx.published
-    by_psn = {labels["psn"]: value for name, value, labels in ctx.published
-              if name == "ise3_active_sessions_by_psn"}
-    assert by_psn == {"laba-ise-001": 2.0, "laba-ise-002": 1.0}
     by_nad = {tuple(sorted(labels.items())): value
               for name, value, labels in ctx.published
               if name == "ise3_active_sessions_by_nad"}
@@ -645,12 +598,16 @@ def test_active_sessions_dataconnect_reconstructs_the_three_breakdowns():
     # providers; unresolved devices are published as themselves.
     assert by_nad[(("location", "Ramstein"), ("nad", "campus-corp-wired"))] == 2.0
     assert by_nad[(("location", "Unknown"), ("nad", "10.200.40.99"))] == 1.0
+    # The per-PSN family belongs to session_distribution now; writing it from
+    # here again would put one family under two datasets' commits.
+    assert not [name for name, _value, _labels in ctx.published
+                if name == "ise3_active_sessions_by_psn"]
 
 
-def test_an_empty_accounting_window_publishes_the_same_psn_zero_state():
+def test_an_empty_accounting_window_still_publishes_the_zero_total():
     # A healthy empty window comes back as the lone zero total row the empty
-    # grouping set produces (or as no rows at all); either way the zero
-    # sentinel keeps it distinct from a failed collector.
+    # grouping set produces (or as no rows at all); the zero keeps it distinct
+    # from a failed collector.
     from ise_exporter3.datasets import active_sessions
 
     class Transport:
@@ -665,6 +622,136 @@ def test_an_empty_accounting_window_publishes_the_same_psn_zero_state():
     active_sessions.fetch_dataconnect(ctx)
 
     assert ("ise3_active_sessions_total", 0.0, {}) in ctx.published
+
+
+def test_session_distribution_mnt_counts_sessions_per_server():
+    # The ActiveList is a session index that names each session's PSN in
+    # `server` -- the authoritative cheap answer pxGrid cannot give. A row
+    # without one is still a session, counted under the unknown sentinel.
+    from types import SimpleNamespace
+
+    from ise_exporter3.datasets import session_distribution
+
+    sessions = [
+        {"calling_station_id": "00:11:22:33:44:55", "server": "laba-ise-001",
+         "nas_ip_address": "10.200.40.12"},
+        {"calling_station_id": "00:11:22:33:44:56", "server": "laba-ise-001",
+         "nas_ip_address": "10.200.40.99"},
+        {"calling_station_id": "00:11:22:33:44:57", "server": "laba-ise-002",
+         "nas_ip_address": "10.200.40.12"},
+        {"calling_station_id": "00:11:22:33:44:58",
+         "nas_ip_address": "10.200.40.12"},
+    ]
+
+    published = []
+    ctx = SimpleNamespace(
+        interval=300,
+        transport=SimpleNamespace(get_mnt_xml=lambda path, *, api="": {
+            "total": len(sessions), "sessions": sessions}),
+        set=lambda family, value, /, **labels: published.append(
+            (family._name, value, labels)))
+    session_distribution.fetch_mnt(ctx)
+
+    by_psn = {labels["psn"]: value for name, value, labels in published
+              if name == "ise3_active_sessions_by_psn"}
+    assert by_psn == {"laba-ise-001": 2, "laba-ise-002": 1, "unknown": 1}
+
+
+def test_an_empty_active_list_publishes_a_psn_zero_state():
+    # A healthy empty ActiveList has no PSN rows from which to form a labelled
+    # series; without the explicit zero the PSN panels render the same blank
+    # state as a failed/unavailable collector.
+    from types import SimpleNamespace
+
+    from ise_exporter3.datasets import session_distribution
+
+    published = []
+    ctx = SimpleNamespace(
+        interval=300,
+        transport=SimpleNamespace(get_mnt_xml=lambda path, *, api="": {
+            "total": 0, "sessions": []}),
+        set=lambda family, value, /, **labels: published.append(
+            (family._name, value, labels)))
+
+    session_distribution.fetch_mnt(ctx)
+
+    assert ("ise3_active_sessions_by_psn", 0,
+            {"psn": "No active sessions"}) in published
+
+
+def test_session_distribution_statement_is_the_same_scan_grouped_by_psn():
+    # The same dedup rule as active_sessions.statement -- shared through
+    # session_scan so the session-key spelling cannot drift -- with the cheap
+    # aggregation: one GROUP BY over the PSNs, no GROUPING SETS.
+    from ise_exporter3.datasets import session_distribution
+
+    sql = session_distribution.statement(1, _dataconnect_limits())
+    assert "ROW_NUMBER() OVER" in sql
+    assert "COALESCE(acct_session_id, session_id), calling_station_id" in sql
+    assert "NOT LIKE '%STOP%'" in sql
+    assert "NVL(ise_node, 'unknown')" in sql
+    assert "GROUP BY psn" in sql and "GROUPING SETS" not in sql
+    assert "NUMTODSINTERVAL(1, 'HOUR')" in sql
+    assert "FETCH FIRST" in sql and "COUNT(*) OVER ()" in sql
+
+
+def test_session_distribution_statement_degrades_without_the_node_column():
+    # A catalogue without ISE_NODE loses the dimension, not the dataset: the
+    # scan still counts live sessions, published under the unknown sentinel.
+    from ise_exporter3.datasets import session_distribution
+
+    schema = {"RADIUS_ACCOUNTING": {
+        "TIMESTAMP", "NAS_IP_ADDRESS", "SESSION_ID", "CALLING_STATION_ID",
+        "ACCT_STATUS_TYPE"}}
+    sql = session_distribution.statement(1, _dataconnect_limits(), schema)
+    assert "ise_node" not in sql
+    assert "'unknown' AS psn" in sql
+    # And the session key degrades with the catalogue the same way the
+    # active_sessions scan does.
+    assert "PARTITION BY session_id, calling_station_id" in sql
+
+
+def test_session_distribution_dataconnect_parses_the_psn_rows():
+    from ise_exporter3.datasets import session_distribution
+
+    rows = [
+        {"psn": "laba-ise-001", "sessions": 2, "group_total": 2},
+        {"psn": None, "sessions": 1, "group_total": 2},
+    ]
+
+    class Transport:
+        schema = None
+
+        def query_many(self, statements, *, timeout=None):
+            assert set(statements) == {"psn"}
+            # The same accounting scan active_sessions budgets, so the same
+            # declared statement budget must reach the transport.
+            assert timeout == 45
+            return {"psn": rows}
+
+    ctx = _dataconnect_ctx(Transport(), dataset="session_distribution")
+    session_distribution.fetch_dataconnect(ctx)
+
+    by_psn = {labels["psn"]: value for name, value, labels in ctx.published
+              if name == "ise3_active_sessions_by_psn"}
+    assert by_psn == {"laba-ise-001": 2.0, "unknown": 1.0}
+
+
+def test_an_empty_accounting_window_publishes_the_same_psn_zero_state():
+    # Empty-vs-failed must read the same whichever provider is active: a
+    # quiet window gets the explicit zero, not the blank of a broken
+    # collector.
+    from ise_exporter3.datasets import session_distribution
+
+    class Transport:
+        schema = None
+
+        def query_many(self, statements, *, timeout=None):
+            return {"psn": []}
+
+    ctx = _dataconnect_ctx(Transport(), dataset="session_distribution")
+    session_distribution.fetch_dataconnect(ctx)
+
     assert ("ise3_active_sessions_by_psn", 0,
             {"psn": "No active sessions"}) in ctx.published
 

@@ -593,13 +593,14 @@ def test_the_session_delta_window_spans_more_than_one_collection():
     from ise_exporter3.datasets import REGISTRY
 
     dataset = next(entry for entry in REGISTRY.values()
-                   if entry.name == "active_sessions")
+                   if entry.name == "session_distribution")
     window = _builder().SESSION_DELTA_WINDOW
     assert window.endswith("m"), f"window {window} is not in minutes"
     seconds = int(window[:-1]) * 60
     assert seconds >= 2 * dataset.default_interval, (
-        f"the session delta window is {seconds}s but active_sessions collects "
-        f"every {dataset.default_interval}s; a delta needs two collections")
+        f"the session delta window is {seconds}s but session_distribution "
+        f"collects every {dataset.default_interval}s; a delta needs two "
+        f"collections")
 
 
 def test_the_psn_dashboard_shows_where_sessions_moved_to():

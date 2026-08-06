@@ -421,7 +421,13 @@ def test_plan_is_json_serialisable_for_the_operator_api():
     assert active["provider"] == "pxgrid"
     assert active["streaming"] is True
     assert active["alternatives"] == ["mnt", "dataconnect"]
-    assert "psn" in active["supplies"]
+    # pxGrid has no owning-PSN field; the per-PSN breakdown is
+    # session_distribution's, whose preferred source can actually answer it.
+    assert "psn" not in active["supplies"]
+    distribution = next(item for item in payload["datasets"]
+                        if item["dataset"] == "session_distribution")
+    assert distribution["provider"] == "mnt"
+    assert "psn" in distribution["supplies"]
 
 
 def test_rendered_report_states_the_source_the_cost_and_the_verdict():

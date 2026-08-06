@@ -2058,8 +2058,8 @@ PSN_NODE = 'node=~"$node"'
 # scrape until the next collection, so a delta window shorter than two cadences
 # measures the scrape repeating itself and reads flat through a real failover.
 # Three cadences, so one skipped collection still leaves two points in the
-# window. Asserted against active_sessions' declared interval in the tests --
-# lengthen it there too if that cadence ever changes.
+# window. Asserted against session_distribution's declared interval in the
+# tests -- lengthen it there too if that cadence ever changes.
 SESSION_DELTA_WINDOW = "15m"
 
 # Subtraction rather than delta(). delta() extrapolates its result to the full
@@ -2138,7 +2138,7 @@ def psn_dashboard():
             STAT_H,
             EIGHTH,
         ),
-    ] + trust_pair(("psn_performance", "active_sessions"), span=EIGHTH)
+    ] + trust_pair(("psn_performance", "session_distribution"), span=EIGHTH)
 
     throughput = [
         sized(
@@ -2147,8 +2147,8 @@ def psn_dashboard():
                 "Live sessions each PSN is holding. Nodes that should be "
                 "load-balanced equally and are not point at the network "
                 "devices' RADIUS server ordering rather than at ISE.",
-                [query(gate(metric("ise3_active_sessions_by_psn"), "active_sessions"),
-                       "{{psn}}")],
+                [query(gate(metric("ise3_active_sessions_by_psn"),
+                            "session_distribution"), "{{psn}}")],
             ),
             PANEL_H,
             THIRD,
@@ -2169,7 +2169,7 @@ def psn_dashboard():
                 f"{SESSION_DELTA_WINDOW} after an exporter restart, and for a "
                 "PSN that has been serving for less than that: there is no "
                 "earlier count to subtract yet.",
-                [query(gate(SESSION_DELTA, "active_sessions"), "{{psn}}")],
+                [query(gate(SESSION_DELTA, "session_distribution"), "{{psn}}")],
                 thresholds=ZERO_REFERENCE,
             ),
             PANEL_H,

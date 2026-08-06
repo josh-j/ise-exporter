@@ -4,14 +4,16 @@ Three sources with genuinely different semantics, which is why the active
 provider is a label on the data and not only on health:
 
 - ``pxgrid`` is the live session directory. Nearest to real time, cheapest
-  steady-state cost (a change feed, not a scan). The session record names its
-  serving node in ``providers`` (scalar spellings such as ``psnName`` on other
-  releases), so the per-PSN breakdown is available here too.
-- ``mnt`` is the current session store. One ActiveList read gives exact counts by
-  PSN, and by NAD and ops owner as far as the inventory can resolve the NAS
-  address -- the list names no network device, so an unresolved address is
-  published as itself. The expensive per-endpoint detail is a different question
-  and belongs to ``session_authorization``, which caches it.
+  steady-state cost (a change feed, not a scan), but it cannot attribute a
+  session to the PSN serving it: ``providers`` is literally ``["None"]`` on a
+  live 3.3 appliance and no other field names the node
+  (docs/DATASETS_FACTS.md 6.3). The per-PSN breakdown therefore lives in
+  ``session_distribution``, whose providers can all answer it.
+- ``mnt`` is the current session store. One ActiveList read gives exact counts
+  by NAD and ops owner as far as the inventory can resolve the NAS address --
+  the list names no network device, so an unresolved address is published as
+  itself. The expensive per-endpoint detail is a different question and belongs
+  to ``session_authorization``, which caches it.
 - ``dataconnect`` reconstructs sessions from accounting starts minus stops. It
   has the freshness and completeness of whatever the NADs actually sent, and it
   is by far the most expensive of the three -- a 60-minute scan with a dedup
@@ -29,12 +31,10 @@ from .. import nad_directory, reporting
 from ..labels import label
 from ..model import Cost, Dataset, Provider
 from ..parsing import finite
-from ..pxgrid import as_list, first, normalize_mac
+from ..pxgrid import first, normalize_mac
 
 
 total = Gauge("ise3_active_sessions_total", "Active RADIUS sessions", ["provider"])
-by_psn = Gauge(
-    "ise3_active_sessions_by_psn", "Active sessions per PSN", ["provider", "psn"])
 by_nad = Gauge(
     "ise3_active_sessions_by_nad", "Active sessions per NAD",
     ["provider", "nad", "location"])
@@ -45,7 +45,7 @@ unique_endpoints = Gauge(
     "ise3_active_session_endpoints", "Distinct endpoints holding a session",
     ["provider"])
 
-_METRICS = (total, by_psn, by_nad, by_ops_owner, unique_endpoints)
+_METRICS = (total, by_nad, by_ops_owner, unique_endpoints)
 
 VIEW = "radius_accounting"
 
@@ -60,8 +60,7 @@ OPTIONS = (reporting.statement_timeout_option(45),)
 def fetch_pxgrid(ctx):
     sessions = ctx.transport.get_sessions(max_age=ctx.interval)
     directory = nad_directory.shared()
-    psns, nads, owners = defaultdict(int), defaultdict(int), defaultdict(int)
-    endpoints = set()
+    nads, owners, endpoints = defaultdict(int), defaultdict(int), set()
     matched = unmatched = 0
 
     for session in sessions:
@@ -80,18 +79,6 @@ def fetch_pxgrid(ctx):
             unmatched += 1
             nad = label(device or nas_ip, "unknown")
             location, owner = "Unknown", "unknown"
-        # ISE names the serving node in `providers` and writes the string
-        # "None" when there is nothing to name -- the same reading
-        # pxgrid.project_session settled for the operator surface. The commit
-        # clears every family in this dataset, so a fetch that never wrote
-        # by_psn emptied the per-PSN panels wherever pxGrid was the healthy
-        # preference.
-        serving = [
-            str(name).strip() for name in as_list(first(session, "providers"))
-            if str(name).strip() and str(name).strip().lower() != "none"]
-        psn = ", ".join(serving) or first(
-            session, "psnName", "psn_name", "iseNode", "ise_node", "server")
-        psns[label(psn, "unknown")] += 1
         nads[(nad, location)] += 1
         owners[owner] += 1
         mac = normalize_mac(first(
@@ -102,12 +89,6 @@ def fetch_pxgrid(ctx):
     nad_directory.record_attribution(matched, unmatched)
     ctx.set(total, len(sessions))
     ctx.set(unique_endpoints, len(endpoints))
-    # The same empty-vs-failed distinction fetch_mnt keeps: a healthy empty
-    # baseline must not render like an unavailable collector.
-    if not sessions:
-        ctx.set(by_psn, 0, psn="No active sessions")
-    for psn, count in psns.items():
-        ctx.set(by_psn, count, psn=psn)
     for (nad, location), count in nads.items():
         ctx.set(by_nad, count, nad=nad, location=location)
     for owner, count in owners.items():
@@ -119,8 +100,7 @@ def fetch_mnt(ctx):
     sessions = listing.get("sessions") or []
     directory = nad_directory.shared()
 
-    psns, nads, owners = defaultdict(int), defaultdict(int), defaultdict(int)
-    endpoints = set()
+    nads, owners, endpoints = defaultdict(int), defaultdict(int), set()
     matched = unmatched = 0
 
     for session in sessions:
@@ -138,7 +118,6 @@ def fetch_mnt(ctx):
             unmatched += 1
             nad, location, owner = label(nas_ip, "unknown"), "Unknown", "unknown"
 
-        psns[label(session.get("server"), "unknown")] += 1
         nads[(nad, location)] += 1
         owners[owner] += 1
         mac = normalize_mac(session.get("calling_station_id"))
@@ -151,55 +130,46 @@ def fetch_mnt(ctx):
     # a truncated document would understate.
     ctx.set(total, listing.get("total") or len(sessions))
     ctx.set(unique_endpoints, len(endpoints))
-    # A healthy empty ActiveList has no PSN rows from which to form a labelled
-    # series.  Without an explicit zero both PSN panels render the same blank
-    # state as a failed/unavailable collector.  Keep the zero inside the data
-    # family so delta() also has a stable baseline on quiet deployments.
-    if not sessions:
-        ctx.set(by_psn, 0, psn="No active sessions")
-    for psn, count in psns.items():
-        ctx.set(by_psn, count, psn=psn)
     for (nad, location), count in nads.items():
         ctx.set(by_nad, count, nad=nad, location=location)
     for owner, count in owners.items():
         ctx.set(by_ops_owner, count, ops_owner=owner)
 
 
-def _has(schema, column):
+def has_column(schema, column):
+    """True when this appliance's RADIUS_ACCOUNTING catalogues the column."""
     columns = None if schema is None else schema.get(VIEW.upper())
     return columns is None or column.upper() in columns
 
 
-def _shape(schema):
-    """The column expressions this appliance's RADIUS_ACCOUNTING can support.
+def session_scan(schema):
+    """The dedup-scan expressions every accounting reconstruction shares.
 
-    Optional columns follow radius_accounting's discipline: a missing dimension
-    degrades to ``unknown`` rather than taking down the counts that remain
-    valid. NAS_IP_ADDRESS and TIMESTAMP are in every catalogue of this view.
+    ``session_distribution`` runs the same latest-record-per-session scan with
+    a cheaper aggregation, and the session-key rule must not drift between the
+    two statements: two spellings of "the same session" would let the total and
+    the per-PSN counts disagree about the same fleet. Optional columns follow
+    radius_accounting's discipline: a missing dimension degrades to ``unknown``
+    rather than taking down the counts that remain valid. NAS_IP_ADDRESS and
+    TIMESTAMP are in every catalogue of this view.
     """
     status = (
         "UPPER(NVL(acct_status_type, 'UNKNOWN'))"
-        if _has(schema, "acct_status_type")
+        if has_column(schema, "acct_status_type")
         else "'UNKNOWN'"
     )
-    psn = "NVL(ise_node, 'unknown')" if _has(schema, "ise_node") else "'unknown'"
-    nad = (
-        "NVL(device_name, nas_ip_address)"
-        if _has(schema, "device_name")
-        else "nas_ip_address"
-    )
-    mac = "calling_station_id" if _has(schema, "calling_station_id") else "NULL"
+    mac = "calling_station_id" if has_column(schema, "calling_station_id") else "NULL"
     # ACCT_SESSION_ID is the id the NAD repeats on the stop that closes its
     # start (RFC 2866); SESSION_ID is ISE's own. Either one, qualified by the
     # calling station, names a session well enough to pick its latest record.
     keys = [column for column in ("acct_session_id", "session_id")
-            if _has(schema, column)]
+            if has_column(schema, column)]
     session = f"COALESCE({', '.join(keys)})" if len(keys) > 1 else (
         keys[0] if keys else "nas_ip_address")
     partition = f"{session}, {mac}" if mac != "NULL" else session
     # ID breaks the tie a same-timestamp start/stop pair leaves behind.
-    order = "timestamp DESC" + (", id DESC" if _has(schema, "id") else "")
-    return psn, nad, status, mac, partition, order
+    order = "timestamp DESC" + (", id DESC" if has_column(schema, "id") else "")
+    return status, mac, partition, order
 
 
 def statement(hours, limits, schema=None):
@@ -207,28 +177,34 @@ def statement(hours, limits, schema=None):
 
     The dedup pass keeps each session's latest record in the window; a session
     whose latest record is not a stop is live. GROUPING SETS then yields the
-    per-PSN and per-NAD marginals and the grand total (with its exact distinct
-    endpoint count) from that single pass, so the largest table in the MnT
-    database is scanned once, not once per breakdown.
+    per-NAD marginal and the grand total (with its exact distinct endpoint
+    count) from that single pass, so the largest table in the MnT database is
+    scanned once, not once per breakdown. The per-PSN marginal is deliberately
+    absent: it belongs to ``session_distribution``, which runs the same scan
+    grouped by PSN alone.
     """
     recent = reporting.recent("timestamp", hours, limits)
-    psn, nad, status, mac, partition, order = _shape(schema)
-    # Total first, then the handful of PSNs, then NADs busiest-first: the row
-    # ceiling must truncate the one large dimension's tail, never the total or
-    # the per-PSN rows behind it. publish_truncation reports whatever is cut.
+    status, mac, partition, order = session_scan(schema)
+    nad = (
+        "NVL(device_name, nas_ip_address)"
+        if has_column(schema, "device_name")
+        else "nas_ip_address"
+    )
+    # Total first, then NADs busiest-first: the row ceiling must truncate the
+    # one large dimension's tail, never the total in front of it.
+    # publish_truncation reports whatever is cut.
     return f"""
         SELECT dimension, value, sessions, endpoints, nas_ip, group_total
         FROM (
-            SELECT CASE WHEN GROUPING(psn) = 0 THEN 'psn'
-                        WHEN GROUPING(nad) = 0 THEN 'nad'
+            SELECT CASE WHEN GROUPING(nad) = 0 THEN 'nad'
                         ELSE 'total' END AS dimension,
-                   NVL(COALESCE(psn, nad), 'all') AS value,
+                   NVL(nad, 'all') AS value,
                    COUNT(*) AS sessions,
                    COUNT(DISTINCT mac) AS endpoints,
                    MAX(nas_ip) AS nas_ip,
                    COUNT(*) OVER () AS group_total
             FROM (
-                SELECT {psn} AS psn, {nad} AS nad,
+                SELECT {nad} AS nad,
                        nas_ip_address AS nas_ip, {mac} AS mac,
                        {status} AS status,
                        ROW_NUMBER() OVER (
@@ -238,9 +214,9 @@ def statement(hours, limits, schema=None):
                 WHERE {recent}
             )
             WHERE latest = 1 AND status NOT LIKE '%STOP%'
-            GROUP BY GROUPING SETS ((psn), (nad), ())
+            GROUP BY GROUPING SETS ((nad), ())
         )
-        ORDER BY CASE dimension WHEN 'total' THEN 0 WHEN 'psn' THEN 1 ELSE 2 END,
+        ORDER BY CASE dimension WHEN 'total' THEN 0 ELSE 1 END,
                  sessions DESC, value
         FETCH FIRST {reporting.group_limit(limits)} ROWS ONLY
     """
@@ -256,7 +232,7 @@ def fetch_dataconnect(ctx):
     reporting.publish_truncation(ctx, "sessions", rows)
 
     directory = nad_directory.shared()
-    psns, nads = defaultdict(int), defaultdict(int)
+    nads = defaultdict(int)
     matched = unmatched = 0
     sessions = 0.0
     endpoints = 0.0
@@ -267,8 +243,6 @@ def fetch_dataconnect(ctx):
         if dimension == "total":
             sessions = count
             endpoints = finite(row.get("endpoints"))
-        elif dimension == "psn":
-            psns[label(row.get("value"), "unknown")] += count
         elif dimension == "nad":
             # The same attribution the other providers do, with the same
             # honesty when it fails: the group's NAS address (any one of the
@@ -289,15 +263,8 @@ def fetch_dataconnect(ctx):
     # COUNT(DISTINCT NULL) is a well-formed zero; a schema without the calling
     # station has no endpoint answer, and zero endpoints under live sessions
     # would be an invented one.
-    if _has(schema, "calling_station_id"):
+    if has_column(schema, "calling_station_id"):
         ctx.set(unique_endpoints, endpoints)
-    # The same empty-vs-failed distinction the other providers keep: a healthy
-    # empty window (or its lone zero total row) must not render like an
-    # unavailable collector.
-    if not psns:
-        ctx.set(by_psn, 0, psn="No active sessions")
-    for psn, count in psns.items():
-        ctx.set(by_psn, count, psn=psn)
     for (nad, location), count in nads.items():
         ctx.set(by_nad, count, nad=nad, location=location)
 
@@ -318,17 +285,19 @@ DATASET = Dataset(
             # shorter of the two cadences.
             cost=Cost(target="pxgrid", requests=1, streaming=True,
                       shares="pxgrid_sessions"),
-            supplies=frozenset({"session", "endpoint", "psn", "nad", "ops_owner"}),
+            supplies=frozenset({"session", "endpoint", "nad", "ops_owner"}),
             requires=("capability:pxgrid_session_topic",),
             fetch=fetch_pxgrid,
+            notes="no owning-PSN field in the session object; the per-PSN "
+                  "breakdown is session_distribution's job",
         ),
         Provider(
             name="mnt",
-            # One ActiveList read. Session counts by NAD, PSN and ops owner are
+            # One ActiveList read. Session counts by NAD and ops owner are
             # exact and cheap; the expensive per-MAC detail belongs to
             # session_authorization and posture_current, which cache it.
             cost=Cost(target="mnt", requests=1),
-            supplies=frozenset({"session", "endpoint", "psn", "nad", "ops_owner"}),
+            supplies=frozenset({"session", "endpoint", "nad", "ops_owner"}),
             fetch=fetch_mnt,
         ),
         Provider(
@@ -336,7 +305,7 @@ DATASET = Dataset(
             # One materialised RADIUS_ACCOUNTING scan over the stale window with
             # a ROW_NUMBER dedup. The costliest recurring statement in v2.
             cost=Cost(target="oracle", db_seconds=5.0),
-            supplies=frozenset({"session", "endpoint", "psn", "nad"}),
+            supplies=frozenset({"session", "endpoint", "nad"}),
             requires=("view:RADIUS_ACCOUNTING",),
             fetch=fetch_dataconnect,
             notes="reconstructed from accounting; completeness depends on NAD start/stop records",
