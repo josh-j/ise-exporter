@@ -41,6 +41,7 @@ Location is deliberately absent: `network_devices` already publishes
 for it rather than every session series carrying a copy.
 """
 import math
+import re
 import time
 from collections import defaultdict
 
@@ -270,6 +271,30 @@ def normalize_mac(mac):
     return _canonical_mac(mac)
 
 
+# The shape normalize_mac produces, and the only shape the detail URL is ever
+# given: hex pairs and colons need no quoting, so a canonical MAC is safe in a
+# URL path by construction. calling_station_id is whatever the NAS sent -- a
+# username, an IP, free text -- and MnT answers a detail request for one of
+# those with HTTP 500 ("Server encountered error"), so anything else must never
+# cost a request. Same check the operator API applies before its detail route.
+CANONICAL_MAC = re.compile(r"^[0-9A-F]{2}(:[0-9A-F]{2}){5}$")
+
+
+def invalid_macs(sessions):
+    """Distinct calling_station_ids that are not MACs at all.
+
+    Kept apart from active_macs so the fetch can count them: an id that can
+    never be cached would otherwise be re-requested every cycle for as long as
+    the session lives, and every attempt answered with a 500.
+    """
+    found = set()
+    for session in sessions:
+        mac = normalize_mac(session.get("calling_station_id"))
+        if mac and not CANONICAL_MAC.match(mac):
+            found.add(mac)
+    return found
+
+
 def active_list(ctx, *, refresh=False):
     """Read the active list, sharing one fetch across the datasets in this tick.
 
@@ -294,12 +319,17 @@ def active_list(ctx, *, refresh=False):
 
 
 def active_macs(sessions):
-    """Distinct MACs across the active list; one device may hold many sessions."""
+    """Distinct MACs across the active list; one device may hold many sessions.
+
+    Canonical shapes only: a junk calling_station_id is not an endpoint this
+    dataset can ever detail-fetch, so admitting it here would put it in every
+    coverage denominator and, worse, into a detail URL.
+    """
     return {
         mac for mac in (
             normalize_mac(session.get("calling_station_id"))
             for session in sessions)
-        if mac
+        if mac and CANONICAL_MAC.match(mac)
     }
 
 
@@ -323,7 +353,7 @@ def detail_macs(sessions, skip_prefixes):
     wanted = set()
     for session in sessions:
         mac = normalize_mac(session.get("calling_station_id"))
-        if not mac:
+        if not mac or not CANONICAL_MAC.match(mac):
             continue
         nas_ip = str(session.get("nas_ip_address") or "").strip()
         if not nas_ip or not nas_ip.startswith(skip_prefixes):
@@ -339,12 +369,25 @@ def detail_macs(sessions, skip_prefixes):
 # what lets this tell that apart from the appliance being in trouble.
 MNT_NO_SESSION_CODE = "34110"
 
+# Failures that indict the target or the credentials rather than one record.
+# Continuing would fire the same doomed request at every remaining MAC --
+# thousands of attempts against an unreachable node, or enough 401s to lock
+# the account -- and report the cycle as a success. These fail the collection
+# with their own reason; everything per-record is skipped and counted.
+FATAL_REASONS = frozenset({
+    "authentication_failed", "authorization_failed", "authentication_backoff",
+    "connection_failed", "tls_failed", "state_unavailable",
+})
+
 
 def _session_gone(error):
-    """Whether this failure is ISE saying the session is no longer there."""
-    if getattr(error, "code", "") == MNT_NO_SESSION_CODE:
-        return True
-    return 500 <= int(getattr(error, "status", 0) or 0) < 600
+    """Whether this failure is ISE saying the session is no longer there.
+
+    Decided on the cpm-code alone: MnT uses HTTP 500 both for a MAC with no
+    current session (34110) and for genuine trouble ("Server encountered
+    error", no code), so the status cannot tell churn from a broken record.
+    """
+    return getattr(error, "code", "") == MNT_NO_SESSION_CODE
 
 
 def warm(ctx, cache, macs):
@@ -370,15 +413,20 @@ def warm(ctx, cache, macs):
             break
         fetched += 1
         try:
+            # ``mac`` is canonical by construction -- active_macs admits nothing
+            # else -- so the path needs no quoting and can reach no other
+            # MnT resource.
             record = ctx.transport.get_mnt_xml(
                 f"/Session/MACAddress/{mac}", api="mnt_session_detail")
         except TransportError as error:
-            # A MAC that left between the ActiveList read and its detail fetch is
-            # the normal churn case, and ISE answers it with HTTP 500 (cpm-code
-            # 34110) rather than an empty document -- so it arrives here, not at
-            # the empty branch below. Counted apart from other failures because
-            # it is expected traffic; the transport does not surface the
-            # cpm-code, so a genuine MnT 500 lands in this bucket too.
+            if error.reason in FATAL_REASONS:
+                raise
+            # A MAC that left between the ActiveList read and its detail fetch
+            # is the normal churn case, and ISE answers it with HTTP 500 and
+            # cpm-code 34110 rather than an empty document -- so it arrives
+            # here, not at the empty branch below. Counted apart from a genuine
+            # per-record failure (a 500 with no code) because it is expected
+            # traffic; both are skipped and the cycle carries on.
             cache.count("gone" if _session_gone(error) else "failed")
             continue
         except Exception:       # noqa: BLE001 - one MAC must not fail the dataset
@@ -548,6 +596,11 @@ def fetch(ctx):
     # snapshot is what the readers in this cycle aggregate against.
     listing = active_list(ctx, refresh=True)
     sessions = listing.get("sessions") or []
+    # Visible, not silent: one tick per distinct junk id per cycle, in the same
+    # counter the failed fetches use, so a NAS spraying garbage into
+    # calling_station_id shows up without ever costing a request.
+    for _ in invalid_macs(sessions):
+        cache.count("invalid")
     macs = detail_macs(sessions, _skipped_prefixes(ctx))
 
     # Departed MACs are held briefly rather than dropped, so a reconnect inside

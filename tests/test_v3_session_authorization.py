@@ -423,6 +423,88 @@ def test_one_unreachable_endpoint_does_not_fail_the_dataset():
     assert _coverage() == pytest.approx(0.5)
 
 
+def _counted(result):
+    return _sample("ise3_detail_fetches_total",
+                   cache=authz.CACHE, result=result) or 0
+
+
+def test_a_genuine_mnt_500_on_one_mac_is_skipped_and_counted_as_a_failure():
+    # The production case: MnT answers one MAC with HTTP 500 and no cpm-code
+    # ("Server encountered error"). That must cost that MAC only -- N-1 records
+    # still land -- and it must count as "failed", not as the churn bucket,
+    # because a 500 without 34110 is the appliance struggling with the record.
+    from ise_exporter3.transports import TransportError
+
+    bad = "00:11:22:33:44:02"
+
+    class Broken(MnT):
+        def get_mnt_xml(self, path, *, api="mnt_xml"):
+            if path.endswith(f"/{bad}"):
+                self.detail_requests.append(bad)
+                raise TransportError(
+                    "http_error",
+                    "ISE returned HTTP 500 for mnt_session_detail",
+                    status=500, code="")
+            return super().get_mnt_xml(path, api=api)
+
+    failed, gone = _counted("failed"), _counted("gone")
+    transport = Broken(["00:11:22:33:44:01", bad, "00:11:22:33:44:03"])
+    outcome = _run(transport)
+    assert outcome.ok
+    assert len(transport.detail_requests) == 3
+    assert _counted("failed") == failed + 1
+    assert _counted("gone") == gone
+    assert _coverage() == pytest.approx(2 / 3)
+    # The two healthy MACs were aggregated: the cycle produced N-1 records.
+    assert _sample("ise3_session_status_endpoints", provider="mnt",
+                   status="passed", ops_owner="unknown") == 2
+
+
+def test_a_junk_calling_station_id_never_costs_a_request():
+    # calling_station_id is whatever the NAS sent. An id that is not a MAC is
+    # skipped before the wire -- MnT would answer it with "Server encountered
+    # error" every cycle forever -- and counted, so a NAS spraying garbage is
+    # visible rather than silently absent.
+    invalid = _counted("invalid")
+    transport = MnT(["00:11:22:33:44:01"])
+    transport.extra_sessions = [
+        {"calling_station_id": "B4 96 91 12 34 56"},
+        {"calling_station_id": "10.20.30.40"},
+        {"calling_station_id": "host/laptop-01"},
+    ]
+    outcome = _run(transport)
+    assert outcome.ok
+    assert transport.detail_requests == ["00:11:22:33:44:01"]
+    assert _counted("invalid") == invalid + 3
+    # Junk ids leave the coverage denominator too: they can never be fetched,
+    # so keeping them would hold a healthy cache below 1.0 forever.
+    assert _coverage() == 1.0
+
+
+@pytest.mark.parametrize("reason", ["authentication_failed",
+                                    "authorization_failed",
+                                    "connection_failed"])
+def test_a_target_level_failure_mid_warmup_fails_the_cycle_loudly(reason):
+    # The opposite boundary of the skip: bad credentials or an unreachable node
+    # indict every remaining request, so carrying on would fire thousands of
+    # doomed attempts -- or enough 401s to lock the account -- and then report
+    # success. The first such failure ends the cycle with its own reason.
+    from ise_exporter3.transports import TransportError
+
+    class Down(MnT):
+        def get_mnt_xml(self, path, *, api="mnt_xml"):
+            if not path.endswith("/ActiveList"):
+                self.detail_requests.append(path.rsplit("/", 1)[-1])
+                raise TransportError(reason, status=401)
+            return super().get_mnt_xml(path, api=api)
+
+    transport = Down([f"00:11:22:33:66:{index:02X}" for index in range(5)])
+    outcome = _run(transport)
+    assert not outcome.ok
+    assert outcome.reason == reason
+    assert len(transport.detail_requests) == 1, "must stop at the first"
+
+
 # --- aggregation ------------------------------------------------------------
 
 def test_policy_set_and_matched_rule_come_from_other_attr_string():
