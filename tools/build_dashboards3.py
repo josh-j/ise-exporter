@@ -8,6 +8,7 @@ is the first principle in DASHBOARD_DESIGN_PRINCIPLES.md:
                       ise3-psn         are the policy service nodes coping?
                       ise3-control     is the PAN/MnT control plane healthy?
                       ise3-endpoints   what is on the network, and what is not?
+                      ise3-nad         which switch or router is failing, how?
                       ise3-posture     is the fleet compliant?
                       ise3-tacacs      who is administering the devices?
   Tier 3  exporter    ise3-pipeline    is the exporter's view of ISE current?
@@ -17,7 +18,7 @@ is the first principle in DASHBOARD_DESIGN_PRINCIPLES.md:
 Tier 1 is the only dashboard that should ever be opened first. Every panel on
 it links down into the tier that explains it, and every tier-2 dashboard links
 back up. Tier 3 is about the *exporter*, not about ISE: an operator reading it
-is asking whether to believe the other nine.
+is asking whether to believe the other ten.
 
 Two design rules are enforced by construction rather than by review:
 
@@ -305,6 +306,53 @@ def attention(issue, expr):
     the metric carried, so the meaning has to be attached afterwards.
     """
     return f'label_replace({expr}, "issue", "{issue}", "", "")'
+
+
+def offender(issue, expr, labels=(), detail=None):
+    """One row of the named-instance table: which thing, by name.
+
+    attention() counts a class of problem; a count is enough to know something
+    is wrong and never enough to know what to do about it. This names the
+    instances inside that class instead: the identifying labels are joined into
+    one `detail` string so unlike metrics can share a column, and the result is
+    aggregated to (issue, detail) so no metric's own labels leak into the table
+    as a column every other row leaves empty.
+
+    `detail` names the row directly for a metric whose subject is the whole
+    deployment and which therefore carries no label to name it.
+    """
+    if detail is not None:
+        named = f'label_replace({expr}, "detail", "{detail}", "", "")'
+    else:
+        keys = ", ".join('"%s"' % name for name in labels)
+        named = f'label_join({expr}, "detail", " · ", {keys})'
+    return f'max by (issue, detail) (label_replace({named}, "issue", "{issue}", "", ""))'
+
+
+def with_reason(info, condition):
+    """An info metric's reason label, restricted to the datasets in trouble.
+
+    The reason lives on an info series and the trouble lives on a counter, so
+    the two have to be joined. Two things make that join awkward, and both are
+    handled here rather than at each call site. A dataset carries one reason
+    per *candidate* provider, so the info side is restricted to the provider
+    actually serving — otherwise one failing dataset produces a row per
+    provider and the operator reads two different reasons for one fault. And
+    the info side is deliberately the many side of the join: a group_left with
+    a duplicated right-hand series fails the whole query rather than dropping a
+    row, which would blank the panel instead of losing one line of it.
+    """
+    active = f"({metric('ise3_dataset_provider_active')} == 1)"
+    preferred = (f"max by (dataset, reason) "
+                 f"({info} and on(dataset, provider) {active})")
+    whoever = f"max by (dataset, reason) ({info})"
+    # Not simply the active provider's reason: a recovery probe fails under the
+    # preferred source's label while the active source collects, so a dataset
+    # in trouble can hold no reason at all under the provider serving it.
+    # Preferring the active one and falling back to whichever provider recorded
+    # a reason keeps the row rather than dropping it to say nothing.
+    reason = f"({preferred} or ({whoever} unless on(dataset) ({preferred})))"
+    return f"{reason} * on(dataset) group_left() (max by (dataset) ({condition}))"
 
 
 # ---------------------------------------------------------------------------
@@ -1061,29 +1109,121 @@ NODE_CONNECTED = summed(
 TRIAGE_OWNER = 'ops_owner=~"$ops_owner"'
 
 
-def owner_scoped_nad_errors():
-    """RADIUS errors per NAD, with owner and location joined on.
+# What an unclassified device is called in each attribute. classify() defaults
+# the same way, so a device the exporter could not classify and a device it
+# never saw share a bucket rather than splitting into two.
+NAD_ATTRIBUTE_DEFAULTS = {
+    "ops_owner": "unknown",
+    "location": "Unknown",
+    "device_type": "unknown",
+}
+
+
+def nad_attributed(expr, selectors, attributes=("ops_owner", "location")):
+    """A NAD-keyed metric with its inventory attributes joined on.
 
     The assignment family is not total: network_devices publishes a row only
     once a NAD's group detail is cached, and a NAD that MnT reports errors for
     can be absent from ERS entirely — so a bare join would silently drop a
     failing device. The unmatched remainder is therefore kept and labelled
-    unknown; an unowned device stays visible to every owner, because scoping it
-    to an owner nobody is would hide it from all of them. With All selected the
-    union carries every error row exactly once, so nothing changes. The
-    `max by` collapses the provider and device_type labels off the info metric
-    so the join has one row per device.
+    unknown; an unclassified device stays visible under every selection,
+    because scoping it to an owner nobody is would hide it from all of them.
+    With All selected the union carries every row exactly once, so nothing
+    changes. The `max by` collapses provider and the unused attributes off the
+    info metric so the join has one row per device.
     """
-    errors = f"({gate(metric('ise3_radius_errors_by_nad'), 'radius_errors')})"
-    owned = ("max by (nad, ops_owner, location) "
-             f"({metric('ise3_network_device_assignment', TRIAGE_OWNER)})")
+    body = f"({expr})"
+    keys = ", ".join(attributes)
+    owned = (f"max by (nad, {keys}) "
+             f"({metric('ise3_network_device_assignment', selectors)})")
     inventoried = f"max by (nad) ({metric('ise3_network_device_assignment')})"
-    return (
-        f"{errors} * on(nad) group_left(ops_owner, location) ({owned}) "
-        "or label_replace(label_replace("
-        f"{errors} unless on(nad) ({inventoried}), "
-        '"ops_owner", "unknown", "", ""), "location", "Unknown", "", "")'
+    remainder = f"{body} unless on(nad) ({inventoried})"
+    for attribute in attributes:
+        remainder = (f'label_replace({remainder}, "{attribute}", '
+                     f'"{NAD_ATTRIBUTE_DEFAULTS[attribute]}", "", "")')
+    return f"{body} * on(nad) group_left({keys}) ({owned}) or {remainder}"
+
+
+def owner_scoped_nad_errors():
+    """RADIUS errors per NAD, scoped to the triage owner variable.
+
+    Aggregated to the device before the join so the table carries the columns
+    an operator reads and not `provider`, which names the source and says the
+    same thing on every row.
+    """
+    return nad_attributed(
+        summed(gate(metric("ise3_radius_errors_by_nad"), "radius_errors"),
+               by="nad"),
+        TRIAGE_OWNER,
     )
+
+
+def exact_problems():
+    """The named instances behind the attention counts, as one table.
+
+    Every row of `Attention needed` is a count of a class of problem, which is
+    where triage stopped: an operator learned that three certificates had
+    expired and had to open another dashboard to learn which three. This is the
+    same set of checks resolved down to the individual offender, and where the
+    exporter knows why — a collection failure reason, a fallback reason, a node
+    state — the why travels in the name rather than being left for the
+    diagnostic tier to explain.
+
+    Deliberately not here: failing network devices. They are per-device
+    already, there can be hundreds of them, and they have a table of their own
+    below that scopes to one owner and links into the device dashboard.
+    """
+    return " or ".join((
+        offender(
+            "Collection failing",
+            with_reason(
+                metric("ise3_dataset_last_failure_info"),
+                f"{metric('ise3_dataset_consecutive_failures')} > 0"),
+            ("dataset", "reason"),
+        ),
+        offender(
+            "Collection on a fallback provider",
+            with_reason(
+                metric("ise3_dataset_provider_reason_info"),
+                f"{metric('ise3_dataset_provider_degraded')} > 0"),
+            ("dataset", "reason"),
+        ),
+        offender(
+            "Node not connected",
+            "(" + gate(metric("ise3_deployment_node_state", 'state!="Connected"'),
+                       "deployment") + ") == 1",
+            ("node", "state"),
+        ),
+        offender(
+            "Certificate expired",
+            "(" + gate(metric("ise3_certificate_expiry_days"), "certificates") +
+            ") < 0",
+            ("node", "certificate", "usage"),
+        ),
+        offender(
+            "PSN above 90% CPU",
+            "(" + gate(metric("ise3_node_cpu_utilization_percent"),
+                       "psn_performance") + ") > 90",
+            ("node",),
+        ),
+        offender(
+            "Licence tier out of compliance",
+            "(" + gate(metric("ise3_license_compliant"), "licensing") + ") == 0",
+            ("tier",),
+        ),
+        offender(
+            f"Backup older than {BACKUP_STALE_HOURS} hours",
+            "(" + gate(metric("ise3_backup_age_hours"), "backup") +
+            f") > {BACKUP_STALE_HOURS}",
+            detail="deployment backup",
+        ),
+        offender(
+            "TACACS account flagged for review",
+            "(" + gate(metric("ise3_tacacs_internal_account_hygiene_risk"),
+                       "tacacs_config") + ") > 0",
+            ("username", "risk"),
+        ),
+    ))
 
 
 def triage_dashboard():
@@ -1253,6 +1393,27 @@ def triage_dashboard():
             HALF,
         ),
         sized(
+            tbl(
+                "What exactly is wrong",
+                "The same checks as the table beside it, resolved to the "
+                "individual thing that is failing and — where the exporter "
+                "knows it — why. A count says three certificates have expired; "
+                "this says which three, on which node, for which usage. Empty "
+                "is the healthy state. Failing network devices are not listed "
+                "here: they are per-device already, and the table below scopes "
+                "them to one owner and links into the device dashboard.",
+                [instant(exact_problems())],
+                columns=[None],
+                sort=("Issue", False),
+                labels={"issue": "Issue", "detail": "What"},
+                column_overrides=[
+                    by_column("Issue", width=230),
+                ],
+            ),
+            TALL_H,
+            HALF,
+        ),
+        sized(
             ts(
                 "Authentication outcome",
                 "Passed and failed RADIUS authentications over time, stacked "
@@ -1267,8 +1428,8 @@ def triage_dashboard():
                 stacked=True,
                 series_colours=OUTCOME_COLOURS,
             ),
-            TALL_H,
-            HALF,
+            PANEL_H,
+            THIRD,
         ),
         sized(
             ts(
@@ -1293,7 +1454,7 @@ def triage_dashboard():
                 thresholds=LATENCY_SECONDS,
             ),
             PANEL_H,
-            HALF,
+            THIRD,
         ),
         sized(
             states(
@@ -1305,7 +1466,7 @@ def triage_dashboard():
                 [query(readiness_per_dataset(), "{{dataset}}")],
             ),
             PANEL_H,
-            HALF,
+            THIRD,
         ),
     ]
 
@@ -1332,6 +1493,8 @@ def triage_dashboard():
                     by_column("Errors", unit="short",
                               thresholds=NONZERO_WARNING, colour_cells=True),
                     by_column("nad", links=[
+                        drilldown("Open this switch or router", "ise3-nad",
+                                  nad=by_row("Network device")),
                         drilldown("Isolate this device", "ise3-access",
                                   nad=by_row("Network device"))]),
                 ],
@@ -1412,8 +1575,13 @@ def triage_dashboard():
             "ISE is serving.",
             "Read **Attention needed**. An empty table means nothing else is "
             "known to be wrong.",
-            "If a row is populated, click into the dashboard named in that "
-            "panel's link rather than reading further here.",
+            "If a row is populated, read **What exactly is wrong** beside it: "
+            "the same checks named down to the individual node, dataset, "
+            "certificate or account, with the reason where there is one.",
+            "For a failing switch or router, work **Failing network devices** "
+            "and open the device from its row.",
+            "Then click into the dashboard named in that panel's link rather "
+            "than reading further here.",
             "If you own a region, select yourself in the **Operations owner** "
             "variable: the failing-devices, posture, and failure-reason "
             "panels in the two lower sections become your own fix list. The "
@@ -1425,7 +1593,8 @@ def triage_dashboard():
             "A change marker (purple, orange, blue) across every graph means "
             "the exporter's view changed, not necessarily ISE.",
         ],
-        ["RADIUS access", "PSN service", "Control plane", "Collection pipeline"],
+        ["RADIUS access", "Network devices", "PSN service", "Control plane",
+         "Collection pipeline"],
     ), STRIP_H, FULL)]
 
     return assemble(
@@ -2852,10 +3021,8 @@ def control_dashboard():
 
 
 # ---------------------------------------------------------------------------
-# Tier 2 — endpoints and network devices
+# Tier 2 — endpoints
 # ---------------------------------------------------------------------------
-
-ENDPOINT_NAD = 'nad=~"$nad"'
 
 
 def endpoints_dashboard():
@@ -2892,39 +3059,39 @@ def endpoints_dashboard():
         sized(
             stat_panel(
                 "Network devices",
-                "Network devices configured in ISE. Compare against the silent "
-                "device count below: configured but never authenticating is "
-                "either decommissioned kit or a device that cannot reach ISE.",
+                "Network devices configured in ISE, for scale beside the "
+                "endpoint counts. Everything about those devices — which are "
+                "failing, which are silent, who owns them — is on the Network "
+                "devices dashboard rather than here.",
                 [instant(gate(metric("ise3_network_devices_total"),
                               "network_devices"))],
                 thresholds=NEUTRAL,
                 sparkline=True,
                 no_value=NO_DATA_STALE,
+                data_links=(drilldown("Open — network devices", "ise3-nad"),),
             ),
             STAT_H,
             FIFTH,
         ),
         sized(
             stat_panel(
-                "Devices classified",
-                "Share of network devices carrying the location, type and "
-                "owner attributes the rest of this dashboard set groups by. "
-                "Low classification is why breakdowns elsewhere show large "
-                "'unknown' buckets.",
-                [instant(share(
-                    gate(metric("ise3_network_devices_classified"), "network_devices"),
-                    gate(metric("ise3_network_devices_total"), "network_devices")))],
-                unit="percentunit",
-                thresholds=COVERAGE,
-                minimum=0,
-                maximum=1,
+                "Endpoints eligible for posture",
+                "Endpoints whose session says a posture agent applies to them. "
+                "The denominator behind every compliance figure on the posture "
+                "dashboard: a number well below the endpoint total means most "
+                "of the estate is outside posture entirely.",
+                [instant(summed(gate(metric("ise3_endpoints_posture_applicable",
+                                            'applicable="yes"'),
+                                     "endpoint_inventory")))],
+                thresholds=NEUTRAL,
+                sparkline=True,
                 no_value=NO_DATA_STALE,
+                data_links=(drilldown("Why — posture", "ise3-posture"),),
             ),
             STAT_H,
             EIGHTH,
         ),
-    ] + trust_pair(("endpoint_inventory", "network_devices", "nad_health"),
-                   span=EIGHTH)
+    ] + trust_pair(("endpoint_inventory", "network_devices"), span=EIGHTH)
 
     growth = [
         sized(
@@ -3007,110 +3174,6 @@ def endpoints_dashboard():
         ),
     ]
 
-    devices = [
-        sized(
-            tbl(
-                "Network device assignments",
-                "Every network device with the type, location and operations "
-                "owner ISE holds for it. The lookup table behind every "
-                "ops-owner and location breakdown in this dashboard set; a "
-                "device missing attributes here is why it appears as 'unknown' "
-                "elsewhere.",
-                [instant(gate(metric("ise3_network_device_assignment", ENDPOINT_NAD),
-                              "network_devices"))],
-                columns=[None],
-                labels={"nad": "Network device", "device_type": "Type",
-                        "location": "Location", "ops_owner": "Operations owner"},
-            ),
-            TALL_H,
-            HALF,
-        ),
-        sized(
-            tbl(
-                "Silent and stale network devices",
-                "Time since each device last authenticated anything, longest "
-                "first. A device at the top of this list is either "
-                "decommissioned, misconfigured, or unable to reach ISE — and "
-                "no other panel will tell you, because a silent device "
-                "produces no errors.",
-                [instant(gate(metric("ise3_nad_last_authentication_age_seconds",
-                                     ENDPOINT_NAD), "nad_health"))],
-                columns=["Silent for"],
-                sort=("Silent for", True),
-                labels={"nad": "Network device"},
-                column_overrides=[
-                    by_column("Silent for", unit="s", width=140),
-                ],
-            ),
-            TALL_H,
-            HALF,
-        ),
-    ]
-
-    composition_devices = [
-        sized(
-            ranked(
-                "Devices by location",
-                "Network devices per location attribute, computed by ISE "
-                "rather than from the exporter's device cache — so unlike the "
-                "assignment table above, this stays populated while that cache "
-                "is still filling.",
-                gate(metric("ise3_network_devices_by_location"), "network_devices"),
-                label="location",
-                label_header="Location",
-                header="Devices",
-            ),
-            PANEL_H,
-            QUARTER,
-        ),
-        sized(
-            ranked(
-                "Devices by type",
-                "Network devices per device-type attribute. Worth checking "
-                "against reality before writing a policy that keys on device "
-                "type: a large 'unknown' bucket means the policy will not "
-                "match what you expect.",
-                gate(metric("ise3_network_devices_by_type"), "network_devices"),
-                label="device_type",
-                label_header="Device type",
-                header="Devices",
-            ),
-            PANEL_H,
-            QUARTER,
-        ),
-        sized(
-            ranked(
-                "Devices by operations owner",
-                "Network devices per operations owner. The lookup behind every "
-                "ops-owner breakdown in this dashboard set — if a team is "
-                "missing here, their devices appear as 'unknown' everywhere "
-                "else.",
-                gate(metric("ise3_network_devices_by_ops_owner"), "network_devices"),
-                label="ops_owner",
-                label_header="Operations owner",
-                header="Devices",
-            ),
-            PANEL_H,
-            QUARTER,
-        ),
-        sized(
-            ranked(
-                "Live sessions by network device",
-                "Where the live sessions actually are. Read against the "
-                "authentication volume table: a device with sessions but no "
-                "recent authentications is holding stale sessions that were "
-                "never torn down.",
-                gate(metric("ise3_active_sessions_by_nad", ENDPOINT_NAD),
-                     "active_sessions"),
-                label="nad",
-                label_header="Network device",
-                header="Sessions",
-            ),
-            PANEL_H,
-            QUARTER,
-        ),
-    ]
-
     attributes = [
         sized(
             ranked(
@@ -3162,27 +3225,279 @@ def endpoints_dashboard():
         ),
     ]
 
-    activity = [
+    closing = [sized(about(
+        "describe what is connected to the network and what ISE knows about "
+        "it — the inventory view, not the incident view.",
+        [
+            "Read the endpoint counts and the unprofiled share.",
+            "Use the composition tables to check the estate matches "
+            "expectation.",
+            "For anything about the switches and routers themselves — which "
+            "are failing, which are silent, who owns them — go to the Network "
+            "devices dashboard; this one is about what connects to them.",
+        ],
+        [
+            "Growing unprofiled count: check the profiling feed before "
+            "changing policy.",
+            "Blank attribute panels: the detail cache is still filling, see "
+            "the coverage panel on the Network devices dashboard.",
+            "Endpoint total stepping without a matching import: read the "
+            "change annotations before treating it as growth.",
+        ],
+        ["Triage", "RADIUS access", "Network devices", "Posture", "Capacity"],
+    ), STRIP_H, FULL)]
+
+    return assemble(
+        "ISE · Endpoints",
+        "ise3-endpoints",
+        "Tier 2 diagnostic. What is connected to the network, and what does "
+        "ISE know about it? Inventory and profiling first, then composition, "
+        "then the live attribute detail. The devices themselves are on the "
+        "Network devices dashboard.",
+        [
+            ("Inventory", inventory),
+            ("Over time", growth),
+            ("Composition", composition),
+            ("Live endpoint attributes", attributes, COLLAPSED),
+            ("Reference", closing, COLLAPSED),
+        ],
+        tier=DIAGNOSTIC,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Tier 2 — network devices (switches and routers)
+#
+# The device-owner's dashboard. Everything here is keyed by the network device
+# rather than by ISE: which switch is failing, with which method, how much of
+# its traffic that is, whether it is silent, and who owns it. The four
+# variables narrow the whole page to one site, one owner, one platform, or one
+# switch, which is the scope an operator actually works in.
+# ---------------------------------------------------------------------------
+
+NAD_FILTER = 'nad=~"$nad"'
+NAD_SCOPE = ('ops_owner=~"$ops_owner",location=~"$location",'
+             'device_type=~"$device_type",nad=~"$nad"')
+NAD_ATTRIBUTES = ("ops_owner", "location", "device_type")
+NAD_COLUMNS = {"nad": "Network device", "ops_owner": "Operations owner",
+               "location": "Location", "device_type": "Type"}
+
+
+def scoped_nad(name, dataset, selectors="", by="nad"):
+    """One per-NAD metric, aggregated to the device and scoped to the variables.
+
+    The aggregation is not decoration: `provider` differs between the sources
+    behind these metrics, and a table merging four of them on their shared
+    columns would split every device into one row per source without it.
+    """
+    selected = f"{NAD_FILTER},{selectors}" if selectors else NAD_FILTER
+    return nad_attributed(
+        summed(gate(metric(name, selected), dataset), by=by),
+        NAD_SCOPE, NAD_ATTRIBUTES)
+
+
+def nad_dashboard():
+    fleet = [
+        sized(
+            stat_panel(
+                "Devices in scope",
+                "Network devices matching the four variables above, from the "
+                "ISE inventory. This is the denominator for everything else on "
+                "the page: with All selected it is the whole configured "
+                "estate, and a device the exporter has not classified yet "
+                "counts here only once its group detail is cached.",
+                [instant("count(max by (nad) (" +
+                         gate(metric("ise3_network_device_assignment", NAD_SCOPE),
+                              "network_devices") + "))")],
+                thresholds=NEUTRAL,
+                no_value=NO_DATA_STALE,
+            ),
+            STAT_H,
+            FIFTH,
+        ),
+        sized(
+            stat_panel(
+                "Devices with errors",
+                "How many of those devices produced at least one RADIUS error "
+                "in the window. One device out of hundreds is a job for the "
+                "fix list below; a whole location at once is an upstream or "
+                "template problem rather than a device one.",
+                [instant("count((" + scoped_nad("ise3_radius_errors_by_nad",
+                                                "radius_errors") + ") > 0)")],
+                thresholds=NONZERO_WARNING,
+                sparkline=True,
+                no_value=NO_DATA_CLEAN,
+            ),
+            STAT_H,
+            FIFTH,
+        ),
+        sized(
+            stat_panel(
+                "Silent devices and activity coverage",
+                "Configured devices with no authentication activity at all, "
+                "and the share of the estate the activity scan reached. "
+                "Fleet-wide rather than scoped, because silence is measured "
+                "against the whole configured inventory. Low coverage means "
+                "the silent count beside it is a floor rather than a total.",
+                [
+                    instant(summed(gate(metric("ise3_nad_silent_total"),
+                                        "nad_health")), "silent"),
+                    instant(summed(gate(metric("ise3_nad_activity_covered"),
+                                        "nad_health")), "covered", ref="B"),
+                ],
+                thresholds=NONZERO_WARNING,
+                overrides=[by_ref("B", unit="percentunit", thresholds=COVERAGE)],
+                no_value=NO_DATA_STALE,
+            ),
+            STAT_H,
+            FIFTH,
+        ),
+        sized(
+            stat_panel(
+                "Devices classified",
+                "Share of the configured estate carrying the location, type "
+                "and owner groups this page's variables filter on. Low "
+                "classification is why a device shows up as unknown here and "
+                "in every other owner breakdown in the set.",
+                [instant(share(
+                    gate(metric("ise3_network_devices_classified"),
+                         "network_devices"),
+                    gate(metric("ise3_network_devices_total"), "network_devices")))],
+                unit="percentunit",
+                thresholds=COVERAGE,
+                minimum=0,
+                maximum=1,
+                no_value=NO_DATA_STALE,
+            ),
+            STAT_H,
+            EIGHTH,
+        ),
+    ] + trust_pair(("network_devices", "nad_health", "radius_errors",
+                    "radius_reporting", "active_sessions"), span=EIGHTH)
+
+    failing = [
         sized(
             tbl(
-                "Per-device authentication activity",
-                "Passed and failed authentication counts per network device "
-                "from the NAD health collection, complete and sorted by "
-                "failures. Overlaps deliberately with the RADIUS access work "
-                "queue — this one is the device-owner's view, that one is the "
-                "incident view.",
-                [instant(gate(metric("ise3_nad_authentications",
-                                     f'{ENDPOINT_NAD},status="failed"'),
-                              "nad_health"), ref="A"),
-                 instant(gate(metric("ise3_nad_authentications",
-                                     f'{ENDPOINT_NAD},status="passed"'),
-                              "nad_health"), ref="B")],
-                columns=["Failed", "Passed"],
-                sort=("Failed", True),
-                labels={"nad": "Network device"},
+                "Device fix list",
+                "One row per network device in scope: errors, failed and "
+                "passed authentications, and the live sessions it is currently "
+                "holding — worst first. This is the panel that separates a "
+                "broken switch from a busy one: errors beside a large passed "
+                "count are a minority of clients failing on a healthy device, "
+                "while errors with no passes and no sessions is a device that "
+                "cannot authenticate anyone. Errors come from MnT and the "
+                "pass/fail counts from the activity view, so the two can "
+                "disagree by a collection cadence.",
+                [
+                    instant(scoped_nad("ise3_radius_errors_by_nad",
+                                       "radius_errors"), ref="A"),
+                    instant(scoped_nad("ise3_nad_authentications", "nad_health",
+                                       'status="failed"'), ref="B"),
+                    instant(scoped_nad("ise3_nad_authentications", "nad_health",
+                                       'status="passed"'), ref="C"),
+                    instant(scoped_nad("ise3_active_sessions_by_nad",
+                                       "active_sessions"), ref="D"),
+                ],
+                columns=["Errors", "Failed", "Passed", "Sessions"],
+                sort=("Errors", True),
+                labels=NAD_COLUMNS,
                 column_overrides=[
-                    by_column("Failed", thresholds=NONZERO_WARNING,
-                              colour_cells=True, width=110),
+                    by_column("Errors", thresholds=NONZERO_WARNING,
+                              colour_cells=True, width=90),
+                    by_column("Failed", thresholds=NONZERO_WARNING, width=90),
+                    by_column("Network device", links=[
+                        drilldown("Isolate this device on RADIUS access",
+                                  "ise3-access", nad=by_row("Network device")),
+                        drilldown("Narrow this page to it", "ise3-nad",
+                                  nad=by_row("Network device")),
+                    ]),
+                ],
+            ),
+            TALL_H,
+            HALF,
+        ),
+        sized(
+            tbl(
+                "Which device, failing which method",
+                "Every device and authentication method pairing that produced "
+                "failures, with the owner and location ISE holds for the "
+                "device. Each row is one concrete thing to go and look at: a "
+                "device failing only dot1x while MAB passes is a supplicant or "
+                "certificate problem, a device failing everything is the "
+                "shared secret or the AAA configuration. This cross-product is "
+                "bounded by the exporter for cost reasons — the pipeline "
+                "dashboard's coverage panel says by how much.",
+                [instant(scoped_nad("ise3_radius_failures_by_nad_method",
+                                    "radius_reporting", by="nad,method"))],
+                columns=["Failures"],
+                sort=("Failures", True),
+                labels={**NAD_COLUMNS, "method": "Method"},
+                column_overrides=[
+                    by_column("Failures", thresholds=NONZERO_WARNING,
+                              colour_cells=True, width=100),
+                    by_column("Network device", links=[
+                        drilldown("Narrow this page to it", "ise3-nad",
+                                  nad=by_row("Network device"))]),
+                ],
+            ),
+            TALL_H,
+            HALF,
+        ),
+    ]
+
+    over_time = [
+        sized(
+            ts(
+                "Errors over time, by device",
+                "RADIUS errors per device across the window, for the devices "
+                "in scope. A step is a change — a configuration push, a "
+                "certificate rollover, a link event; a ramp is something "
+                "degrading. Narrow the Network device variable to a handful "
+                "before reading this on a large estate.",
+                [query(scoped_nad("ise3_radius_errors_by_nad", "radius_errors"),
+                       "{{nad}}")],
+                series_colours=OUTCOME_COLOURS,
+                legend_placement="right",
+            ),
+            PANEL_H,
+            HALF,
+        ),
+        sized(
+            ts(
+                "Authentication volume, by device and outcome",
+                "Passed and failed authentications per device over the same "
+                "window. Read it against the errors beside it: volume "
+                "collapsing to nothing is a device that stopped talking to "
+                "ISE, which produces no errors and would otherwise look like "
+                "a quiet night.",
+                [query(scoped_nad("ise3_radius_authentications_by_nad",
+                                  "radius_reporting", by="nad,status"),
+                       "{{nad}} · {{status}}")],
+                series_colours=OUTCOME_COLOURS,
+                legend_placement="right",
+            ),
+            PANEL_H,
+            HALF,
+        ),
+    ]
+
+    silence = [
+        sized(
+            tbl(
+                "Silent and stale devices",
+                "Time since each device in scope last authenticated anything, "
+                "longest first. A device at the top is decommissioned, "
+                "misconfigured, or unable to reach ISE — and no other panel "
+                "will tell you, because a silent device produces no errors. "
+                "Check the activity feed age beside it before acting: a whole "
+                "estate reported silent is a stale feed, not a dead estate.",
+                [instant(scoped_nad("ise3_nad_last_authentication_age_seconds",
+                                    "nad_health"))],
+                columns=["Silent for"],
+                sort=("Silent for", True),
+                labels=NAD_COLUMNS,
+                column_overrides=[
+                    by_column("Silent for", unit="s", width=140),
                 ],
             ),
             TALL_H,
@@ -3190,32 +3505,92 @@ def endpoints_dashboard():
         ),
         sized(
             stat_panel(
-                "Silent devices and activity coverage",
-                "How many configured devices have shown no authentication "
-                "activity at all, and what share of devices the activity "
-                "source could account for. Low coverage means the silent count "
-                "beside it is a floor rather than a total.",
-                [
-                    instant(gate(metric("ise3_nad_silent_total"), "nad_health"),
-                            "silent"),
-                    instant(gate(metric("ise3_nad_activity_covered"), "nad_health"),
-                            "covered", ref="B"),
-                ],
-                thresholds=NONZERO_WARNING,
-                overrides=[by_ref("B", unit="percentunit",
-                                  thresholds=COVERAGE)],
+                "Activity feed age",
+                "Age of the newest row in the activity view the silence "
+                "figures are computed from, measured over the whole view "
+                "rather than the scan window. Older than the window means "
+                "every device will report silent whether or not it is: this "
+                "panel is what stops that being read as an estate-wide "
+                "outage. -1 means the view has never held a row.",
+                [instant(summed(gate(metric("ise3_nad_activity_source_age_seconds"),
+                                     "nad_health")))],
+                unit="s",
+                thresholds=COLLECTION_AGE,
                 no_value=NO_DATA_STALE,
+                data_links=(drilldown("Why — collection pipeline",
+                                      "ise3-pipeline"),),
             ),
             STAT_H,
             HALF,
         ),
+    ]
+
+    estate = [
+        sized(
+            ranked(
+                "Devices by type",
+                "Network devices per device-type group — the switch and router "
+                "platforms ISE believes it is talking to. A large unknown "
+                "bucket means the Type variable on this page filters less than "
+                "it appears to.",
+                gate(metric("ise3_network_devices_by_type"), "network_devices"),
+                label="device_type",
+                label_header="Type",
+                header="Devices",
+            ),
+            PANEL_H,
+            THIRD,
+        ),
+        sized(
+            ranked(
+                "Devices by location",
+                "Network devices per location group, computed by ISE rather "
+                "than from the exporter's device cache — so this stays "
+                "populated while that cache is still filling.",
+                gate(metric("ise3_network_devices_by_location"), "network_devices"),
+                label="location",
+                label_header="Location",
+                header="Devices",
+            ),
+            PANEL_H,
+            THIRD,
+        ),
+        sized(
+            ranked(
+                "Devices by operations owner",
+                "Network devices per operations owner. The lookup behind every "
+                "owner-scoped panel in this set — a team missing here has its "
+                "devices appearing as unknown everywhere else.",
+                gate(metric("ise3_network_devices_by_ops_owner"), "network_devices"),
+                label="ops_owner",
+                label_header="Operations owner",
+                header="Devices",
+            ),
+            PANEL_H,
+            THIRD,
+        ),
+        sized(
+            tbl(
+                "Device inventory",
+                "Every network device in scope with the type, location and "
+                "operations owner ISE holds for it. The lookup table behind "
+                "every grouping on this page; a device missing attributes here "
+                "is why it appears as unknown above.",
+                [instant(gate(metric("ise3_network_device_assignment", NAD_SCOPE),
+                              "network_devices"))],
+                columns=[None],
+                labels=NAD_COLUMNS,
+            ),
+            TALL_H,
+            HALF,
+        ),
         sized(
             ts(
-                "Network device detail-cache coverage",
-                "How much of the network device list the exporter has fetched "
-                "full detail for. The assignment table above is suppressed "
-                "below 99% coverage, so a dip here explains a table that has "
-                "gone blank.",
+                "Device detail-cache coverage",
+                "How much of the device list the exporter has fetched group "
+                "detail for. Group membership needs one request per device, so "
+                "a cold start fills over several cycles — a dip here explains "
+                "devices appearing as unknown in the tables above.",
                 [query(metric("ise3_detail_cache_coverage",
                               'cache="ers_network_device"'), "device detail")],
                 unit="percentunit",
@@ -3228,45 +3603,117 @@ def endpoints_dashboard():
         ),
     ]
 
+    administration = [
+        sized(
+            tbl(
+                "Device administration activity",
+                "TACACS authentications against the network devices in scope, "
+                "passed and failed. Failures concentrated on one device are "
+                "usually its shared secret or an AAA configuration that "
+                "drifted from the template — the same root cause as a RADIUS "
+                "failure on that device, which is why both live on this page.",
+                [
+                    # Aggregated to the device: `status` differs between the
+                    # two targets, and a table merges its frames on the columns
+                    # they share, so leaving it on would split every device
+                    # into a failed row and a passed row instead of giving it
+                    # one row with two columns.
+                    instant(summed(gate(metric("ise3_tacacs_authentications",
+                                               'dimension="device",'
+                                               'status="failed",value=~"$nad"'),
+                                        "tacacs_activity"), by="value"),
+                            ref="A"),
+                    instant(summed(gate(metric("ise3_tacacs_authentications",
+                                               'dimension="device",'
+                                               'status="passed",value=~"$nad"'),
+                                        "tacacs_activity"), by="value"),
+                            ref="B"),
+                ],
+                columns=["Failed", "Passed"],
+                sort=("Failed", True),
+                labels={"value": "Network device"},
+                column_overrides=[
+                    by_column("Failed", thresholds=NONZERO_WARNING,
+                              colour_cells=True, width=110),
+                ],
+            ),
+            TALL_H,
+            HALF,
+        ),
+        sized(
+            tbl(
+                "Who administered which device",
+                "Individual authorization decisions on the devices in scope, "
+                "with the account, policy, shell profile and command set "
+                "involved. The audit answer to 'who touched this switch', and "
+                "the first thing to read when a device's configuration changed "
+                "without a ticket.",
+                [instant(gate(metric("ise3_tacacs_authorization_details",
+                                     'device=~"$nad"'), "tacacs_activity"))],
+                columns=["Decisions"],
+                sort=("Decisions", True),
+                labels={"username": "Account", "device": "Network device",
+                        "policy": "Policy", "shell_profile": "Shell profile",
+                        "command_set": "Command set", "status": "Status"},
+            ),
+            TALL_H,
+            HALF,
+        ),
+    ]
+
     closing = [sized(about(
-        "describe what is on the network and what ISE knows about it — the "
-        "inventory view, not the incident view.",
+        "answer which switch or router is broken, in what way, and who owns "
+        "it — the device-owner's view rather than ISE's.",
         [
-            "Read the inventory counts and the classification share.",
-            "Use the composition tables to check the estate matches "
-            "expectation.",
-            "Work the silent-device list: silence produces no errors anywhere "
-            "else, so this is the only panel that surfaces it.",
+            "Set the variables to your scope: an owner, a location, a "
+            "platform, or one device.",
+            "Read **Devices with errors**. One device is a device problem; a "
+            "whole location at once is not.",
+            "Work the **Device fix list**: errors beside passes and sessions "
+            "say whether the device is broken or merely busy.",
+            "Use **Which device, failing which method** to turn a row into a "
+            "concrete cause, then open the device on RADIUS access.",
+            "Before closing, check **Silent and stale devices** — silence "
+            "produces no errors and appears nowhere else.",
         ],
         [
-            "Low classification: fix the network device attributes in ISE — "
-            "several dashboards group by them.",
-            "Growing unprofiled count: check the profiling feed before "
-            "changing policy.",
-            "Blank attribute panels: the detail cache is still filling, see "
-            "the coverage panel.",
+            "Errors on one device with passes continuing: supplicant or "
+            "certificate trouble on a subset of its clients.",
+            "Errors with no passes and no sessions: shared secret, AAA "
+            "configuration, or the device cannot reach a PSN.",
+            "Every device silent at once: read the activity feed age before "
+            "anything else — that is a collection fault, not an outage.",
+            "Devices showing as unknown: their ISE group assignment is "
+            "missing, and the detail-cache coverage panel says whether the "
+            "exporter is still filling.",
         ],
-        ["Triage", "RADIUS access", "Posture", "Capacity"],
+        ["Triage", "RADIUS access", "Endpoints", "Device administration",
+         "Collection pipeline"],
     ), STRIP_H, FULL)]
 
     return assemble(
-        "ISE · Endpoints and devices",
-        "ise3-endpoints",
-        "Tier 2 diagnostic. What is on the network, and what does ISE know "
-        "about it? Inventory and classification first, then composition, then "
-        "the network devices and their activity.",
+        "ISE · Network devices",
+        "ise3-nad",
+        "Tier 2 diagnostic. Which switch or router is failing, in what way, "
+        "and who owns it? Scoped by owner, location, platform and device — "
+        "errors and volume first, then the method behind them, then silence.",
         [
-            ("Inventory", inventory),
-            ("Over time", growth),
-            ("Composition", composition),
-            ("Network devices", devices),
-            ("Device composition", composition_devices, COLLAPSED),
-            ("Live endpoint attributes", attributes, COLLAPSED),
-            ("Device activity", activity, COLLAPSED),
+            ("Device fleet", fleet),
+            ("Which device is broken", failing),
+            ("Over time", over_time),
+            ("Silence", silence),
+            ("The estate", estate, COLLAPSED),
+            ("Device administration", administration, COLLAPSED),
             ("Reference", closing, COLLAPSED),
         ],
         tier=DIAGNOSTIC,
         variables=(
+            label_variable("ops_owner", "Operations owner",
+                           "ise3_network_devices_by_ops_owner", "ops_owner"),
+            label_variable("location", "Location",
+                           "ise3_network_devices_by_location", "location"),
+            label_variable("device_type", "Type",
+                           "ise3_network_devices_by_type", "device_type"),
             label_variable("nad", "Network device",
                            "ise3_network_device_assignment", "nad"),
         ),
@@ -3782,12 +4229,20 @@ def tacacs_dashboard():
                 "doubles as the audit answer to 'who logged into the network "
                 "kit'.",
                 [
-                    instant(gate(metric("ise3_tacacs_authentications",
-                                        'dimension="username",status="failed"'),
-                                 "tacacs_activity"), ref="A"),
-                    instant(gate(metric("ise3_tacacs_authentications",
-                                        'dimension="username",status="passed"'),
-                                 "tacacs_activity"), ref="B"),
+                    # Aggregated to the account: `status` differs between the
+                    # two targets, and a table merges its frames on the columns
+                    # they share, so leaving it on splits every account into a
+                    # failed row and a passed row.
+                    instant(summed(gate(metric("ise3_tacacs_authentications",
+                                               'dimension="username",'
+                                               'status="failed"'),
+                                        "tacacs_activity"), by="value"),
+                            ref="A"),
+                    instant(summed(gate(metric("ise3_tacacs_authentications",
+                                               'dimension="username",'
+                                               'status="passed"'),
+                                        "tacacs_activity"), by="value"),
+                            ref="B"),
                 ],
                 columns=["Failed", "Passed"],
                 sort=("Failed", True),
@@ -3807,12 +4262,20 @@ def tacacs_dashboard():
                 "with many failures is often one where the shared secret or "
                 "the AAA configuration drifted from the template.",
                 [
-                    instant(gate(metric("ise3_tacacs_authentications",
-                                        'dimension="device",status="failed"'),
-                                 "tacacs_activity"), ref="A"),
-                    instant(gate(metric("ise3_tacacs_authentications",
-                                        'dimension="device",status="passed"'),
-                                 "tacacs_activity"), ref="B"),
+                    # Aggregated to the device: `status` differs between the
+                    # two targets, and a table merges its frames on the columns
+                    # they share, so leaving it on splits every device into a
+                    # failed row and a passed row.
+                    instant(summed(gate(metric("ise3_tacacs_authentications",
+                                               'dimension="device",'
+                                               'status="failed"'),
+                                        "tacacs_activity"), by="value"),
+                            ref="A"),
+                    instant(summed(gate(metric("ise3_tacacs_authentications",
+                                               'dimension="device",'
+                                               'status="passed"'),
+                                        "tacacs_activity"), by="value"),
+                            ref="B"),
                 ],
                 columns=["Failed", "Passed"],
                 sort=("Failed", True),
@@ -4009,7 +4472,7 @@ def pipeline_dashboard():
                 "Datasets trustworthy",
                 "How many datasets both collected successfully and are inside "
                 "their freshness window. This is the number that decides "
-                "whether to believe the other nine dashboards.",
+                "whether to believe the other ten dashboards.",
                 [instant(f"count(({readiness_per_dataset()}) == 1)")],
                 thresholds=NEUTRAL,
                 no_value=NO_DATA_EXPORTER,
@@ -5178,6 +5641,7 @@ DASHBOARDS = {
     "ise3-psn": psn_dashboard,
     "ise3-control": control_dashboard,
     "ise3-endpoints": endpoints_dashboard,
+    "ise3-nad": nad_dashboard,
     "ise3-posture": posture_dashboard,
     "ise3-tacacs": tacacs_dashboard,
     "ise3-pipeline": pipeline_dashboard,
@@ -5190,7 +5654,7 @@ DASHBOARDS = {
 TIERS = {
     "triage": ("ise3-triage",),
     "diagnostic": ("ise3-access", "ise3-psn", "ise3-control", "ise3-endpoints",
-                   "ise3-posture", "ise3-tacacs"),
+                   "ise3-nad", "ise3-posture", "ise3-tacacs"),
     "exporter": ("ise3-pipeline", "ise3-load"),
     "capacity": ("ise3-capacity",),
 }

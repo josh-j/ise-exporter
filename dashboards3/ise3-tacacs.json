@@ -728,7 +728,7 @@
       "repeatDirection": "h",
       "targets": [
         {
-          "expr": "(ise3_tacacs_authentications{dimension=\"username\",status=\"failed\"}) and on() (((max(ise3_dataset_up{dataset=\"tacacs_activity\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"tacacs_activity\"} == 1))) == 1) and ((max(ise3_dataset_fresh{dataset=\"tacacs_activity\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"tacacs_activity\"} == 1))) == 1))",
+          "expr": "sum by (value) ((ise3_tacacs_authentications{dimension=\"username\",status=\"failed\"}) and on() (((max(ise3_dataset_up{dataset=\"tacacs_activity\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"tacacs_activity\"} == 1))) == 1) and ((max(ise3_dataset_fresh{dataset=\"tacacs_activity\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"tacacs_activity\"} == 1))) == 1)))",
           "format": "table",
           "instant": true,
           "legendFormat": "",
@@ -736,7 +736,7 @@
           "refId": "A"
         },
         {
-          "expr": "(ise3_tacacs_authentications{dimension=\"username\",status=\"passed\"}) and on() (((max(ise3_dataset_up{dataset=\"tacacs_activity\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"tacacs_activity\"} == 1))) == 1) and ((max(ise3_dataset_fresh{dataset=\"tacacs_activity\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"tacacs_activity\"} == 1))) == 1))",
+          "expr": "sum by (value) ((ise3_tacacs_authentications{dimension=\"username\",status=\"passed\"}) and on() (((max(ise3_dataset_up{dataset=\"tacacs_activity\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"tacacs_activity\"} == 1))) == 1) and ((max(ise3_dataset_fresh{dataset=\"tacacs_activity\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"tacacs_activity\"} == 1))) == 1)))",
           "format": "table",
           "instant": true,
           "legendFormat": "",
@@ -844,7 +844,7 @@
       "repeatDirection": "h",
       "targets": [
         {
-          "expr": "(ise3_tacacs_authentications{dimension=\"device\",status=\"failed\"}) and on() (((max(ise3_dataset_up{dataset=\"tacacs_activity\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"tacacs_activity\"} == 1))) == 1) and ((max(ise3_dataset_fresh{dataset=\"tacacs_activity\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"tacacs_activity\"} == 1))) == 1))",
+          "expr": "sum by (value) ((ise3_tacacs_authentications{dimension=\"device\",status=\"failed\"}) and on() (((max(ise3_dataset_up{dataset=\"tacacs_activity\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"tacacs_activity\"} == 1))) == 1) and ((max(ise3_dataset_fresh{dataset=\"tacacs_activity\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"tacacs_activity\"} == 1))) == 1)))",
           "format": "table",
           "instant": true,
           "legendFormat": "",
@@ -852,7 +852,7 @@
           "refId": "A"
         },
         {
-          "expr": "(ise3_tacacs_authentications{dimension=\"device\",status=\"passed\"}) and on() (((max(ise3_dataset_up{dataset=\"tacacs_activity\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"tacacs_activity\"} == 1))) == 1) and ((max(ise3_dataset_fresh{dataset=\"tacacs_activity\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"tacacs_activity\"} == 1))) == 1))",
+          "expr": "sum by (value) ((ise3_tacacs_authentications{dimension=\"device\",status=\"passed\"}) and on() (((max(ise3_dataset_up{dataset=\"tacacs_activity\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"tacacs_activity\"} == 1))) == 1) and ((max(ise3_dataset_fresh{dataset=\"tacacs_activity\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"tacacs_activity\"} == 1))) == 1)))",
           "format": "table",
           "instant": true,
           "legendFormat": "",

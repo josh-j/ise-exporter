@@ -348,13 +348,13 @@ pip install -e '.[dashboards]'
 python tools/build_dashboards3.py --out dashboards3
 ```
 
-Ten dashboards on four tiers, organised by audience and time horizon rather
+Eleven dashboards on four tiers, organised by audience and time horizon rather
 than by data source, following `DASHBOARD_DESIGN_PRINCIPLES.md`:
 
 | Tier | Dashboards |
 |---|---|
 | Triage | `ise3-triage` — is ISE authenticating users right now? |
-| Diagnostic | `ise3-access`, `ise3-psn`, `ise3-control`, `ise3-endpoints`, `ise3-posture`, `ise3-tacacs` |
+| Diagnostic | `ise3-access`, `ise3-psn`, `ise3-control`, `ise3-endpoints`, `ise3-nad`, `ise3-posture`, `ise3-tacacs` |
 | Exporter | `ise3-pipeline` — is the exporter's view current? `ise3-load` — what does it cost? |
 | Capacity | `ise3-capacity` — 30-day trends for licence, growth, and runway |
 

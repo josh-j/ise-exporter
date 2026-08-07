@@ -84,7 +84,7 @@
         "type": "prometheus",
         "uid": "${prometheus}"
       },
-      "description": "How many datasets both collected successfully and are inside their freshness window. This is the number that decides whether to believe the other nine dashboards.",
+      "description": "How many datasets both collected successfully and are inside their freshness window. This is the number that decides whether to believe the other ten dashboards.",
       "fieldConfig": {
         "defaults": {
           "noValue": "no data \u2014 exporter absent?",

@@ -410,6 +410,58 @@ def test_triage_breaks_live_failures_down_by_reason_for_an_owner():
     assert 'dataset="session_authorization"' in reason
 
 
+def test_triage_names_the_instance_behind_each_count():
+    # A count is enough to know something is wrong and never enough to know
+    # what to do about it: "three certificates expired" sent an operator to
+    # another dashboard to learn which three. The named table is the answer to
+    # that, so it has to keep naming things -- one row per offender, carrying
+    # the reason where the exporter records one.
+    exprs = _triage_exprs()
+    exact = exprs.get("What exactly is wrong")
+    assert exact, "triage lost the named-instance table"
+    # The identity of the offender travels in a joined label, not in the count.
+    assert 'label_join' in exact and '"detail"' in exact
+    assert "max by (issue, detail)" in exact
+    for named in ("ise3_deployment_node_state", "ise3_certificate_expiry_days",
+                  "ise3_license_compliant", "ise3_node_cpu_utilization_percent",
+                  "ise3_dataset_last_failure_info"):
+        assert named in exact, f"the named table stopped naming {named}"
+    # Why, not just what: a failing collection names its reason, and prefers
+    # the reason recorded against the provider actually serving.
+    assert "ise3_dataset_provider_active" in exact
+
+
+def test_the_network_device_dashboard_keeps_unclassified_devices_visible():
+    # The assignment family is not total, so a bare join drops exactly the
+    # devices nobody has taken ownership of -- which are the ones most likely
+    # to be broken. Every scoped panel keeps the unmatched remainder and labels
+    # it unknown instead.
+    scoped = [
+        (panel.get("title"), target.get("expr", ""))
+        for panel, target in _targets(_dashboard("ise3-nad.json"))
+        if "ise3_network_device_assignment" in target.get("expr", "")
+        and "group_left" in target.get("expr", "")
+    ]
+    assert scoped, "the network device dashboard stopped joining the inventory"
+    for title, expr in scoped:
+        assert "unless" in expr and '"unknown"' in expr, (
+            f"{title} drops devices that carry no inventory assignment")
+
+
+def test_only_the_network_device_dashboard_owns_the_nad_health_families():
+    # Two dashboards answering the same question drift apart, and the device
+    # material used to live on both this and ise3-endpoints. The activity and
+    # silence families belong to one page now; ise3-pipeline reads them to
+    # report on the collection itself, which is a different question.
+    allowed = {"ise3-nad", "ise3-pipeline"}
+    for path in sorted(DASHBOARDS.glob("*.json")):
+        if path.stem in allowed:
+            continue
+        queried = {name for name in _queried_metrics(path.name)
+                   if name.startswith("ise3_nad_")}
+        assert not queried, f"{path.name} duplicates {sorted(queried)}"
+
+
 def test_triage_links_down_into_every_diagnostic_it_names():
     # Tier 1 is only useful if it hands off. A triage panel that identifies a
     # problem and offers nowhere to go is a dead end.
@@ -514,13 +566,32 @@ CAPABILITY_CONTRACTS = {
         "ise3_endpoint_model",
         "ise3_endpoint_operating_system",
         "ise3_endpoint_mdm_compliant",
+        "ise3_endpoints_posture_applicable",
         "ise3_network_devices_total",
+    },
+    # The device-owner's dashboard. Everything keyed by the switch or router
+    # rather than by ISE lives here, which is why the per-NAD families moved
+    # off ise3-endpoints: two dashboards answering the same question is the
+    # duplication anti-pattern the design principles name.
+    "ise3-nad.json": {
         "ise3_network_device_assignment",
+        "ise3_network_devices_total",
+        "ise3_network_devices_classified",
+        "ise3_network_devices_by_type",
         "ise3_network_devices_by_location",
+        "ise3_network_devices_by_ops_owner",
+        "ise3_radius_errors_by_nad",
+        "ise3_radius_failures_by_nad_method",
+        "ise3_radius_authentications_by_nad",
         "ise3_nad_authentications",
         "ise3_nad_last_authentication_age_seconds",
         "ise3_nad_silent_total",
+        "ise3_nad_activity_covered",
+        "ise3_nad_activity_source_age_seconds",
         "ise3_active_sessions_by_nad",
+        "ise3_tacacs_authentications",
+        "ise3_tacacs_authorization_details",
+        "ise3_detail_cache_coverage",
     },
     "ise3-posture.json": {
         "ise3_posture_endpoints",

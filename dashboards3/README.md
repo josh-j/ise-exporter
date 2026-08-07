@@ -32,8 +32,16 @@ Four tiers, by **audience and time horizon** rather than by data source.
 | `ise3-triage` | Is ISE authenticating users right now? | 3h / 1m |
 
 The only dashboard anyone should open first. Symptom-level only: success rate,
-failures, sessions, node state, an attention table, and the three "where it
-hurts" breakdowns. Every panel links down into the dashboard that explains it.
+failures, sessions, node state, and the "where it hurts" breakdowns. Every panel
+links down into the dashboard that explains it.
+
+Two panels sit side by side under **What is wrong**, and the pairing is the
+point. **Attention needed** counts each class of problem — the ten-second read.
+**What exactly is wrong** runs the same checks resolved to the individual
+offender, and carries the reason where the exporter knows one: not "three
+certificates expired" but which certificate, on which node, for which usage;
+not "a dataset is not collecting" but which dataset and why. A count is enough
+to know something is wrong and never enough to know what to do about it.
 
 ### Tier 2 — diagnostic
 
@@ -42,12 +50,20 @@ hurts" breakdowns. Every panel links down into the dashboard that explains it.
 | `ise3-access` | Why are RADIUS authentications failing, at which device and method, under which authorization decision? | 6h / 5m |
 | `ise3-psn` | Are the policy service nodes coping, and which one is not? | 6h / 5m |
 | `ise3-control` | Is the PAN/MnT control plane healthy — nodes, certificates, backup, and the MnT pipeline? | 6h / 5m |
-| `ise3-endpoints` | What is on the network, how is it classified, and which devices are silent? | 6h / 5m |
+| `ise3-endpoints` | What is connected to the network, and how is it classified? | 6h / 5m |
+| `ise3-nad` | Which switch or router is failing, in what way, and who owns it? | 6h / 5m |
 | `ise3-posture` | Is the fleet compliant, and is that compliance figure trustworthy? | 6h / 5m |
 | `ise3-tacacs` | Who is administering the network devices, and is the account estate clean? | 6h / 5m |
 
 Each one leads with its own service level, then isolation, then the deep
 material in collapsed rows. None shows more than sixteen panels on load.
+
+`ise3-nad` is the device owner's page and the reason `ise3-endpoints` is now
+only about endpoints: everything keyed by the switch or router — errors beside
+volume and live sessions, the failing device-and-method pairing, silence, group
+assignment, and who administered the box over TACACS — moved onto one page with
+owner, location, platform and device variables, rather than being spread across
+two dashboards that each answered half the question.
 
 ### Tier 3 — the exporter, not ISE
 
