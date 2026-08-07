@@ -59,11 +59,27 @@ Each one leads with its own service level, then isolation, then the deep
 material in collapsed rows. None shows more than sixteen panels on load.
 
 `ise3-nad` is the device owner's page and the reason `ise3-endpoints` is now
-only about endpoints: everything keyed by the switch or router — errors beside
-volume and live sessions, the failing device-and-method pairing, silence, group
-assignment, and who administered the box over TACACS — moved onto one page with
-owner, location, platform and device variables, rather than being spread across
-two dashboards that each answered half the question.
+only about endpoints: everything keyed by the switch or router — the fix list,
+errors and volume over time, the authorization policy sets each device lands
+in, silence, group assignment, and who administered the box over TACACS —
+moved onto one page with owner, location, platform and device variables,
+rather than being spread across two dashboards that each answered half the
+question.
+
+Its **Device fix list** is one row per device *and* failing method, with that
+device's errors, pass/fail counts and live sessions repeated across its rows,
+so a row is a complete thing to go and look at. The per-device figures are
+joined onto the method rows in PromQL rather than by the table's merge
+transformation, which joins frames only on the columns they share and would
+leave one of a device's two rows empty. A device that is failing with no method
+paired to it — the pairing is a bounded cross-product, and MnT and the activity
+view need not agree — keeps its row and reads `not recorded`.
+
+The authorization panels split by what ISE labels the data with: policy sets
+carry the device, so that panel narrows to one switch, while the profile and
+rule breakdowns carry only the operations owner and say so in their
+descriptions rather than appearing to respond to a device selection they
+cannot see.
 
 ### Tier 3 — the exporter, not ISE
 
@@ -101,6 +117,12 @@ genuinely the message.
 breakdowns for cost reasons. `ise3_topk_groups_total` against
 `ise3_topk_groups_returned` is on the pipeline dashboard, so the cost of that
 bound is on screen rather than implied.
+
+**A table shows what varies.** `provider` names the source that answered,
+which is the same source on every row of a table about ISE — so it is dropped
+unless the table is *about* the source and renames it into a column heading.
+That is a rule in the generator rather than a habit: the column also splits a
+merge that would otherwise have joined two targets into one row.
 
 **Colour means state.** Red, amber and green are reserved for it. Outcome series
 (`passed`, `failed`, `compliant`, `error`) are pinned to fixed colours so they do

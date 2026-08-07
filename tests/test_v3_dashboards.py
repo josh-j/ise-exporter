@@ -448,6 +448,27 @@ def test_the_network_device_dashboard_keeps_unclassified_devices_visible():
             f"{title} drops devices that carry no inventory assignment")
 
 
+def test_the_device_fix_list_is_one_row_per_thing_to_fix():
+    # The queue is per device *and* method, and the device's own figures have
+    # to land on every one of its method rows. Grafana's merge joins frames on
+    # the columns they share, and a device-level frame has no method column, so
+    # the join is done in PromQL -- lose that and one of a device's two rows
+    # comes back with empty counts.
+    exprs = [target.get("expr", "")
+             for panel, target in _targets(_dashboard("ise3-nad.json"))
+             if panel.get("title") == "Device fix list"]
+    assert len(exprs) == 5, "the fix list lost one of its columns"
+    assert any("ise3_radius_failures_by_nad_method" in e for e in exprs)
+    per_device = [e for e in exprs if "group_right" in e]
+    assert len(per_device) == 4, (
+        "the per-device columns must be joined onto the method rows")
+    # And a device failing with no method paired to it still gets a row: the
+    # cross-product behind the method is bounded, so requiring one would drop
+    # exactly the devices the exporter could not afford to describe.
+    assert all(_builder().NO_METHOD in e for e in exprs), (
+        "the fix list drops devices whose failures carry no method")
+
+
 def test_only_the_network_device_dashboard_owns_the_nad_health_families():
     # Two dashboards answering the same question drift apart, and the device
     # material used to live on both this and ise3-endpoints. The activity and
@@ -589,6 +610,12 @@ CAPABILITY_CONTRACTS = {
         "ise3_nad_activity_covered",
         "ise3_nad_activity_source_age_seconds",
         "ise3_active_sessions_by_nad",
+        "ise3_session_policy_set_endpoints_by_nad",
+        "ise3_session_authz_profile_endpoints",
+        "ise3_session_authz_rule_endpoints",
+        "ise3_session_failed_policy_set_endpoints",
+        "ise3_session_failed_authz_rule_endpoints",
+        "ise3_session_failed_authz_profile_endpoints",
         "ise3_tacacs_authentications",
         "ise3_tacacs_authorization_details",
         "ise3_detail_cache_coverage",

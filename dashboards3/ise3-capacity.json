@@ -594,6 +594,7 @@
                 "__name__",
                 "job",
                 "instance",
+                "provider",
                 "Value #D"
               ]
             }
@@ -919,7 +920,8 @@
                 "Time",
                 "__name__",
                 "job",
-                "instance"
+                "instance",
+                "provider"
               ]
             }
           }
@@ -1100,7 +1102,8 @@
                 "Time",
                 "__name__",
                 "job",
-                "instance"
+                "instance",
+                "provider"
               ]
             }
           }

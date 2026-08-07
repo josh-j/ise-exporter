@@ -194,7 +194,7 @@
         "type": "prometheus",
         "uid": "${prometheus}"
       },
-      "description": "Configured devices with no authentication activity at all, and the share of the estate the activity scan reached. Fleet-wide rather than scoped, because silence is measured against the whole configured inventory. Low coverage means the silent count beside it is a floor rather than a total.",
+      "description": "Configured devices that authenticated nothing in the scan window, beside the number that did. Both are counts of devices, and together they are the configured estate. Fleet-wide rather than scoped, because silence is measured against the whole inventory: a device absent from the inventory cannot be found missing from it. Read the activity feed age beside this before acting on either number.",
       "fieldConfig": {
         "defaults": {
           "noValue": "no data \u2014 stale, see Collection pipeline",
@@ -221,25 +221,13 @@
             },
             "properties": [
               {
-                "id": "unit",
-                "value": "percentunit"
-              },
-              {
                 "id": "thresholds",
                 "value": {
                   "mode": "absolute",
                   "steps": [
                     {
-                      "color": "red",
+                      "color": "text",
                       "value": null
-                    },
-                    {
-                      "color": "orange",
-                      "value": 0.8
-                    },
-                    {
-                      "color": "green",
-                      "value": 0.95
                     }
                   ]
                 }
@@ -276,12 +264,12 @@
         {
           "expr": "sum((ise3_nad_activity_covered) and on() (((max(ise3_dataset_up{dataset=\"nad_health\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"nad_health\"} == 1))) == 1) and ((max(ise3_dataset_fresh{dataset=\"nad_health\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"nad_health\"} == 1))) == 1)))",
           "instant": true,
-          "legendFormat": "covered",
+          "legendFormat": "seen active",
           "range": false,
           "refId": "B"
         }
       ],
-      "title": "Silent devices and activity coverage",
+      "title": "Silent devices",
       "transformations": [],
       "transparent": false,
       "type": "stat"
@@ -354,7 +342,7 @@
         "type": "prometheus",
         "uid": "${prometheus}"
       },
-      "description": "Share of this dashboard's own datasets that both collected successfully and are inside their freshness window (active_sessions, nad_health, network_devices, radius_errors, radius_reporting). Below 100% means some panel here is blank or stale, and the pipeline dashboard says which.",
+      "description": "Share of this dashboard's own datasets that both collected successfully and are inside their freshness window (active_sessions, nad_health, network_devices, radius_errors, radius_reporting, session_authorization). Below 100% means some panel here is blank or stale, and the pipeline dashboard says which.",
       "fieldConfig": {
         "defaults": {
           "links": [
@@ -403,7 +391,7 @@
       "repeatDirection": "h",
       "targets": [
         {
-          "expr": "avg(((max by (dataset) (ise3_dataset_up{dataset=~\"network_devices|nad_health|radius_errors|radius_reporting|active_sessions\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=~\"network_devices|nad_health|radius_errors|radius_reporting|active_sessions\"} == 1))) == bool 1) * ((max by (dataset) (ise3_dataset_fresh{dataset=~\"network_devices|nad_health|radius_errors|radius_reporting|active_sessions\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=~\"network_devices|nad_health|radius_errors|radius_reporting|active_sessions\"} == 1))) == bool 1))",
+          "expr": "avg(((max by (dataset) (ise3_dataset_up{dataset=~\"network_devices|nad_health|radius_errors|radius_reporting|active_sessions|session_authorization\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=~\"network_devices|nad_health|radius_errors|radius_reporting|active_sessions|session_authorization\"} == 1))) == bool 1) * ((max by (dataset) (ise3_dataset_fresh{dataset=~\"network_devices|nad_health|radius_errors|radius_reporting|active_sessions|session_authorization\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=~\"network_devices|nad_health|radius_errors|radius_reporting|active_sessions|session_authorization\"} == 1))) == bool 1))",
           "instant": true,
           "legendFormat": "",
           "range": false,
@@ -471,7 +459,7 @@
       "repeatDirection": "h",
       "targets": [
         {
-          "expr": "max(time() - (max by (dataset) (ise3_dataset_last_success_timestamp{dataset=~\"network_devices|nad_health|radius_errors|radius_reporting|active_sessions\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=~\"network_devices|nad_health|radius_errors|radius_reporting|active_sessions\"} == 1))))",
+          "expr": "max(time() - (max by (dataset) (ise3_dataset_last_success_timestamp{dataset=~\"network_devices|nad_health|radius_errors|radius_reporting|active_sessions|session_authorization\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=~\"network_devices|nad_health|radius_errors|radius_reporting|active_sessions|session_authorization\"} == 1))))",
           "instant": true,
           "legendFormat": "",
           "range": false,
@@ -501,195 +489,7 @@
         "type": "prometheus",
         "uid": "${prometheus}"
       },
-      "description": "One row per network device in scope: errors, failed and passed authentications, and the live sessions it is currently holding \u2014 worst first. This is the panel that separates a broken switch from a busy one: errors beside a large passed count are a minority of clients failing on a healthy device, while errors with no passes and no sessions is a device that cannot authenticate anyone. Errors come from MnT and the pass/fail counts from the activity view, so the two can disagree by a collection cadence.",
-      "fieldConfig": {
-        "defaults": {},
-        "overrides": [
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "Errors"
-            },
-            "properties": [
-              {
-                "id": "thresholds",
-                "value": {
-                  "mode": "absolute",
-                  "steps": [
-                    {
-                      "color": "green",
-                      "value": null
-                    },
-                    {
-                      "color": "orange",
-                      "value": 1
-                    }
-                  ]
-                }
-              },
-              {
-                "id": "custom.cellOptions",
-                "value": {
-                  "mode": "basic",
-                  "type": "color-background"
-                }
-              },
-              {
-                "id": "custom.width",
-                "value": 90
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "Failed"
-            },
-            "properties": [
-              {
-                "id": "thresholds",
-                "value": {
-                  "mode": "absolute",
-                  "steps": [
-                    {
-                      "color": "green",
-                      "value": null
-                    },
-                    {
-                      "color": "orange",
-                      "value": 1
-                    }
-                  ]
-                }
-              },
-              {
-                "id": "custom.width",
-                "value": 90
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "Network device"
-            },
-            "properties": [
-              {
-                "id": "links",
-                "value": [
-                  {
-                    "targetBlank": false,
-                    "title": "Isolate this device on RADIUS access",
-                    "url": "/d/ise3-access?${__url_time_range}&var-nad=${__data.fields.Network device}"
-                  },
-                  {
-                    "targetBlank": false,
-                    "title": "Narrow this page to it",
-                    "url": "/d/ise3-nad?${__url_time_range}&var-nad=${__data.fields.Network device}"
-                  }
-                ]
-              }
-            ]
-          }
-        ]
-      },
-      "gridPos": {
-        "h": 10,
-        "w": 12,
-        "x": 0,
-        "y": 6
-      },
-      "options": null,
-      "repeatDirection": "h",
-      "targets": [
-        {
-          "expr": "(sum by (nad) ((ise3_radius_errors_by_nad{nad=~\"$nad\"}) and on() (((max(ise3_dataset_up{dataset=\"radius_errors\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"radius_errors\"} == 1))) == 1) and ((max(ise3_dataset_fresh{dataset=\"radius_errors\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"radius_errors\"} == 1))) == 1)))) * on(nad) group_left(ops_owner, location, device_type) (max by (nad, ops_owner, location, device_type) (ise3_network_device_assignment{ops_owner=~\"$ops_owner\",location=~\"$location\",device_type=~\"$device_type\",nad=~\"$nad\"})) or label_replace(label_replace(label_replace((sum by (nad) ((ise3_radius_errors_by_nad{nad=~\"$nad\"}) and on() (((max(ise3_dataset_up{dataset=\"radius_errors\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"radius_errors\"} == 1))) == 1) and ((max(ise3_dataset_fresh{dataset=\"radius_errors\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"radius_errors\"} == 1))) == 1)))) unless on(nad) (max by (nad) (ise3_network_device_assignment)), \"ops_owner\", \"unknown\", \"\", \"\"), \"location\", \"Unknown\", \"\", \"\"), \"device_type\", \"unknown\", \"\", \"\")",
-          "format": "table",
-          "instant": true,
-          "legendFormat": "",
-          "range": false,
-          "refId": "A"
-        },
-        {
-          "expr": "(sum by (nad) ((ise3_nad_authentications{nad=~\"$nad\",status=\"failed\"}) and on() (((max(ise3_dataset_up{dataset=\"nad_health\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"nad_health\"} == 1))) == 1) and ((max(ise3_dataset_fresh{dataset=\"nad_health\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"nad_health\"} == 1))) == 1)))) * on(nad) group_left(ops_owner, location, device_type) (max by (nad, ops_owner, location, device_type) (ise3_network_device_assignment{ops_owner=~\"$ops_owner\",location=~\"$location\",device_type=~\"$device_type\",nad=~\"$nad\"})) or label_replace(label_replace(label_replace((sum by (nad) ((ise3_nad_authentications{nad=~\"$nad\",status=\"failed\"}) and on() (((max(ise3_dataset_up{dataset=\"nad_health\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"nad_health\"} == 1))) == 1) and ((max(ise3_dataset_fresh{dataset=\"nad_health\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"nad_health\"} == 1))) == 1)))) unless on(nad) (max by (nad) (ise3_network_device_assignment)), \"ops_owner\", \"unknown\", \"\", \"\"), \"location\", \"Unknown\", \"\", \"\"), \"device_type\", \"unknown\", \"\", \"\")",
-          "format": "table",
-          "instant": true,
-          "legendFormat": "",
-          "range": false,
-          "refId": "B"
-        },
-        {
-          "expr": "(sum by (nad) ((ise3_nad_authentications{nad=~\"$nad\",status=\"passed\"}) and on() (((max(ise3_dataset_up{dataset=\"nad_health\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"nad_health\"} == 1))) == 1) and ((max(ise3_dataset_fresh{dataset=\"nad_health\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"nad_health\"} == 1))) == 1)))) * on(nad) group_left(ops_owner, location, device_type) (max by (nad, ops_owner, location, device_type) (ise3_network_device_assignment{ops_owner=~\"$ops_owner\",location=~\"$location\",device_type=~\"$device_type\",nad=~\"$nad\"})) or label_replace(label_replace(label_replace((sum by (nad) ((ise3_nad_authentications{nad=~\"$nad\",status=\"passed\"}) and on() (((max(ise3_dataset_up{dataset=\"nad_health\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"nad_health\"} == 1))) == 1) and ((max(ise3_dataset_fresh{dataset=\"nad_health\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"nad_health\"} == 1))) == 1)))) unless on(nad) (max by (nad) (ise3_network_device_assignment)), \"ops_owner\", \"unknown\", \"\", \"\"), \"location\", \"Unknown\", \"\", \"\"), \"device_type\", \"unknown\", \"\", \"\")",
-          "format": "table",
-          "instant": true,
-          "legendFormat": "",
-          "range": false,
-          "refId": "C"
-        },
-        {
-          "expr": "(sum by (nad) ((ise3_active_sessions_by_nad{nad=~\"$nad\"}) and on() (((max(ise3_dataset_up{dataset=\"active_sessions\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"active_sessions\"} == 1))) == 1) and ((max(ise3_dataset_fresh{dataset=\"active_sessions\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"active_sessions\"} == 1))) == 1)))) * on(nad) group_left(ops_owner, location, device_type) (max by (nad, ops_owner, location, device_type) (ise3_network_device_assignment{ops_owner=~\"$ops_owner\",location=~\"$location\",device_type=~\"$device_type\",nad=~\"$nad\"})) or label_replace(label_replace(label_replace((sum by (nad) ((ise3_active_sessions_by_nad{nad=~\"$nad\"}) and on() (((max(ise3_dataset_up{dataset=\"active_sessions\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"active_sessions\"} == 1))) == 1) and ((max(ise3_dataset_fresh{dataset=\"active_sessions\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"active_sessions\"} == 1))) == 1)))) unless on(nad) (max by (nad) (ise3_network_device_assignment)), \"ops_owner\", \"unknown\", \"\", \"\"), \"location\", \"Unknown\", \"\", \"\"), \"device_type\", \"unknown\", \"\", \"\")",
-          "format": "table",
-          "instant": true,
-          "legendFormat": "",
-          "range": false,
-          "refId": "D"
-        }
-      ],
-      "title": "Device fix list",
-      "transformations": [
-        {
-          "id": "filterFieldsByName",
-          "options": {
-            "exclude": {
-              "names": [
-                "Time",
-                "__name__",
-                "job",
-                "instance"
-              ]
-            }
-          }
-        },
-        {
-          "id": "merge",
-          "options": {}
-        },
-        {
-          "id": "organize",
-          "options": {
-            "renameByName": {
-              "Value #A": "Errors",
-              "Value #B": "Failed",
-              "Value #C": "Passed",
-              "Value #D": "Sessions",
-              "device_type": "Type",
-              "location": "Location",
-              "nad": "Network device",
-              "ops_owner": "Operations owner"
-            }
-          }
-        },
-        {
-          "id": "sortBy",
-          "options": {
-            "sort": [
-              {
-                "desc": true,
-                "field": "Errors"
-              }
-            ]
-          }
-        }
-      ],
-      "transparent": false,
-      "type": "table"
-    },
-    {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${prometheus}"
-      },
-      "description": "Every device and authentication method pairing that produced failures, with the owner and location ISE holds for the device. Each row is one concrete thing to go and look at: a device failing only dot1x while MAB passes is a supplicant or certificate problem, a device failing everything is the shared secret or the AAA configuration. This cross-product is bounded by the exporter for cost reasons \u2014 the pipeline dashboard's coverage panel says by how much.",
+      "description": "The work queue: one row per network device and authentication method that is failing, worst first, with the owner and location ISE holds for the device and the device's own figures beside it. Read across a row rather than down a column \u2014 failures on one method while the passed count stays high is a supplicant or certificate problem on a subset of that device's clients, while failures with no passes and no sessions is the shared secret, the AAA configuration, or a device that cannot reach a PSN. A device's error, pass and session counts are per device, so they repeat across its method rows. A device failing with no method paired to it reads 'not recorded': the pairing is bounded for cost and MnT and the activity view need not agree, and a row is kept either way rather than dropped. Healthy devices are absent by design \u2014 silence is the table below, inventory the row above.",
       "fieldConfig": {
         "defaults": {},
         "overrides": [
@@ -731,12 +531,81 @@
           {
             "matcher": {
               "id": "byName",
+              "options": "Errors"
+            },
+            "properties": [
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "green",
+                      "value": null
+                    },
+                    {
+                      "color": "orange",
+                      "value": 1
+                    }
+                  ]
+                }
+              },
+              {
+                "id": "custom.width",
+                "value": 90
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Failed"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 90
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Passed"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 90
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Sessions"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 100
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
               "options": "Network device"
             },
             "properties": [
               {
                 "id": "links",
                 "value": [
+                  {
+                    "targetBlank": false,
+                    "title": "Isolate this device on RADIUS access",
+                    "url": "/d/ise3-access?${__url_time_range}&var-nad=${__data.fields.Network device}"
+                  },
                   {
                     "targetBlank": false,
                     "title": "Narrow this page to it",
@@ -750,23 +619,55 @@
       },
       "gridPos": {
         "h": 10,
-        "w": 12,
-        "x": 12,
+        "w": 24,
+        "x": 0,
         "y": 6
       },
       "options": null,
       "repeatDirection": "h",
       "targets": [
         {
-          "expr": "(sum by (nad,method) ((ise3_radius_failures_by_nad_method{nad=~\"$nad\"}) and on() (((max(ise3_dataset_up{dataset=\"radius_reporting\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"radius_reporting\"} == 1))) == 1) and ((max(ise3_dataset_fresh{dataset=\"radius_reporting\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"radius_reporting\"} == 1))) == 1)))) * on(nad) group_left(ops_owner, location, device_type) (max by (nad, ops_owner, location, device_type) (ise3_network_device_assignment{ops_owner=~\"$ops_owner\",location=~\"$location\",device_type=~\"$device_type\",nad=~\"$nad\"})) or label_replace(label_replace(label_replace((sum by (nad,method) ((ise3_radius_failures_by_nad_method{nad=~\"$nad\"}) and on() (((max(ise3_dataset_up{dataset=\"radius_reporting\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"radius_reporting\"} == 1))) == 1) and ((max(ise3_dataset_fresh{dataset=\"radius_reporting\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"radius_reporting\"} == 1))) == 1)))) unless on(nad) (max by (nad) (ise3_network_device_assignment)), \"ops_owner\", \"unknown\", \"\", \"\"), \"location\", \"Unknown\", \"\", \"\"), \"device_type\", \"unknown\", \"\", \"\")",
+          "expr": "((sum by (nad,method) ((ise3_radius_failures_by_nad_method{nad=~\"$nad\"}) and on() (((max(ise3_dataset_up{dataset=\"radius_reporting\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"radius_reporting\"} == 1))) == 1) and ((max(ise3_dataset_fresh{dataset=\"radius_reporting\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"radius_reporting\"} == 1))) == 1)))) * on(nad) group_left(ops_owner, location, device_type) (max by (nad, ops_owner, location, device_type) (ise3_network_device_assignment{ops_owner=~\"$ops_owner\",location=~\"$location\",device_type=~\"$device_type\",nad=~\"$nad\"})) or label_replace(label_replace(label_replace((sum by (nad,method) ((ise3_radius_failures_by_nad_method{nad=~\"$nad\"}) and on() (((max(ise3_dataset_up{dataset=\"radius_reporting\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"radius_reporting\"} == 1))) == 1) and ((max(ise3_dataset_fresh{dataset=\"radius_reporting\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"radius_reporting\"} == 1))) == 1)))) unless on(nad) (max by (nad) (ise3_network_device_assignment)), \"ops_owner\", \"unknown\", \"\", \"\"), \"location\", \"Unknown\", \"\", \"\"), \"device_type\", \"unknown\", \"\", \"\")) or ((label_replace(((((sum by (nad) ((ise3_radius_errors_by_nad{nad=~\"$nad\"}) and on() (((max(ise3_dataset_up{dataset=\"radius_errors\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"radius_errors\"} == 1))) == 1) and ((max(ise3_dataset_fresh{dataset=\"radius_errors\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"radius_errors\"} == 1))) == 1)))) * on(nad) group_left(ops_owner, location, device_type) (max by (nad, ops_owner, location, device_type) (ise3_network_device_assignment{ops_owner=~\"$ops_owner\",location=~\"$location\",device_type=~\"$device_type\",nad=~\"$nad\"})) or label_replace(label_replace(label_replace((sum by (nad) ((ise3_radius_errors_by_nad{nad=~\"$nad\"}) and on() (((max(ise3_dataset_up{dataset=\"radius_errors\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"radius_errors\"} == 1))) == 1) and ((max(ise3_dataset_fresh{dataset=\"radius_errors\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"radius_errors\"} == 1))) == 1)))) unless on(nad) (max by (nad) (ise3_network_device_assignment)), \"ops_owner\", \"unknown\", \"\", \"\"), \"location\", \"Unknown\", \"\", \"\"), \"device_type\", \"unknown\", \"\", \"\")) > 0) or (((sum by (nad) ((ise3_nad_authentications{nad=~\"$nad\",status=\"failed\"}) and on() (((max(ise3_dataset_up{dataset=\"nad_health\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"nad_health\"} == 1))) == 1) and ((max(ise3_dataset_fresh{dataset=\"nad_health\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"nad_health\"} == 1))) == 1)))) * on(nad) group_left(ops_owner, location, device_type) (max by (nad, ops_owner, location, device_type) (ise3_network_device_assignment{ops_owner=~\"$ops_owner\",location=~\"$location\",device_type=~\"$device_type\",nad=~\"$nad\"})) or label_replace(label_replace(label_replace((sum by (nad) ((ise3_nad_authentications{nad=~\"$nad\",status=\"failed\"}) and on() (((max(ise3_dataset_up{dataset=\"nad_health\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"nad_health\"} == 1))) == 1) and ((max(ise3_dataset_fresh{dataset=\"nad_health\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"nad_health\"} == 1))) == 1)))) unless on(nad) (max by (nad) (ise3_network_device_assignment)), \"ops_owner\", \"unknown\", \"\", \"\"), \"location\", \"Unknown\", \"\", \"\"), \"device_type\", \"unknown\", \"\", \"\")) > 0)) unless on(nad) ((sum by (nad,method) ((ise3_radius_failures_by_nad_method{nad=~\"$nad\"}) and on() (((max(ise3_dataset_up{dataset=\"radius_reporting\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"radius_reporting\"} == 1))) == 1) and ((max(ise3_dataset_fresh{dataset=\"radius_reporting\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"radius_reporting\"} == 1))) == 1)))) * on(nad) group_left(ops_owner, location, device_type) (max by (nad, ops_owner, location, device_type) (ise3_network_device_assignment{ops_owner=~\"$ops_owner\",location=~\"$location\",device_type=~\"$device_type\",nad=~\"$nad\"})) or label_replace(label_replace(label_replace((sum by (nad,method) ((ise3_radius_failures_by_nad_method{nad=~\"$nad\"}) and on() (((max(ise3_dataset_up{dataset=\"radius_reporting\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"radius_reporting\"} == 1))) == 1) and ((max(ise3_dataset_fresh{dataset=\"radius_reporting\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"radius_reporting\"} == 1))) == 1)))) unless on(nad) (max by (nad) (ise3_network_device_assignment)), \"ops_owner\", \"unknown\", \"\", \"\"), \"location\", \"Unknown\", \"\", \"\"), \"device_type\", \"unknown\", \"\", \"\")), \"method\", \"not recorded\", \"\", \"\")) * 0)",
           "format": "table",
           "instant": true,
           "legendFormat": "",
           "range": false,
           "refId": "A"
+        },
+        {
+          "expr": "((sum by (nad) ((ise3_radius_errors_by_nad{nad=~\"$nad\"}) and on() (((max(ise3_dataset_up{dataset=\"radius_errors\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"radius_errors\"} == 1))) == 1) and ((max(ise3_dataset_fresh{dataset=\"radius_errors\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"radius_errors\"} == 1))) == 1)))) * on(nad) group_left(ops_owner, location, device_type) (max by (nad, ops_owner, location, device_type) (ise3_network_device_assignment{ops_owner=~\"$ops_owner\",location=~\"$location\",device_type=~\"$device_type\",nad=~\"$nad\"})) or label_replace(label_replace(label_replace((sum by (nad) ((ise3_radius_errors_by_nad{nad=~\"$nad\"}) and on() (((max(ise3_dataset_up{dataset=\"radius_errors\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"radius_errors\"} == 1))) == 1) and ((max(ise3_dataset_fresh{dataset=\"radius_errors\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"radius_errors\"} == 1))) == 1)))) unless on(nad) (max by (nad) (ise3_network_device_assignment)), \"ops_owner\", \"unknown\", \"\", \"\"), \"location\", \"Unknown\", \"\", \"\"), \"device_type\", \"unknown\", \"\", \"\")) * on(nad) group_right() ((((sum by (nad,method) ((ise3_radius_failures_by_nad_method{nad=~\"$nad\"}) and on() (((max(ise3_dataset_up{dataset=\"radius_reporting\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"radius_reporting\"} == 1))) == 1) and ((max(ise3_dataset_fresh{dataset=\"radius_reporting\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"radius_reporting\"} == 1))) == 1)))) * on(nad) group_left(ops_owner, location, device_type) (max by (nad, ops_owner, location, device_type) (ise3_network_device_assignment{ops_owner=~\"$ops_owner\",location=~\"$location\",device_type=~\"$device_type\",nad=~\"$nad\"})) or label_replace(label_replace(label_replace((sum by (nad,method) ((ise3_radius_failures_by_nad_method{nad=~\"$nad\"}) and on() (((max(ise3_dataset_up{dataset=\"radius_reporting\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"radius_reporting\"} == 1))) == 1) and ((max(ise3_dataset_fresh{dataset=\"radius_reporting\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"radius_reporting\"} == 1))) == 1)))) unless on(nad) (max by (nad) (ise3_network_device_assignment)), \"ops_owner\", \"unknown\", \"\", \"\"), \"location\", \"Unknown\", \"\", \"\"), \"device_type\", \"unknown\", \"\", \"\")) * 0 + 1) or ((label_replace(((((sum by (nad) ((ise3_radius_errors_by_nad{nad=~\"$nad\"}) and on() (((max(ise3_dataset_up{dataset=\"radius_errors\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"radius_errors\"} == 1))) == 1) and ((max(ise3_dataset_fresh{dataset=\"radius_errors\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"radius_errors\"} == 1))) == 1)))) * on(nad) group_left(ops_owner, location, device_type) (max by (nad, ops_owner, location, device_type) (ise3_network_device_assignment{ops_owner=~\"$ops_owner\",location=~\"$location\",device_type=~\"$device_type\",nad=~\"$nad\"})) or label_replace(label_replace(label_replace((sum by (nad) ((ise3_radius_errors_by_nad{nad=~\"$nad\"}) and on() (((max(ise3_dataset_up{dataset=\"radius_errors\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"radius_errors\"} == 1))) == 1) and ((max(ise3_dataset_fresh{dataset=\"radius_errors\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"radius_errors\"} == 1))) == 1)))) unless on(nad) (max by (nad) (ise3_network_device_assignment)), \"ops_owner\", \"unknown\", \"\", \"\"), \"location\", \"Unknown\", \"\", \"\"), \"device_type\", \"unknown\", \"\", \"\")) > 0) or (((sum by (nad) ((ise3_nad_authentications{nad=~\"$nad\",status=\"failed\"}) and on() (((max(ise3_dataset_up{dataset=\"nad_health\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"nad_health\"} == 1))) == 1) and ((max(ise3_dataset_fresh{dataset=\"nad_health\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"nad_health\"} == 1))) == 1)))) * on(nad) group_left(ops_owner, location, device_type) (max by (nad, ops_owner, location, device_type) (ise3_network_device_assignment{ops_owner=~\"$ops_owner\",location=~\"$location\",device_type=~\"$device_type\",nad=~\"$nad\"})) or label_replace(label_replace(label_replace((sum by (nad) ((ise3_nad_authentications{nad=~\"$nad\",status=\"failed\"}) and on() (((max(ise3_dataset_up{dataset=\"nad_health\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"nad_health\"} == 1))) == 1) and ((max(ise3_dataset_fresh{dataset=\"nad_health\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"nad_health\"} == 1))) == 1)))) unless on(nad) (max by (nad) (ise3_network_device_assignment)), \"ops_owner\", \"unknown\", \"\", \"\"), \"location\", \"Unknown\", \"\", \"\"), \"device_type\", \"unknown\", \"\", \"\")) > 0)) unless on(nad) ((sum by (nad,method) ((ise3_radius_failures_by_nad_method{nad=~\"$nad\"}) and on() (((max(ise3_dataset_up{dataset=\"radius_reporting\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"radius_reporting\"} == 1))) == 1) and ((max(ise3_dataset_fresh{dataset=\"radius_reporting\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"radius_reporting\"} == 1))) == 1)))) * on(nad) group_left(ops_owner, location, device_type) (max by (nad, ops_owner, location, device_type) (ise3_network_device_assignment{ops_owner=~\"$ops_owner\",location=~\"$location\",device_type=~\"$device_type\",nad=~\"$nad\"})) or label_replace(label_replace(label_replace((sum by (nad,method) ((ise3_radius_failures_by_nad_method{nad=~\"$nad\"}) and on() (((max(ise3_dataset_up{dataset=\"radius_reporting\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"radius_reporting\"} == 1))) == 1) and ((max(ise3_dataset_fresh{dataset=\"radius_reporting\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"radius_reporting\"} == 1))) == 1)))) unless on(nad) (max by (nad) (ise3_network_device_assignment)), \"ops_owner\", \"unknown\", \"\", \"\"), \"location\", \"Unknown\", \"\", \"\"), \"device_type\", \"unknown\", \"\", \"\")), \"method\", \"not recorded\", \"\", \"\")) * 0 + 1))",
+          "format": "table",
+          "instant": true,
+          "legendFormat": "",
+          "range": false,
+          "refId": "B"
+        },
+        {
+          "expr": "((sum by (nad) ((ise3_nad_authentications{nad=~\"$nad\",status=\"failed\"}) and on() (((max(ise3_dataset_up{dataset=\"nad_health\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"nad_health\"} == 1))) == 1) and ((max(ise3_dataset_fresh{dataset=\"nad_health\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"nad_health\"} == 1))) == 1)))) * on(nad) group_left(ops_owner, location, device_type) (max by (nad, ops_owner, location, device_type) (ise3_network_device_assignment{ops_owner=~\"$ops_owner\",location=~\"$location\",device_type=~\"$device_type\",nad=~\"$nad\"})) or label_replace(label_replace(label_replace((sum by (nad) ((ise3_nad_authentications{nad=~\"$nad\",status=\"failed\"}) and on() (((max(ise3_dataset_up{dataset=\"nad_health\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"nad_health\"} == 1))) == 1) and ((max(ise3_dataset_fresh{dataset=\"nad_health\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"nad_health\"} == 1))) == 1)))) unless on(nad) (max by (nad) (ise3_network_device_assignment)), \"ops_owner\", \"unknown\", \"\", \"\"), \"location\", \"Unknown\", \"\", \"\"), \"device_type\", \"unknown\", \"\", \"\")) * on(nad) group_right() ((((sum by (nad,method) ((ise3_radius_failures_by_nad_method{nad=~\"$nad\"}) and on() (((max(ise3_dataset_up{dataset=\"radius_reporting\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"radius_reporting\"} == 1))) == 1) and ((max(ise3_dataset_fresh{dataset=\"radius_reporting\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"radius_reporting\"} == 1))) == 1)))) * on(nad) group_left(ops_owner, location, device_type) (max by (nad, ops_owner, location, device_type) (ise3_network_device_assignment{ops_owner=~\"$ops_owner\",location=~\"$location\",device_type=~\"$device_type\",nad=~\"$nad\"})) or label_replace(label_replace(label_replace((sum by (nad,method) ((ise3_radius_failures_by_nad_method{nad=~\"$nad\"}) and on() (((max(ise3_dataset_up{dataset=\"radius_reporting\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"radius_reporting\"} == 1))) == 1) and ((max(ise3_dataset_fresh{dataset=\"radius_reporting\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"radius_reporting\"} == 1))) == 1)))) unless on(nad) (max by (nad) (ise3_network_device_assignment)), \"ops_owner\", \"unknown\", \"\", \"\"), \"location\", \"Unknown\", \"\", \"\"), \"device_type\", \"unknown\", \"\", \"\")) * 0 + 1) or ((label_replace(((((sum by (nad) ((ise3_radius_errors_by_nad{nad=~\"$nad\"}) and on() (((max(ise3_dataset_up{dataset=\"radius_errors\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"radius_errors\"} == 1))) == 1) and ((max(ise3_dataset_fresh{dataset=\"radius_errors\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"radius_errors\"} == 1))) == 1)))) * on(nad) group_left(ops_owner, location, device_type) (max by (nad, ops_owner, location, device_type) (ise3_network_device_assignment{ops_owner=~\"$ops_owner\",location=~\"$location\",device_type=~\"$device_type\",nad=~\"$nad\"})) or label_replace(label_replace(label_replace((sum by (nad) ((ise3_radius_errors_by_nad{nad=~\"$nad\"}) and on() (((max(ise3_dataset_up{dataset=\"radius_errors\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"radius_errors\"} == 1))) == 1) and ((max(ise3_dataset_fresh{dataset=\"radius_errors\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"radius_errors\"} == 1))) == 1)))) unless on(nad) (max by (nad) (ise3_network_device_assignment)), \"ops_owner\", \"unknown\", \"\", \"\"), \"location\", \"Unknown\", \"\", \"\"), \"device_type\", \"unknown\", \"\", \"\")) > 0) or (((sum by (nad) ((ise3_nad_authentications{nad=~\"$nad\",status=\"failed\"}) and on() (((max(ise3_dataset_up{dataset=\"nad_health\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"nad_health\"} == 1))) == 1) and ((max(ise3_dataset_fresh{dataset=\"nad_health\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"nad_health\"} == 1))) == 1)))) * on(nad) group_left(ops_owner, location, device_type) (max by (nad, ops_owner, location, device_type) (ise3_network_device_assignment{ops_owner=~\"$ops_owner\",location=~\"$location\",device_type=~\"$device_type\",nad=~\"$nad\"})) or label_replace(label_replace(label_replace((sum by (nad) ((ise3_nad_authentications{nad=~\"$nad\",status=\"failed\"}) and on() (((max(ise3_dataset_up{dataset=\"nad_health\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"nad_health\"} == 1))) == 1) and ((max(ise3_dataset_fresh{dataset=\"nad_health\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"nad_health\"} == 1))) == 1)))) unless on(nad) (max by (nad) (ise3_network_device_assignment)), \"ops_owner\", \"unknown\", \"\", \"\"), \"location\", \"Unknown\", \"\", \"\"), \"device_type\", \"unknown\", \"\", \"\")) > 0)) unless on(nad) ((sum by (nad,method) ((ise3_radius_failures_by_nad_method{nad=~\"$nad\"}) and on() (((max(ise3_dataset_up{dataset=\"radius_reporting\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"radius_reporting\"} == 1))) == 1) and ((max(ise3_dataset_fresh{dataset=\"radius_reporting\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"radius_reporting\"} == 1))) == 1)))) * on(nad) group_left(ops_owner, location, device_type) (max by (nad, ops_owner, location, device_type) (ise3_network_device_assignment{ops_owner=~\"$ops_owner\",location=~\"$location\",device_type=~\"$device_type\",nad=~\"$nad\"})) or label_replace(label_replace(label_replace((sum by (nad,method) ((ise3_radius_failures_by_nad_method{nad=~\"$nad\"}) and on() (((max(ise3_dataset_up{dataset=\"radius_reporting\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"radius_reporting\"} == 1))) == 1) and ((max(ise3_dataset_fresh{dataset=\"radius_reporting\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"radius_reporting\"} == 1))) == 1)))) unless on(nad) (max by (nad) (ise3_network_device_assignment)), \"ops_owner\", \"unknown\", \"\", \"\"), \"location\", \"Unknown\", \"\", \"\"), \"device_type\", \"unknown\", \"\", \"\")), \"method\", \"not recorded\", \"\", \"\")) * 0 + 1))",
+          "format": "table",
+          "instant": true,
+          "legendFormat": "",
+          "range": false,
+          "refId": "C"
+        },
+        {
+          "expr": "((sum by (nad) ((ise3_nad_authentications{nad=~\"$nad\",status=\"passed\"}) and on() (((max(ise3_dataset_up{dataset=\"nad_health\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"nad_health\"} == 1))) == 1) and ((max(ise3_dataset_fresh{dataset=\"nad_health\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"nad_health\"} == 1))) == 1)))) * on(nad) group_left(ops_owner, location, device_type) (max by (nad, ops_owner, location, device_type) (ise3_network_device_assignment{ops_owner=~\"$ops_owner\",location=~\"$location\",device_type=~\"$device_type\",nad=~\"$nad\"})) or label_replace(label_replace(label_replace((sum by (nad) ((ise3_nad_authentications{nad=~\"$nad\",status=\"passed\"}) and on() (((max(ise3_dataset_up{dataset=\"nad_health\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"nad_health\"} == 1))) == 1) and ((max(ise3_dataset_fresh{dataset=\"nad_health\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"nad_health\"} == 1))) == 1)))) unless on(nad) (max by (nad) (ise3_network_device_assignment)), \"ops_owner\", \"unknown\", \"\", \"\"), \"location\", \"Unknown\", \"\", \"\"), \"device_type\", \"unknown\", \"\", \"\")) * on(nad) group_right() ((((sum by (nad,method) ((ise3_radius_failures_by_nad_method{nad=~\"$nad\"}) and on() (((max(ise3_dataset_up{dataset=\"radius_reporting\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"radius_reporting\"} == 1))) == 1) and ((max(ise3_dataset_fresh{dataset=\"radius_reporting\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"radius_reporting\"} == 1))) == 1)))) * on(nad) group_left(ops_owner, location, device_type) (max by (nad, ops_owner, location, device_type) (ise3_network_device_assignment{ops_owner=~\"$ops_owner\",location=~\"$location\",device_type=~\"$device_type\",nad=~\"$nad\"})) or label_replace(label_replace(label_replace((sum by (nad,method) ((ise3_radius_failures_by_nad_method{nad=~\"$nad\"}) and on() (((max(ise3_dataset_up{dataset=\"radius_reporting\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"radius_reporting\"} == 1))) == 1) and ((max(ise3_dataset_fresh{dataset=\"radius_reporting\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"radius_reporting\"} == 1))) == 1)))) unless on(nad) (max by (nad) (ise3_network_device_assignment)), \"ops_owner\", \"unknown\", \"\", \"\"), \"location\", \"Unknown\", \"\", \"\"), \"device_type\", \"unknown\", \"\", \"\")) * 0 + 1) or ((label_replace(((((sum by (nad) ((ise3_radius_errors_by_nad{nad=~\"$nad\"}) and on() (((max(ise3_dataset_up{dataset=\"radius_errors\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"radius_errors\"} == 1))) == 1) and ((max(ise3_dataset_fresh{dataset=\"radius_errors\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"radius_errors\"} == 1))) == 1)))) * on(nad) group_left(ops_owner, location, device_type) (max by (nad, ops_owner, location, device_type) (ise3_network_device_assignment{ops_owner=~\"$ops_owner\",location=~\"$location\",device_type=~\"$device_type\",nad=~\"$nad\"})) or label_replace(label_replace(label_replace((sum by (nad) ((ise3_radius_errors_by_nad{nad=~\"$nad\"}) and on() (((max(ise3_dataset_up{dataset=\"radius_errors\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"radius_errors\"} == 1))) == 1) and ((max(ise3_dataset_fresh{dataset=\"radius_errors\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"radius_errors\"} == 1))) == 1)))) unless on(nad) (max by (nad) (ise3_network_device_assignment)), \"ops_owner\", \"unknown\", \"\", \"\"), \"location\", \"Unknown\", \"\", \"\"), \"device_type\", \"unknown\", \"\", \"\")) > 0) or (((sum by (nad) ((ise3_nad_authentications{nad=~\"$nad\",status=\"failed\"}) and on() (((max(ise3_dataset_up{dataset=\"nad_health\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"nad_health\"} == 1))) == 1) and ((max(ise3_dataset_fresh{dataset=\"nad_health\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"nad_health\"} == 1))) == 1)))) * on(nad) group_left(ops_owner, location, device_type) (max by (nad, ops_owner, location, device_type) (ise3_network_device_assignment{ops_owner=~\"$ops_owner\",location=~\"$location\",device_type=~\"$device_type\",nad=~\"$nad\"})) or label_replace(label_replace(label_replace((sum by (nad) ((ise3_nad_authentications{nad=~\"$nad\",status=\"failed\"}) and on() (((max(ise3_dataset_up{dataset=\"nad_health\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"nad_health\"} == 1))) == 1) and ((max(ise3_dataset_fresh{dataset=\"nad_health\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"nad_health\"} == 1))) == 1)))) unless on(nad) (max by (nad) (ise3_network_device_assignment)), \"ops_owner\", \"unknown\", \"\", \"\"), \"location\", \"Unknown\", \"\", \"\"), \"device_type\", \"unknown\", \"\", \"\")) > 0)) unless on(nad) ((sum by (nad,method) ((ise3_radius_failures_by_nad_method{nad=~\"$nad\"}) and on() (((max(ise3_dataset_up{dataset=\"radius_reporting\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"radius_reporting\"} == 1))) == 1) and ((max(ise3_dataset_fresh{dataset=\"radius_reporting\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"radius_reporting\"} == 1))) == 1)))) * on(nad) group_left(ops_owner, location, device_type) (max by (nad, ops_owner, location, device_type) (ise3_network_device_assignment{ops_owner=~\"$ops_owner\",location=~\"$location\",device_type=~\"$device_type\",nad=~\"$nad\"})) or label_replace(label_replace(label_replace((sum by (nad,method) ((ise3_radius_failures_by_nad_method{nad=~\"$nad\"}) and on() (((max(ise3_dataset_up{dataset=\"radius_reporting\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"radius_reporting\"} == 1))) == 1) and ((max(ise3_dataset_fresh{dataset=\"radius_reporting\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"radius_reporting\"} == 1))) == 1)))) unless on(nad) (max by (nad) (ise3_network_device_assignment)), \"ops_owner\", \"unknown\", \"\", \"\"), \"location\", \"Unknown\", \"\", \"\"), \"device_type\", \"unknown\", \"\", \"\")), \"method\", \"not recorded\", \"\", \"\")) * 0 + 1))",
+          "format": "table",
+          "instant": true,
+          "legendFormat": "",
+          "range": false,
+          "refId": "D"
+        },
+        {
+          "expr": "((sum by (nad) ((ise3_active_sessions_by_nad{nad=~\"$nad\"}) and on() (((max(ise3_dataset_up{dataset=\"active_sessions\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"active_sessions\"} == 1))) == 1) and ((max(ise3_dataset_fresh{dataset=\"active_sessions\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"active_sessions\"} == 1))) == 1)))) * on(nad) group_left(ops_owner, location, device_type) (max by (nad, ops_owner, location, device_type) (ise3_network_device_assignment{ops_owner=~\"$ops_owner\",location=~\"$location\",device_type=~\"$device_type\",nad=~\"$nad\"})) or label_replace(label_replace(label_replace((sum by (nad) ((ise3_active_sessions_by_nad{nad=~\"$nad\"}) and on() (((max(ise3_dataset_up{dataset=\"active_sessions\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"active_sessions\"} == 1))) == 1) and ((max(ise3_dataset_fresh{dataset=\"active_sessions\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"active_sessions\"} == 1))) == 1)))) unless on(nad) (max by (nad) (ise3_network_device_assignment)), \"ops_owner\", \"unknown\", \"\", \"\"), \"location\", \"Unknown\", \"\", \"\"), \"device_type\", \"unknown\", \"\", \"\")) * on(nad) group_right() ((((sum by (nad,method) ((ise3_radius_failures_by_nad_method{nad=~\"$nad\"}) and on() (((max(ise3_dataset_up{dataset=\"radius_reporting\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"radius_reporting\"} == 1))) == 1) and ((max(ise3_dataset_fresh{dataset=\"radius_reporting\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"radius_reporting\"} == 1))) == 1)))) * on(nad) group_left(ops_owner, location, device_type) (max by (nad, ops_owner, location, device_type) (ise3_network_device_assignment{ops_owner=~\"$ops_owner\",location=~\"$location\",device_type=~\"$device_type\",nad=~\"$nad\"})) or label_replace(label_replace(label_replace((sum by (nad,method) ((ise3_radius_failures_by_nad_method{nad=~\"$nad\"}) and on() (((max(ise3_dataset_up{dataset=\"radius_reporting\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"radius_reporting\"} == 1))) == 1) and ((max(ise3_dataset_fresh{dataset=\"radius_reporting\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"radius_reporting\"} == 1))) == 1)))) unless on(nad) (max by (nad) (ise3_network_device_assignment)), \"ops_owner\", \"unknown\", \"\", \"\"), \"location\", \"Unknown\", \"\", \"\"), \"device_type\", \"unknown\", \"\", \"\")) * 0 + 1) or ((label_replace(((((sum by (nad) ((ise3_radius_errors_by_nad{nad=~\"$nad\"}) and on() (((max(ise3_dataset_up{dataset=\"radius_errors\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"radius_errors\"} == 1))) == 1) and ((max(ise3_dataset_fresh{dataset=\"radius_errors\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"radius_errors\"} == 1))) == 1)))) * on(nad) group_left(ops_owner, location, device_type) (max by (nad, ops_owner, location, device_type) (ise3_network_device_assignment{ops_owner=~\"$ops_owner\",location=~\"$location\",device_type=~\"$device_type\",nad=~\"$nad\"})) or label_replace(label_replace(label_replace((sum by (nad) ((ise3_radius_errors_by_nad{nad=~\"$nad\"}) and on() (((max(ise3_dataset_up{dataset=\"radius_errors\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"radius_errors\"} == 1))) == 1) and ((max(ise3_dataset_fresh{dataset=\"radius_errors\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"radius_errors\"} == 1))) == 1)))) unless on(nad) (max by (nad) (ise3_network_device_assignment)), \"ops_owner\", \"unknown\", \"\", \"\"), \"location\", \"Unknown\", \"\", \"\"), \"device_type\", \"unknown\", \"\", \"\")) > 0) or (((sum by (nad) ((ise3_nad_authentications{nad=~\"$nad\",status=\"failed\"}) and on() (((max(ise3_dataset_up{dataset=\"nad_health\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"nad_health\"} == 1))) == 1) and ((max(ise3_dataset_fresh{dataset=\"nad_health\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"nad_health\"} == 1))) == 1)))) * on(nad) group_left(ops_owner, location, device_type) (max by (nad, ops_owner, location, device_type) (ise3_network_device_assignment{ops_owner=~\"$ops_owner\",location=~\"$location\",device_type=~\"$device_type\",nad=~\"$nad\"})) or label_replace(label_replace(label_replace((sum by (nad) ((ise3_nad_authentications{nad=~\"$nad\",status=\"failed\"}) and on() (((max(ise3_dataset_up{dataset=\"nad_health\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"nad_health\"} == 1))) == 1) and ((max(ise3_dataset_fresh{dataset=\"nad_health\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"nad_health\"} == 1))) == 1)))) unless on(nad) (max by (nad) (ise3_network_device_assignment)), \"ops_owner\", \"unknown\", \"\", \"\"), \"location\", \"Unknown\", \"\", \"\"), \"device_type\", \"unknown\", \"\", \"\")) > 0)) unless on(nad) ((sum by (nad,method) ((ise3_radius_failures_by_nad_method{nad=~\"$nad\"}) and on() (((max(ise3_dataset_up{dataset=\"radius_reporting\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"radius_reporting\"} == 1))) == 1) and ((max(ise3_dataset_fresh{dataset=\"radius_reporting\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"radius_reporting\"} == 1))) == 1)))) * on(nad) group_left(ops_owner, location, device_type) (max by (nad, ops_owner, location, device_type) (ise3_network_device_assignment{ops_owner=~\"$ops_owner\",location=~\"$location\",device_type=~\"$device_type\",nad=~\"$nad\"})) or label_replace(label_replace(label_replace((sum by (nad,method) ((ise3_radius_failures_by_nad_method{nad=~\"$nad\"}) and on() (((max(ise3_dataset_up{dataset=\"radius_reporting\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"radius_reporting\"} == 1))) == 1) and ((max(ise3_dataset_fresh{dataset=\"radius_reporting\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"radius_reporting\"} == 1))) == 1)))) unless on(nad) (max by (nad) (ise3_network_device_assignment)), \"ops_owner\", \"unknown\", \"\", \"\"), \"location\", \"Unknown\", \"\", \"\"), \"device_type\", \"unknown\", \"\", \"\")), \"method\", \"not recorded\", \"\", \"\")) * 0 + 1))",
+          "format": "table",
+          "instant": true,
+          "legendFormat": "",
+          "range": false,
+          "refId": "E"
         }
       ],
-      "title": "Which device, failing which method",
+      "title": "Device fix list",
       "transformations": [
         {
           "id": "filterFieldsByName",
@@ -776,16 +677,25 @@
                 "Time",
                 "__name__",
                 "job",
-                "instance"
+                "instance",
+                "provider"
               ]
             }
           }
         },
         {
+          "id": "merge",
+          "options": {}
+        },
+        {
           "id": "organize",
           "options": {
             "renameByName": {
-              "Value": "Failures",
+              "Value #A": "Failures",
+              "Value #B": "Errors",
+              "Value #C": "Failed",
+              "Value #D": "Passed",
+              "Value #E": "Sessions",
               "device_type": "Type",
               "location": "Location",
               "method": "Method",
@@ -1028,6 +938,272 @@
       },
       "id": 0,
       "panels": [],
+      "title": "Authorization",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${prometheus}"
+      },
+      "description": "Which policy set the live sessions on each device matched. This is the panel that answers 'which switches are still in open mode' \u2014 a device landing in an unexpected policy set is a device group, location, or NAD attribute problem rather than a policy one, and the fix is on the device's ISE configuration. Bounded by the exporter's top-devices limit; the coverage panel on the pipeline dashboard says how much of the estate is shown.",
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Network device"
+            },
+            "properties": [
+              {
+                "id": "links",
+                "value": [
+                  {
+                    "targetBlank": false,
+                    "title": "Narrow this page to it",
+                    "url": "/d/ise3-nad?${__url_time_range}&var-nad=${__data.fields.Network device}"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 10,
+        "w": 12,
+        "x": 0,
+        "y": 26
+      },
+      "options": null,
+      "repeatDirection": "h",
+      "targets": [
+        {
+          "expr": "(sum by (nad,policy_set) ((ise3_session_policy_set_endpoints_by_nad{nad=~\"$nad\"}) and on() (((max(ise3_dataset_up{dataset=\"session_authorization\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"session_authorization\"} == 1))) == 1) and ((max(ise3_dataset_fresh{dataset=\"session_authorization\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"session_authorization\"} == 1))) == 1)))) * on(nad) group_left(ops_owner, location, device_type) (max by (nad, ops_owner, location, device_type) (ise3_network_device_assignment{ops_owner=~\"$ops_owner\",location=~\"$location\",device_type=~\"$device_type\",nad=~\"$nad\"})) or label_replace(label_replace(label_replace((sum by (nad,policy_set) ((ise3_session_policy_set_endpoints_by_nad{nad=~\"$nad\"}) and on() (((max(ise3_dataset_up{dataset=\"session_authorization\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"session_authorization\"} == 1))) == 1) and ((max(ise3_dataset_fresh{dataset=\"session_authorization\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"session_authorization\"} == 1))) == 1)))) unless on(nad) (max by (nad) (ise3_network_device_assignment)), \"ops_owner\", \"unknown\", \"\", \"\"), \"location\", \"Unknown\", \"\", \"\"), \"device_type\", \"unknown\", \"\", \"\")",
+          "format": "table",
+          "instant": true,
+          "legendFormat": "",
+          "range": false,
+          "refId": "A"
+        }
+      ],
+      "title": "Policy sets by device",
+      "transformations": [
+        {
+          "id": "filterFieldsByName",
+          "options": {
+            "exclude": {
+              "names": [
+                "Time",
+                "__name__",
+                "job",
+                "instance",
+                "provider"
+              ]
+            }
+          }
+        },
+        {
+          "id": "organize",
+          "options": {
+            "renameByName": {
+              "Value": "Endpoints",
+              "device_type": "Type",
+              "location": "Location",
+              "nad": "Network device",
+              "ops_owner": "Operations owner",
+              "policy_set": "Policy set"
+            }
+          }
+        },
+        {
+          "id": "sortBy",
+          "options": {
+            "sort": [
+              {
+                "desc": true,
+                "field": "Endpoints"
+              }
+            ]
+          }
+        }
+      ],
+      "transparent": false,
+      "type": "table"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${prometheus}"
+      },
+      "description": "The authorization profiles live sessions are landing on, for the selected Operations owner. Scoped by owner alone and not by the other three variables: ISE attaches the owner to the session, so a location or a single device cannot be selected here. Read it after a policy change to confirm the change did what was intended.",
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Endpoints"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "short"
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 10,
+        "w": 6,
+        "x": 12,
+        "y": 26
+      },
+      "options": null,
+      "repeatDirection": "h",
+      "targets": [
+        {
+          "expr": "sum by (authz_profile) ((ise3_session_authz_profile_endpoints{ops_owner=~\"$ops_owner\"}) and on() (((max(ise3_dataset_up{dataset=\"session_authorization\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"session_authorization\"} == 1))) == 1) and ((max(ise3_dataset_fresh{dataset=\"session_authorization\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"session_authorization\"} == 1))) == 1)))",
+          "format": "table",
+          "instant": true,
+          "legendFormat": "",
+          "range": false,
+          "refId": "A"
+        }
+      ],
+      "title": "Authorization profiles being selected",
+      "transformations": [
+        {
+          "id": "filterFieldsByName",
+          "options": {
+            "exclude": {
+              "names": [
+                "Time",
+                "__name__",
+                "job",
+                "instance",
+                "provider"
+              ]
+            }
+          }
+        },
+        {
+          "id": "organize",
+          "options": {
+            "renameByName": {
+              "Value": "Endpoints",
+              "authz_profile": "Authorization profile"
+            }
+          }
+        },
+        {
+          "id": "sortBy",
+          "options": {
+            "sort": [
+              {
+                "desc": true,
+                "field": "Endpoints"
+              }
+            ]
+          }
+        }
+      ],
+      "transparent": false,
+      "type": "table"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${prometheus}"
+      },
+      "description": "The authorization rules those sessions matched, for the selected Operations owner \u2014 the ground-truth open-mode versus closed-mode signal where rule names follow a convention. A catch-all rule carrying most of the traffic means the specific rules above it are not matching. Owner-scoped only, for the same reason as the profiles beside it.",
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Endpoints"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "short"
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 10,
+        "w": 6,
+        "x": 18,
+        "y": 26
+      },
+      "options": null,
+      "repeatDirection": "h",
+      "targets": [
+        {
+          "expr": "sum by (authz_rule) ((ise3_session_authz_rule_endpoints{ops_owner=~\"$ops_owner\"}) and on() (((max(ise3_dataset_up{dataset=\"session_authorization\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"session_authorization\"} == 1))) == 1) and ((max(ise3_dataset_fresh{dataset=\"session_authorization\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"session_authorization\"} == 1))) == 1)))",
+          "format": "table",
+          "instant": true,
+          "legendFormat": "",
+          "range": false,
+          "refId": "A"
+        }
+      ],
+      "title": "Authorization rules being matched",
+      "transformations": [
+        {
+          "id": "filterFieldsByName",
+          "options": {
+            "exclude": {
+              "names": [
+                "Time",
+                "__name__",
+                "job",
+                "instance",
+                "provider"
+              ]
+            }
+          }
+        },
+        {
+          "id": "organize",
+          "options": {
+            "renameByName": {
+              "Value": "Endpoints",
+              "authz_rule": "Authorization rule"
+            }
+          }
+        },
+        {
+          "id": "sortBy",
+          "options": {
+            "sort": [
+              {
+                "desc": true,
+                "field": "Endpoints"
+              }
+            ]
+          }
+        }
+      ],
+      "transparent": false,
+      "type": "table"
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 36
+      },
+      "id": 0,
+      "panels": [],
       "title": "Silence",
       "type": "row"
     },
@@ -1062,7 +1238,7 @@
         "h": 10,
         "w": 12,
         "x": 0,
-        "y": 26
+        "y": 37
       },
       "options": null,
       "repeatDirection": "h",
@@ -1086,7 +1262,8 @@
                 "Time",
                 "__name__",
                 "job",
-                "instance"
+                "instance",
+                "provider"
               ]
             }
           }
@@ -1159,7 +1336,7 @@
         "h": 4,
         "w": 12,
         "x": 12,
-        "y": 26
+        "y": 37
       },
       "options": {
         "colorMode": "value",
@@ -1192,7 +1369,333 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 36
+        "y": 47
+      },
+      "id": 0,
+      "panels": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${prometheus}"
+          },
+          "description": "Policy sets holding endpoints that are failing authorization right now, for the selected owner. A single policy set carrying every failure narrows the search to one branch of the policy tree.",
+          "fieldConfig": {
+            "defaults": {},
+            "overrides": [
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "Endpoints"
+                },
+                "properties": [
+                  {
+                    "id": "unit",
+                    "value": "short"
+                  },
+                  {
+                    "id": "thresholds",
+                    "value": {
+                      "mode": "absolute",
+                      "steps": [
+                        {
+                          "color": "green",
+                          "value": null
+                        },
+                        {
+                          "color": "orange",
+                          "value": 1
+                        }
+                      ]
+                    }
+                  },
+                  {
+                    "id": "custom.cellOptions",
+                    "value": {
+                      "mode": "basic",
+                      "type": "color-background"
+                    }
+                  }
+                ]
+              }
+            ]
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 8,
+            "x": 0,
+            "y": 48
+          },
+          "options": null,
+          "repeatDirection": "h",
+          "targets": [
+            {
+              "expr": "sum by (policy_set) ((ise3_session_failed_policy_set_endpoints{ops_owner=~\"$ops_owner\"}) and on() (((max(ise3_dataset_up{dataset=\"session_authorization\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"session_authorization\"} == 1))) == 1) and ((max(ise3_dataset_fresh{dataset=\"session_authorization\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"session_authorization\"} == 1))) == 1)))",
+              "format": "table",
+              "instant": true,
+              "legendFormat": "",
+              "range": false,
+              "refId": "A"
+            }
+          ],
+          "title": "Policy sets containing the failures",
+          "transformations": [
+            {
+              "id": "filterFieldsByName",
+              "options": {
+                "exclude": {
+                  "names": [
+                    "Time",
+                    "__name__",
+                    "job",
+                    "instance",
+                    "provider"
+                  ]
+                }
+              }
+            },
+            {
+              "id": "organize",
+              "options": {
+                "renameByName": {
+                  "Value": "Endpoints",
+                  "policy_set": "Policy set"
+                }
+              }
+            },
+            {
+              "id": "sortBy",
+              "options": {
+                "sort": [
+                  {
+                    "desc": true,
+                    "field": "Endpoints"
+                  }
+                ]
+              }
+            }
+          ],
+          "transparent": false,
+          "type": "table"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${prometheus}"
+          },
+          "description": "The rules those failing endpoints matched on their way to being denied. Rule plus profile is enough to find the policy line responsible.",
+          "fieldConfig": {
+            "defaults": {},
+            "overrides": [
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "Endpoints"
+                },
+                "properties": [
+                  {
+                    "id": "unit",
+                    "value": "short"
+                  },
+                  {
+                    "id": "thresholds",
+                    "value": {
+                      "mode": "absolute",
+                      "steps": [
+                        {
+                          "color": "green",
+                          "value": null
+                        },
+                        {
+                          "color": "orange",
+                          "value": 1
+                        }
+                      ]
+                    }
+                  },
+                  {
+                    "id": "custom.cellOptions",
+                    "value": {
+                      "mode": "basic",
+                      "type": "color-background"
+                    }
+                  }
+                ]
+              }
+            ]
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 8,
+            "x": 8,
+            "y": 48
+          },
+          "options": null,
+          "repeatDirection": "h",
+          "targets": [
+            {
+              "expr": "sum by (authz_rule) ((ise3_session_failed_authz_rule_endpoints{ops_owner=~\"$ops_owner\"}) and on() (((max(ise3_dataset_up{dataset=\"session_authorization\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"session_authorization\"} == 1))) == 1) and ((max(ise3_dataset_fresh{dataset=\"session_authorization\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"session_authorization\"} == 1))) == 1)))",
+              "format": "table",
+              "instant": true,
+              "legendFormat": "",
+              "range": false,
+              "refId": "A"
+            }
+          ],
+          "title": "Authorization rules the failures matched",
+          "transformations": [
+            {
+              "id": "filterFieldsByName",
+              "options": {
+                "exclude": {
+                  "names": [
+                    "Time",
+                    "__name__",
+                    "job",
+                    "instance",
+                    "provider"
+                  ]
+                }
+              }
+            },
+            {
+              "id": "organize",
+              "options": {
+                "renameByName": {
+                  "Value": "Endpoints",
+                  "authz_rule": "Authorization rule"
+                }
+              }
+            },
+            {
+              "id": "sortBy",
+              "options": {
+                "sort": [
+                  {
+                    "desc": true,
+                    "field": "Endpoints"
+                  }
+                ]
+              }
+            }
+          ],
+          "transparent": false,
+          "type": "table"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${prometheus}"
+          },
+          "description": "Profiles those endpoints matched on their way to failing. A profile appearing here that should never fail is usually a missing attribute or a broken downloadable ACL \u2014 a policy fault rather than a device one, so it is the one row of this page whose fix is not on the switch.",
+          "fieldConfig": {
+            "defaults": {},
+            "overrides": [
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "Endpoints"
+                },
+                "properties": [
+                  {
+                    "id": "unit",
+                    "value": "short"
+                  },
+                  {
+                    "id": "thresholds",
+                    "value": {
+                      "mode": "absolute",
+                      "steps": [
+                        {
+                          "color": "green",
+                          "value": null
+                        },
+                        {
+                          "color": "orange",
+                          "value": 1
+                        }
+                      ]
+                    }
+                  },
+                  {
+                    "id": "custom.cellOptions",
+                    "value": {
+                      "mode": "basic",
+                      "type": "color-background"
+                    }
+                  }
+                ]
+              }
+            ]
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 8,
+            "x": 16,
+            "y": 48
+          },
+          "options": null,
+          "repeatDirection": "h",
+          "targets": [
+            {
+              "expr": "sum by (authz_profile) ((ise3_session_failed_authz_profile_endpoints{ops_owner=~\"$ops_owner\"}) and on() (((max(ise3_dataset_up{dataset=\"session_authorization\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"session_authorization\"} == 1))) == 1) and ((max(ise3_dataset_fresh{dataset=\"session_authorization\"} and on(dataset,provider) (ise3_dataset_provider_active{dataset=\"session_authorization\"} == 1))) == 1)))",
+              "format": "table",
+              "instant": true,
+              "legendFormat": "",
+              "range": false,
+              "refId": "A"
+            }
+          ],
+          "title": "Authorization profiles the failures selected",
+          "transformations": [
+            {
+              "id": "filterFieldsByName",
+              "options": {
+                "exclude": {
+                  "names": [
+                    "Time",
+                    "__name__",
+                    "job",
+                    "instance",
+                    "provider"
+                  ]
+                }
+              }
+            },
+            {
+              "id": "organize",
+              "options": {
+                "renameByName": {
+                  "Value": "Endpoints",
+                  "authz_profile": "Authorization profile"
+                }
+              }
+            },
+            {
+              "id": "sortBy",
+              "options": {
+                "sort": [
+                  {
+                    "desc": true,
+                    "field": "Endpoints"
+                  }
+                ]
+              }
+            }
+          ],
+          "transparent": false,
+          "type": "table"
+        }
+      ],
+      "title": "Authorization failures",
+      "type": "row"
+    },
+    {
+      "collapsed": true,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 56
       },
       "id": 0,
       "panels": [
@@ -1223,7 +1726,7 @@
             "h": 8,
             "w": 8,
             "x": 0,
-            "y": 37
+            "y": 57
           },
           "options": null,
           "repeatDirection": "h",
@@ -1247,7 +1750,8 @@
                     "Time",
                     "__name__",
                     "job",
-                    "instance"
+                    "instance",
+                    "provider"
                   ]
                 }
               }
@@ -1303,7 +1807,7 @@
             "h": 8,
             "w": 8,
             "x": 8,
-            "y": 37
+            "y": 57
           },
           "options": null,
           "repeatDirection": "h",
@@ -1327,7 +1831,8 @@
                     "Time",
                     "__name__",
                     "job",
-                    "instance"
+                    "instance",
+                    "provider"
                   ]
                 }
               }
@@ -1383,7 +1888,7 @@
             "h": 8,
             "w": 8,
             "x": 16,
-            "y": 37
+            "y": 57
           },
           "options": null,
           "repeatDirection": "h",
@@ -1407,7 +1912,8 @@
                     "Time",
                     "__name__",
                     "job",
-                    "instance"
+                    "instance",
+                    "provider"
                   ]
                 }
               }
@@ -1450,7 +1956,7 @@
             "h": 10,
             "w": 12,
             "x": 0,
-            "y": 45
+            "y": 65
           },
           "options": null,
           "repeatDirection": "h",
@@ -1475,6 +1981,7 @@
                     "__name__",
                     "job",
                     "instance",
+                    "provider",
                     "Value"
                   ]
                 }
@@ -1537,7 +2044,7 @@
             "h": 8,
             "w": 12,
             "x": 12,
-            "y": 45
+            "y": 65
           },
           "options": {
             "legend": {
@@ -1579,7 +2086,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 55
+        "y": 75
       },
       "id": 0,
       "panels": [
@@ -1633,7 +2140,7 @@
             "h": 10,
             "w": 12,
             "x": 0,
-            "y": 56
+            "y": 76
           },
           "options": null,
           "repeatDirection": "h",
@@ -1665,7 +2172,8 @@
                     "Time",
                     "__name__",
                     "job",
-                    "instance"
+                    "instance",
+                    "provider"
                   ]
                 }
               }
@@ -1713,7 +2221,7 @@
             "h": 10,
             "w": 12,
             "x": 12,
-            "y": 56
+            "y": 76
           },
           "options": null,
           "repeatDirection": "h",
@@ -1737,7 +2245,8 @@
                     "Time",
                     "__name__",
                     "job",
-                    "instance"
+                    "instance",
+                    "provider"
                   ]
                 }
               }
@@ -1781,7 +2290,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 66
+        "y": 86
       },
       "id": 0,
       "panels": [
@@ -1799,10 +2308,10 @@
             "h": 6,
             "w": 24,
             "x": 0,
-            "y": 67
+            "y": 87
           },
           "options": {
-            "content": "**Purpose** \u2014 answer which switch or router is broken, in what way, and who owns it \u2014 the device-owner's view rather than ISE's.\n\n**Read it in this order**\n\n1. Set the variables to your scope: an owner, a location, a platform, or one device.\n2. Read **Devices with errors**. One device is a device problem; a whole location at once is not.\n3. Work the **Device fix list**: errors beside passes and sessions say whether the device is broken or merely busy.\n4. Use **Which device, failing which method** to turn a row into a concrete cause, then open the device on RADIUS access.\n5. Before closing, check **Silent and stale devices** \u2014 silence produces no errors and appears nowhere else.\n\n**When something is red**\n\n- Errors on one device with passes continuing: supplicant or certificate trouble on a subset of its clients.\n- Errors with no passes and no sessions: shared secret, AAA configuration, or the device cannot reach a PSN.\n- Every device silent at once: read the activity feed age before anything else \u2014 that is a collection fault, not an outage.\n- Devices showing as unknown: their ISE group assignment is missing, and the detail-cache coverage panel says whether the exporter is still filling.\n\n**Related dashboards** \u2014 Triage, RADIUS access, Endpoints, Device administration, Collection pipeline\n\n*Owner: set this to the team that answers the page. Runbook: link it here \u2014 a red panel with no runbook is a puzzle, not an alert.*",
+            "content": "**Purpose** \u2014 answer which switch or router is broken, in what way, and who owns it \u2014 the device-owner's view rather than ISE's.\n\n**Read it in this order**\n\n1. Set the variables to your scope: an owner, a location, a platform, or one device.\n2. Read **Devices with errors**. One device is a device problem; a whole location at once is not.\n3. Work the **Device fix list**: errors beside passes and sessions say whether the device is broken or merely busy.\n4. Use **Which device, failing which method** to turn a row into a concrete cause, then open the device on RADIUS access.\n5. Read **Policy sets by device** when the device authenticates but lands somewhere unexpected \u2014 that is an ISE device-group problem, not a switch one.\n6. Before closing, check **Silent and stale devices** \u2014 silence produces no errors and appears nowhere else.\n\n**When something is red**\n\n- Errors on one device with passes continuing: supplicant or certificate trouble on a subset of its clients.\n- Errors with no passes and no sessions: shared secret, AAA configuration, or the device cannot reach a PSN.\n- Every device silent at once: read the activity feed age before anything else \u2014 that is a collection fault, not an outage.\n- Devices showing as unknown: their ISE group assignment is missing, and the detail-cache coverage panel says whether the exporter is still filling.\n\n**Related dashboards** \u2014 Triage, RADIUS access, Endpoints, Device administration, Collection pipeline\n\n*Owner: set this to the team that answers the page. Runbook: link it here \u2014 a red panel with no runbook is a puzzle, not an alert.*",
             "mode": "markdown"
           },
           "repeatDirection": "h",

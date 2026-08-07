@@ -758,6 +758,13 @@ def _table_transformations(count, columns, sort, labels):
     """
     hidden = list(NOISE_COLUMNS)
     renamed = dict(labels or {})
+    # `provider` names the source that answered. On a table about ISE that is
+    # the same source on every row, so it is width spent saying nothing and it
+    # splits a merge that would otherwise have joined two targets into one row.
+    # It survives only where the table is *about* the source, which a panel
+    # declares by renaming it into a column heading.
+    if "provider" not in renamed:
+        hidden.append("provider")
     for index, name in enumerate(columns):
         column = _value_column(index, count)
         if name is None:
@@ -3276,6 +3283,11 @@ def endpoints_dashboard():
 # ---------------------------------------------------------------------------
 
 NAD_FILTER = 'nad=~"$nad"'
+# For the session-sourced authorization families, which ISE labels with the
+# device's operations owner and nothing else: there is no location, platform or
+# device to select on, so those panels answer for one owner's estate rather
+# than for one switch, and say so.
+NAD_OWNER = 'ops_owner=~"$ops_owner"'
 NAD_SCOPE = ('ops_owner=~"$ops_owner",location=~"$location",'
              'device_type=~"$device_type",nad=~"$nad"')
 NAD_ATTRIBUTES = ("ops_owner", "location", "device_type")
@@ -3294,6 +3306,51 @@ def scoped_nad(name, dataset, selectors="", by="nad"):
     return nad_attributed(
         summed(gate(metric(name, selected), dataset), by=by),
         NAD_SCOPE, NAD_ATTRIBUTES)
+
+
+# What the method column says for a device whose failures carry no method
+# pairing. The pairing is a bounded cross-product, and MnT and the activity
+# view do not always agree, so a device can be failing with nothing to pair it
+# to — which is a row to work, not a row to drop.
+NO_METHOD = "not recorded"
+
+
+def fix_list_rows():
+    """The (device, method) pairs to be worked, one row each.
+
+    Every device that is failing appears, whether or not the bounded
+    device-and-method cross-product managed to name a method for it, and
+    whether the failure came from MnT's error view or from the activity view.
+    """
+    methods = scoped_nad("ise3_radius_failures_by_nad_method",
+                         "radius_reporting", by="nad,method")
+    errors = scoped_nad("ise3_radius_errors_by_nad", "radius_errors")
+    failed = scoped_nad("ise3_nad_authentications", "nad_health",
+                        'status="failed"')
+    trouble = f"(({errors}) > 0) or (({failed}) > 0)"
+    unpaired = (f"label_replace(({trouble}) unless on(nad) ({methods}), "
+                f'"method", "{NO_METHOD}", "", "")')
+    return methods, unpaired
+
+
+def fix_list_failures():
+    """The failure count for each row, zero where no method could be paired."""
+    methods, unpaired = fix_list_rows()
+    return f"({methods}) or (({unpaired}) * 0)"
+
+
+def per_device_column(expr):
+    """A per-device number repeated down that device's method rows.
+
+    The join is done here rather than left to the table's merge: a table merges
+    frames on the columns they share, and a device-level frame has no method
+    column to share, so one of its two method rows would silently come back
+    empty. group_right makes the row skeleton the many side, so the device's
+    figure lands on every row that names it.
+    """
+    methods, unpaired = fix_list_rows()
+    skeleton = f"(({methods}) * 0 + 1) or (({unpaired}) * 0 + 1)"
+    return f"({expr}) * on(nad) group_right() ({skeleton})"
 
 
 def nad_dashboard():
@@ -3333,20 +3390,22 @@ def nad_dashboard():
         ),
         sized(
             stat_panel(
-                "Silent devices and activity coverage",
-                "Configured devices with no authentication activity at all, "
-                "and the share of the estate the activity scan reached. "
+                "Silent devices",
+                "Configured devices that authenticated nothing in the scan "
+                "window, beside the number that did. Both are counts of "
+                "devices, and together they are the configured estate. "
                 "Fleet-wide rather than scoped, because silence is measured "
-                "against the whole configured inventory. Low coverage means "
-                "the silent count beside it is a floor rather than a total.",
+                "against the whole inventory: a device absent from the "
+                "inventory cannot be found missing from it. Read the activity "
+                "feed age beside this before acting on either number.",
                 [
                     instant(summed(gate(metric("ise3_nad_silent_total"),
                                         "nad_health")), "silent"),
                     instant(summed(gate(metric("ise3_nad_activity_covered"),
-                                        "nad_health")), "covered", ref="B"),
+                                        "nad_health")), "seen active", ref="B"),
                 ],
                 thresholds=NONZERO_WARNING,
-                overrides=[by_ref("B", unit="percentunit", thresholds=COVERAGE)],
+                overrides=[by_ref("B", thresholds=NEUTRAL)],
                 no_value=NO_DATA_STALE,
             ),
             STAT_H,
@@ -3373,38 +3432,53 @@ def nad_dashboard():
             EIGHTH,
         ),
     ] + trust_pair(("network_devices", "nad_health", "radius_errors",
-                    "radius_reporting", "active_sessions"), span=EIGHTH)
+                    "radius_reporting", "active_sessions",
+                    "session_authorization"), span=EIGHTH)
 
     failing = [
         sized(
             tbl(
                 "Device fix list",
-                "One row per network device in scope: errors, failed and "
-                "passed authentications, and the live sessions it is currently "
-                "holding — worst first. This is the panel that separates a "
-                "broken switch from a busy one: errors beside a large passed "
-                "count are a minority of clients failing on a healthy device, "
-                "while errors with no passes and no sessions is a device that "
-                "cannot authenticate anyone. Errors come from MnT and the "
-                "pass/fail counts from the activity view, so the two can "
-                "disagree by a collection cadence.",
+                "The work queue: one row per network device and authentication "
+                "method that is failing, worst first, with the owner and "
+                "location ISE holds for the device and the device's own "
+                "figures beside it. Read across a row rather than down a "
+                "column — failures on one method while the passed count stays "
+                "high is a supplicant or certificate problem on a subset of "
+                "that device's clients, while failures with no passes and no "
+                "sessions is the shared secret, the AAA configuration, or a "
+                "device that cannot reach a PSN. A device's error, pass and "
+                "session counts are per device, so they repeat across its "
+                "method rows. A device failing with no method paired to it "
+                f"reads {NO_METHOD!r}: the pairing is bounded for cost and MnT "
+                "and the activity view need not agree, and a row is kept "
+                "either way rather than dropped. Healthy devices are absent by "
+                "design — silence is the table below, inventory the row above.",
                 [
-                    instant(scoped_nad("ise3_radius_errors_by_nad",
-                                       "radius_errors"), ref="A"),
-                    instant(scoped_nad("ise3_nad_authentications", "nad_health",
-                                       'status="failed"'), ref="B"),
-                    instant(scoped_nad("ise3_nad_authentications", "nad_health",
-                                       'status="passed"'), ref="C"),
-                    instant(scoped_nad("ise3_active_sessions_by_nad",
-                                       "active_sessions"), ref="D"),
+                    instant(fix_list_failures(), ref="A"),
+                    instant(per_device_column(
+                        scoped_nad("ise3_radius_errors_by_nad", "radius_errors")),
+                        ref="B"),
+                    instant(per_device_column(
+                        scoped_nad("ise3_nad_authentications", "nad_health",
+                                   'status="failed"')), ref="C"),
+                    instant(per_device_column(
+                        scoped_nad("ise3_nad_authentications", "nad_health",
+                                   'status="passed"')), ref="D"),
+                    instant(per_device_column(
+                        scoped_nad("ise3_active_sessions_by_nad",
+                                   "active_sessions")), ref="E"),
                 ],
-                columns=["Errors", "Failed", "Passed", "Sessions"],
-                sort=("Errors", True),
-                labels=NAD_COLUMNS,
+                columns=["Failures", "Errors", "Failed", "Passed", "Sessions"],
+                sort=("Failures", True),
+                labels={**NAD_COLUMNS, "method": "Method"},
                 column_overrides=[
-                    by_column("Errors", thresholds=NONZERO_WARNING,
-                              colour_cells=True, width=90),
-                    by_column("Failed", thresholds=NONZERO_WARNING, width=90),
+                    by_column("Failures", thresholds=NONZERO_WARNING,
+                              colour_cells=True, width=100),
+                    by_column("Errors", thresholds=NONZERO_WARNING, width=90),
+                    by_column("Failed", width=90),
+                    by_column("Passed", width=90),
+                    by_column("Sessions", width=100),
                     by_column("Network device", links=[
                         drilldown("Isolate this device on RADIUS access",
                                   "ise3-access", nad=by_row("Network device")),
@@ -3414,34 +3488,7 @@ def nad_dashboard():
                 ],
             ),
             TALL_H,
-            HALF,
-        ),
-        sized(
-            tbl(
-                "Which device, failing which method",
-                "Every device and authentication method pairing that produced "
-                "failures, with the owner and location ISE holds for the "
-                "device. Each row is one concrete thing to go and look at: a "
-                "device failing only dot1x while MAB passes is a supplicant or "
-                "certificate problem, a device failing everything is the "
-                "shared secret or the AAA configuration. This cross-product is "
-                "bounded by the exporter for cost reasons — the pipeline "
-                "dashboard's coverage panel says by how much.",
-                [instant(scoped_nad("ise3_radius_failures_by_nad_method",
-                                    "radius_reporting", by="nad,method"))],
-                columns=["Failures"],
-                sort=("Failures", True),
-                labels={**NAD_COLUMNS, "method": "Method"},
-                column_overrides=[
-                    by_column("Failures", thresholds=NONZERO_WARNING,
-                              colour_cells=True, width=100),
-                    by_column("Network device", links=[
-                        drilldown("Narrow this page to it", "ise3-nad",
-                                  nad=by_row("Network device"))]),
-                ],
-            ),
-            TALL_H,
-            HALF,
+            FULL,
         ),
     ]
 
@@ -3522,6 +3569,132 @@ def nad_dashboard():
             ),
             STAT_H,
             HALF,
+        ),
+    ]
+
+    authorization = [
+        sized(
+            tbl(
+                "Policy sets by device",
+                "Which policy set the live sessions on each device matched. "
+                "This is the panel that answers 'which switches are still in "
+                "open mode' — a device landing in an unexpected policy set is "
+                "a device group, location, or NAD attribute problem rather "
+                "than a policy one, and the fix is on the device's ISE "
+                "configuration. Bounded by the exporter's top-devices limit; "
+                "the coverage panel on the pipeline dashboard says how much of "
+                "the estate is shown.",
+                [instant(scoped_nad("ise3_session_policy_set_endpoints_by_nad",
+                                    "session_authorization", by="nad,policy_set"))],
+                columns=["Endpoints"],
+                sort=("Endpoints", True),
+                labels={**NAD_COLUMNS, "policy_set": "Policy set"},
+                column_overrides=[
+                    by_column("Network device", links=[
+                        drilldown("Narrow this page to it", "ise3-nad",
+                                  nad=by_row("Network device"))]),
+                ],
+            ),
+            TALL_H,
+            HALF,
+        ),
+        sized(
+            ranked(
+                "Authorization profiles being selected",
+                "The authorization profiles live sessions are landing on, for "
+                "the selected Operations owner. Scoped by owner alone and not "
+                "by the other three variables: ISE attaches the owner to the "
+                "session, so a location or a single device cannot be selected "
+                "here. Read it after a policy change to confirm the change did "
+                "what was intended.",
+                summed(gate(metric("ise3_session_authz_profile_endpoints",
+                                   NAD_OWNER), "session_authorization"),
+                       by="authz_profile"),
+                label="authz_profile",
+                label_header="Authorization profile",
+                header="Endpoints",
+            ),
+            TALL_H,
+            QUARTER,
+        ),
+        sized(
+            ranked(
+                "Authorization rules being matched",
+                "The authorization rules those sessions matched, for the "
+                "selected Operations owner — the ground-truth open-mode versus "
+                "closed-mode signal where rule names follow a convention. A "
+                "catch-all rule carrying most of the traffic means the specific "
+                "rules above it are not matching. Owner-scoped only, for the "
+                "same reason as the profiles beside it.",
+                summed(gate(metric("ise3_session_authz_rule_endpoints",
+                                   NAD_OWNER), "session_authorization"),
+                       by="authz_rule"),
+                label="authz_rule",
+                label_header="Authorization rule",
+                header="Endpoints",
+            ),
+            TALL_H,
+            QUARTER,
+        ),
+    ]
+
+    authorization_failures = [
+        sized(
+            ranked(
+                "Policy sets containing the failures",
+                "Policy sets holding endpoints that are failing authorization "
+                "right now, for the selected owner. A single policy set "
+                "carrying every failure narrows the search to one branch of "
+                "the policy tree.",
+                summed(gate(metric("ise3_session_failed_policy_set_endpoints",
+                                   NAD_OWNER), "session_authorization"),
+                       by="policy_set"),
+                label="policy_set",
+                label_header="Policy set",
+                header="Endpoints",
+                value_thresholds=NONZERO_WARNING,
+                colour_cells=True,
+            ),
+            PANEL_H,
+            THIRD,
+        ),
+        sized(
+            ranked(
+                "Authorization rules the failures matched",
+                "The rules those failing endpoints matched on their way to "
+                "being denied. Rule plus profile is enough to find the policy "
+                "line responsible.",
+                summed(gate(metric("ise3_session_failed_authz_rule_endpoints",
+                                   NAD_OWNER), "session_authorization"),
+                       by="authz_rule"),
+                label="authz_rule",
+                label_header="Authorization rule",
+                header="Endpoints",
+                value_thresholds=NONZERO_WARNING,
+                colour_cells=True,
+            ),
+            PANEL_H,
+            THIRD,
+        ),
+        sized(
+            ranked(
+                "Authorization profiles the failures selected",
+                "Profiles those endpoints matched on their way to failing. A "
+                "profile appearing here that should never fail is usually a "
+                "missing attribute or a broken downloadable ACL — a policy "
+                "fault rather than a device one, so it is the one row of this "
+                "page whose fix is not on the switch.",
+                summed(gate(metric("ise3_session_failed_authz_profile_endpoints",
+                                   NAD_OWNER), "session_authorization"),
+                       by="authz_profile"),
+                label="authz_profile",
+                label_header="Authorization profile",
+                header="Endpoints",
+                value_thresholds=NONZERO_WARNING,
+                colour_cells=True,
+            ),
+            PANEL_H,
+            THIRD,
         ),
     ]
 
@@ -3673,6 +3846,9 @@ def nad_dashboard():
             "say whether the device is broken or merely busy.",
             "Use **Which device, failing which method** to turn a row into a "
             "concrete cause, then open the device on RADIUS access.",
+            "Read **Policy sets by device** when the device authenticates but "
+            "lands somewhere unexpected — that is an ISE device-group problem, "
+            "not a switch one.",
             "Before closing, check **Silent and stale devices** — silence "
             "produces no errors and appears nowhere else.",
         ],
@@ -3701,7 +3877,9 @@ def nad_dashboard():
             ("Device fleet", fleet),
             ("Which device is broken", failing),
             ("Over time", over_time),
+            ("Authorization", authorization),
             ("Silence", silence),
+            ("Authorization failures", authorization_failures, COLLAPSED),
             ("The estate", estate, COLLAPSED),
             ("Device administration", administration, COLLAPSED),
             ("Reference", closing, COLLAPSED),

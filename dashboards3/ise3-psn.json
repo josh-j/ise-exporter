@@ -1265,7 +1265,8 @@
                     "Time",
                     "__name__",
                     "job",
-                    "instance"
+                    "instance",
+                    "provider"
                   ]
                 }
               }
@@ -1408,7 +1409,8 @@
                     "Time",
                     "__name__",
                     "job",
-                    "instance"
+                    "instance",
+                    "provider"
                   ]
                 }
               }
